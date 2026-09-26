@@ -283,10 +283,11 @@ class TestPracticeMoney:
     def test_a_nonsense_amount_is_asked_again(self, data) -> None:
         _, script = run(
             data,
-            answers=["1", "1", "", "lots", "0", "", "y"],
+            answers=["1", "1", "", "lots", "0", "0.4", "", "y"],
             secrets=[KEY, PASSWORD, PASSWORD, ""],
         )
-        assert sum("Please type an amount" in line for line in script.shown) == 2
+        # 0.4 was accepted once and summarised as "$0 of play money" (2026-09-26).
+        assert sum("Please type an amount" in line for line in script.shown) == 3
 
 
 class TestTicker:
@@ -323,3 +324,118 @@ class TestTicker:
         )
         assert any("change the ticker by hand" in line for line in script.shown)
         assert _load_settings(data).asset.primary_ticker == "SPY"
+
+
+class TestARerunKeepsYourChoices:
+    """Found 2026-09-26 by a first-time-user walkthrough: a re-run always
+    started from Easy + Gemini, so pressing Enter throughout replaced a detailed
+    setup's models with Gemini's, and asked someone on Claude for a Gemini key."""
+
+    def test_easy_claude_stays_claude(self, data) -> None:
+        run(data, answers=["1", "2", "", "", "y"], secrets=["sk-ant-x", PASSWORD, PASSWORD, ""])
+        before = (data / "settings.yaml").read_text()
+        # Enter at every question: mode, provider, ticker; then save.
+        _, script = run(data, answers=["", "", "", "y"], secrets=["", "", ""])
+        assert (data / "settings.yaml").read_text() == before
+        assert not any("Google Gemini key" in line for line in script.shown)
+
+    def test_a_detailed_setup_stays_as_it_was(self, data) -> None:
+        answers = [
+            *("2", "1", "", "", "anthropic/claude-opus-5", "", "", "openai/gpt-5"),
+            *("9090", "", "", "y"),  # port, ticker, play money, save
+        ]
+        run(data, answers=answers, secrets=[KEY, "sk-ant-x", "sk-x", PASSWORD, PASSWORD, ""])
+        before = (data / "settings.yaml").read_text()
+        # Enter at mode, provider, six models, port and ticker; then save.
+        _, script = run(data, answers=[""] * 10 + ["y"], secrets=[""] * 5)
+        assert (data / "settings.yaml").read_text() == before
+        assert any("Console port [9090]" in line for line in script.shown)
+
+    def test_the_main_provider_is_the_default_model(self, data) -> None:
+        """Four agents typed onto OpenAI no longer make OpenAI the default."""
+        answers = ["2", "2", *["openai/gpt-5-mini"] * 4, "", "", "", "", "", "y"]
+        run(data, answers=answers, secrets=["sk-x", "sk-ant-x", PASSWORD, PASSWORD, ""])
+        assert models(data)["default"] == "anthropic/claude-sonnet-5"
+        assert models(data)["orchestrator"] == "openai/gpt-5-mini"
+
+
+class TestModelNames:
+    def test_a_bare_name_that_is_not_gemini_is_queried(self, data) -> None:
+        """Found 2026-09-26: "gpt-5" without "openai/" was taken as a Gemini model."""
+        answers = [
+            *("2", "1", "gpt-5", "n", "openai/gpt-5"),  # typed, queried, retyped
+            *("", "", "", "", ""),  # the other five agents
+            *("", "", "", "y"),  # port, ticker, play money, save
+        ]
+        _, script = run(data, answers=answers, secrets=["sk-x", KEY, PASSWORD, PASSWORD, ""])
+        assert any("Did you mean “openai/gpt-5”?" in line for line in script.shown)
+        assert models(data)["orchestrator"] == "openai/gpt-5"
+
+
+def _quit(_prompt: str) -> str:
+    raise KeyboardInterrupt
+
+
+class TestQuitting:
+    """Found 2026-09-26: quitting setup said "Nothing was saved" but left the new
+    data folder behind, and the app then started from it with no console
+    password and no AI key."""
+
+    def test_the_folder_it_made_is_taken_away(self, tmp_path, monkeypatch, capfd) -> None:
+        monkeypatch.setattr("builtins.input", _quit)
+        folder = tmp_path / "new-data"
+        assert onboarding.main(["--data-dir", str(folder)]) == 1
+        assert not folder.exists()
+        shown = capfd.readouterr().out
+        assert f"Data folder: {folder}" in shown, "--data-dir is honoured"
+        assert "Nothing was saved" in shown
+        assert "+ created" not in shown, "one line, not a line per starter file"
+
+    def test_what_was_already_there_stays(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("builtins.input", _quit)
+        folder = tmp_path / "data"
+        folder.mkdir()
+        (folder / ".env").write_text("GEMINI_API_KEY=mine\n")
+        assert onboarding.main(["--data-dir", str(folder)]) == 1
+        assert [p.name for p in folder.iterdir()] == [".env"]
+        assert (folder / ".env").read_text() == "GEMINI_API_KEY=mine\n"
+
+
+def test_the_next_steps_name_a_data_folder_of_your_own(tmp_path) -> None:
+    shown: list[str] = []
+    plan = onboarding.Plan(how="easy mode", models={}, port=9090)
+    onboarding.next_steps(plan, shown.append, tmp_path / "mine")
+    assert f'./run.sh --data-dir "{tmp_path / "mine"}"' in shown[0]
+    assert "http://127.0.0.1:9090" in shown[0]
+
+
+class TestMissingKeys:
+    """The start-up warning's source: a key the agents' models need but nobody set."""
+
+    @pytest.fixture(autouse=True)
+    def _no_keys(self, monkeypatch) -> None:
+        for p in onboarding.PROVIDERS.values():
+            for name in (p.env_var, *p.other_env_vars):
+                monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+
+    def test_every_agent_needs_the_gemini_key(self, data) -> None:
+        missing = onboarding.missing_keys(_load_settings(data))
+        assert list(missing) == [onboarding.PROVIDERS["gemini"]]
+        assert len(missing[onboarding.PROVIDERS["gemini"]]) == len(onboarding.AGENTS)
+
+    def test_either_name_of_the_gemini_key_will_do(self, data, monkeypatch) -> None:
+        monkeypatch.setenv("GOOGLE_API_KEY", "set")
+        assert onboarding.missing_keys(_load_settings(data)) == {}
+
+    def test_agents_on_a_claude_subscription_need_no_key(self, data) -> None:
+        text = (data / "settings.yaml").read_text()
+        text = text.replace('default: "gemini-3.7-flash"', 'default: "anthropic/claude-sonnet-5"')
+        text = onboarding.replace_block(
+            text, "agent_runtime", onboarding.agent_runtime_block(use_subscription=True)
+        )
+        (data / "settings.yaml").write_text(text)
+        missing = onboarding.missing_keys(_load_settings(data))
+        agents = missing[onboarding.PROVIDERS["anthropic"]]
+        assert "strategy_agent" not in agents and "evolution_agent" not in agents
+        assert "orchestrator" in agents

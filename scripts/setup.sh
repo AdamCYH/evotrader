@@ -8,9 +8,29 @@
 # questions keep every answer you don't change.
 #
 #   scripts/setup.sh                     data folder: ./data
+#   scripts/setup.sh --data-dir ~/my-data
 #   EVOTRADER_DATA_DIR=~/my-data scripts/setup.sh
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# A data folder you name is relative to where you are, not to the project:
+# make it absolute before moving there.
+CALLER_DIR="$(pwd)"
+absolute() { case "$1" in /*|"~"*) printf '%s' "$1" ;; *) printf '%s/%s' "$CALLER_DIR" "$1" ;; esac; }
+if [ -n "${EVOTRADER_DATA_DIR:-}" ]; then
+    EVOTRADER_DATA_DIR="$(absolute "$EVOTRADER_DATA_DIR")"
+    export EVOTRADER_DATA_DIR
+fi
+ARGS=()
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "--data-dir" ]; then arg="$(absolute "$arg")"; fi
+    case "$arg" in --data-dir=*) arg="--data-dir=$(absolute "${arg#--data-dir=}")" ;; esac
+    ARGS+=("$arg")
+    prev="$arg"
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
 cd "$(dirname "$0")/.."
 
 say() { printf '%s\n' "$*"; }
@@ -42,4 +62,4 @@ if command -v claude >/dev/null 2>&1; then
 fi
 
 say ""
-exec uv run python -m evotrader.onboarding
+exec uv run python -m evotrader.onboarding "$@"

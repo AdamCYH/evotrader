@@ -20,6 +20,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import shutil
 import sys
 from pathlib import Path
@@ -180,12 +182,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Data folder to fill. Default: EVOTRADER_DATA_DIR if set, else data/ in the project.",
     )
     parser.add_argument("--data-dir", help="The same as FOLDER, as the app's own flag spells it.")
+    parser.add_argument(
+        "--quiet", action="store_true", help="Print only problems (setup uses this)."
+    )
     args = parser.parse_args(argv)
 
     if args.folder and args.data_dir and Path(args.folder) != Path(args.data_dir):
         parser.error("give the data folder once: either FOLDER or --data-dir")
     chosen = args.folder or args.data_dir
     target = Path(chosen).expanduser().resolve() if chosen else paths.data_dir(root=PROJECT_ROOT)
+    if args.quiet:  # problems go to stderr, so they still show
+        with contextlib.redirect_stdout(io.StringIO()):
+            return init_data(target)
     return init_data(target)
 
 

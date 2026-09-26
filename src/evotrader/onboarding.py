@@ -130,19 +130,71 @@ def provider_of(model: str) -> Provider | None:
     return PROVIDERS.get(model.split("/", 1)[0] if "/" in model else "gemini")
 
 
+def missing_keys(settings: object) -> dict[Provider, list[str]]:
+    """Providers the agents' models need but whose key is not set, with those agents.
+
+    Agents on a Claude subscription runtime need no key, and Gemini through
+    Vertex AI (GOOGLE_GENAI_USE_VERTEXAI) uses cloud credentials instead of one.
+    """
+    from evotrader.models.config import AgentRuntimeKind
+
+    vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true")
+    missing: dict[Provider, list[str]] = {}
+    for agent in AGENTS:
+        kind, _ = settings.runtime_for(agent.removesuffix("_agent"))  # type: ignore[attr-defined]
+        model = settings.active_model.for_agent(agent)  # type: ignore[attr-defined]
+        provider = provider_of(model) if model else None
+        if kind != AgentRuntimeKind.API or provider is None:
+            continue
+        if provider.key == "gemini" and vertex:
+            continue
+        if not any(os.environ.get(name) for name in (provider.env_var, *provider.other_env_vars)):
+            missing.setdefault(provider, []).append(agent)
+    return missing
+
+
 # ── Editing settings.yaml ────────────────────────────────────────────
 
 
-def model_block(models: dict[str, str], how: str) -> str:
+def current_models(settings_text: str) -> dict[str, str]:
+    """Each agent's model as the settings name it now (the live block), for the agents setup asks about."""
+    import yaml
+
+    block = (yaml.safe_load(settings_text) or {}).get("model") or {}
+    live = block.get("live", block) if isinstance(block, dict) else {}
+    if not isinstance(live, dict):
+        return {}
+    models = {agent: live.get(agent) or live.get("default") for agent in AGENTS}
+    return {agent: str(model) for agent, model in models.items() if model}
+
+
+def current_default_model(settings_text: str) -> str | None:
+    """The model the settings give any agent without its own (the live block's ``default``)."""
+    import yaml
+
+    block = (yaml.safe_load(settings_text) or {}).get("model") or {}
+    live = block.get("live", block) if isinstance(block, dict) else {}
+    default = live.get("default") if isinstance(live, dict) else None
+    return str(default) if default else None
+
+
+def easy_provider(models: dict[str, str]) -> Provider | None:
+    """The provider whose easy-mode picks these models are, if they are exactly that."""
+    return next((p for p in PROVIDERS.values() if models == models_for(p)), None)
+
+
+def model_block(models: dict[str, str], how: str, default: str | None = None) -> str:
     """The top-level ``model:`` block: the same choice for live and practice mode.
 
-    The most common model becomes ``default``; agents that differ get their own
-    line, the rest stay null (which means "use default").
+    ``default`` (the most common model when not given) is what any agent not
+    listed uses; agents that differ get their own line, the rest stay null
+    (which means "use default").
     """
-    counts: dict[str, int] = {}
-    for model in models.values():
-        counts[model] = counts.get(model, 0) + 1
-    default = max(counts, key=lambda m: (counts[m], m == next(iter(models.values()))))
+    if default is None:
+        counts: dict[str, int] = {}
+        for model in models.values():
+            counts[model] = counts.get(model, 0) + 1
+        default = max(counts, key=lambda m: (counts[m], m == next(iter(models.values()))))
     lines = [
         "model:",
         f"  # Written by `./run.sh setup` ({how}). null = use `default`.",
@@ -330,6 +382,7 @@ class Plan:
 
     how: str
     models: dict[str, str]
+    default_model: str | None = None  # None: the most common of ``models``
     env: dict[str, str] = field(default_factory=dict)
     # None: not asked, or the answer matches what is saved — leave that part of
     # settings.yaml alone, so a re-run never undoes a hand-made runtime setup.
@@ -350,6 +403,18 @@ class Setup:
         self.ask_secret = ask_secret
         self.say = say
         self.saved = saved_values(data_dir)
+
+    @property
+    def first_time(self) -> bool:
+        """Nothing saved yet: no AI key and no console password."""
+        names = {CONSOLE_PASSWORD}
+        for p in PROVIDERS.values():
+            names.update((p.env_var, *p.other_env_vars))
+        return not names & self.saved.keys()
+
+    def saved_port(self) -> int:
+        port = str(self.saved.get(PORT, DEFAULT_PORT))
+        return int(port) if port.isdigit() else DEFAULT_PORT
 
     # small helpers
 
@@ -481,7 +546,7 @@ class Setup:
                 amount = float(answer)
             except ValueError:
                 amount = -1.0
-            if 0 < amount <= MAX_PRACTICE_CASH:
+            if 1 <= amount <= MAX_PRACTICE_CASH:
                 return amount
             self.say(f"  Please type an amount between $1 and ${MAX_PRACTICE_CASH:,.0f}.")
 
@@ -504,27 +569,76 @@ class Setup:
 
     # the two paths
 
-    def easy(self, settings_text: str) -> Plan:
-        provider = self.pick_provider("\nWhich AI provider should the agents use?")
-        plan = Plan(how=f"easy mode, {provider.label}", models=models_for(provider))
+    def easy(self, settings_text: str, provider_now: Provider | None) -> Plan:
+        provider = self.pick_provider(
+            "\nWhich AI provider should the agents use?",
+            default=(provider_now or PROVIDERS["gemini"]).key,
+        )
+        plan = Plan(
+            how=f"easy mode, {provider.label}",
+            models=models_for(provider),
+            default_model=provider.standard,
+            port=self.saved_port(),
+        )
         if key := self.provider_key(provider):
             plan.env.update(dict.fromkeys(self.key_names(provider), key))
         if provider.key == "anthropic":
             plan.use_subscription = self.subscription(settings_text)
         return plan
 
+    def model_for(self, agent: str, what: str, suggested: str) -> str:
+        """One agent's model. A bare name goes to Gemini, so one that isn't Gemini's is queried."""
+        self.say(f"\n{agent} — {what}")
+        while True:
+            answer = self.ask(f"Model [{suggested}]: ").strip()
+            if not answer:
+                return suggested
+            if "/" in answer or answer.startswith(("gemini", "gemma")):
+                return answer
+            prefix = (
+                "openai/"
+                if answer.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
+                else "anthropic/"
+                if answer.startswith("claude")
+                else ""
+            )
+            self.say(
+                f"  “{answer}” has no provider in front, so it would go to Google Gemini."
+                + (
+                    f" Did you mean “{prefix}{answer}”?"
+                    if prefix
+                    else ' Other providers\' models start with the provider, like "anthropic/…".'
+                )
+            )
+            if self.yes("  Use it as a Gemini model anyway?", default=False):
+                return answer
+
     def detailed(self, settings_text: str) -> Plan:
-        main_provider = self.pick_provider("\nMain AI provider (the default for every agent):")
-        models: dict[str, str] = {}
-        for agent, (role, what) in AGENTS.items():
-            suggested = getattr(main_provider, role)
-            self.say(f"\n{agent} — {what}")
-            answer = self.ask(
-                f"Model [{suggested}] (Enter to accept, or type any model name, e.g."
-                ' "anthropic/claude-sonnet-5", "openai/gpt-5", "gemini-3.7-flash"): '
-            ).strip()
-            models[agent] = answer or suggested
-        plan = Plan(how="detailed mode", models=models)
+        # A re-run suggests today's models while the main provider stays the same,
+        # so pressing Enter throughout changes nothing.
+        now = {} if self.first_time else current_models(settings_text)
+        now_default = current_default_model(settings_text) if now else None
+        now_main = provider_of(now_default) if now_default else None
+        main_provider = self.pick_provider(
+            "\nMain AI provider (the default for every agent):",
+            default=(now_main or PROVIDERS["gemini"]).key,
+        )
+        keep = main_provider is now_main
+        self.say(
+            "\nFor each agent, press Enter to keep the suggestion, or type a model name:"
+            ' "anthropic/…" or "openai/…", or a Gemini name such as "gemini-3.7-flash".'
+        )
+        models = {
+            agent: self.model_for(
+                agent, what, now[agent] if keep and agent in now else getattr(main_provider, role)
+            )
+            for agent, (role, what) in AGENTS.items()
+        }
+        plan = Plan(
+            how="detailed mode",
+            models=models,
+            default_model=now_default if keep else main_provider.standard,
+        )
         needed: dict[str, Provider] = {}
         for model in models.values():
             provider = provider_of(model)
@@ -539,28 +653,32 @@ class Setup:
             if key := self.provider_key(provider):
                 plan.env.update(dict.fromkeys(self.key_names(provider), key))
         plan.use_subscription = self.subscription(settings_text)
-        port = self.ask(f"\nConsole port [{self.saved.get(PORT, DEFAULT_PORT)}]: ").strip()
+        plan.port = self.saved_port()
+        port = self.ask(f"\nConsole port [{plan.port}]: ").strip()
         if port:
             if not port.isdigit() or not 1024 <= int(port) <= 65535:
                 self.say("  Not a usable port (1024-65535); keeping the current one.")
             else:
                 plan.port = int(port)
                 plan.env[PORT] = port
-        else:
-            plan.port = int(self.saved.get(PORT, DEFAULT_PORT))
         return plan
 
     def run(self) -> Plan | None:
         settings_path = self.data_dir / "settings.yaml"
         settings_text = settings_path.read_text(encoding="utf-8")
+        # A re-run starts from how things are set up now: models that are one
+        # provider's easy-mode picks mean easy mode, anything else detailed.
+        now = {} if self.first_time else current_models(settings_text)
+        provider_now = easy_provider(now) if now else None
         mode = self.choose(
             "How much do you want to set up?",
             [
                 ("Easy", "one AI provider for every agent (recommended)"),
                 ("Detailed", "choose per agent, plus a Claude subscription, port and more"),
             ],
+            default=2 if now and provider_now is None else 1,
         )
-        plan = self.easy(settings_text) if mode == 1 else self.detailed(settings_text)
+        plan = self.easy(settings_text, provider_now) if mode == 1 else self.detailed(settings_text)
         plan.ticker = self.pick_ticker(settings_text)
         if password := self.console_password():
             plan.env[CONSOLE_PASSWORD] = password
@@ -644,7 +762,7 @@ def apply(plan: Plan, data_dir: Path) -> None:
     settings_path = data_dir / "settings.yaml"
     constitution_path = data_dir / "constitution.yaml"
     text = settings_path.read_text(encoding="utf-8")
-    text = replace_block(text, "model", model_block(plan.models, plan.how))
+    text = replace_block(text, "model", model_block(plan.models, plan.how, plan.default_model))
     if plan.use_subscription is not None:
         text = replace_block(text, "agent_runtime", agent_runtime_block(plan.use_subscription))
     constitution = None
@@ -673,22 +791,50 @@ def apply(plan: Plan, data_dir: Path) -> None:
         asyncio.run(deposit_practice_cash(data_dir, plan.practice_cash))
 
 
-def ensure_data_folder(data_dir: Path, say: Callable[[str], None]) -> None:
-    """Create the data folder from the starter data the first time."""
+def ensure_data_folder(data_dir: Path, say: Callable[[str], None]) -> Callable[[], None]:
+    """Create the data folder from the starter data the first time.
+
+    Returns how to take away what it created, for a setup that ends without
+    saving: a half-made folder would start the app with no password and no key.
+    """
     if (data_dir / "settings.yaml").is_file():
-        return
-    say(f"Creating your data folder at {data_dir} …")
-    subprocess.run(
-        [sys.executable, str(paths.project_root() / "scripts" / "init_data.py")],
-        check=True,
-        env={**os.environ, paths.DATA_DIR_ENV: str(data_dir)},
-    )
+        return lambda: None
+    existed = data_dir.exists()
+    before = set(data_dir.iterdir()) if existed else set()
+
+    def undo() -> None:
+        created = set(data_dir.iterdir()) - before if existed else {data_dir}
+        for path in created:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+
+    say(f"Creating your data folder from the starter data: {data_dir}\n")
+    try:
+        subprocess.run(
+            [sys.executable, str(paths.project_root() / "scripts" / "init_data.py"), "--quiet"],
+            check=True,
+            env={**os.environ, paths.DATA_DIR_ENV: str(data_dir)},
+        )
+    except BaseException:
+        undo()
+        raise
+    return undo
 
 
-def next_steps(plan: Plan, say: Callable[[str], None]) -> None:
+def start_command(data_dir: Path) -> str:
+    """How to start the app on this data folder."""
+    if data_dir == paths.project_root() / "data":
+        return "./run.sh"
+    return f'./run.sh --data-dir "{data_dir}"'
+
+
+def next_steps(plan: Plan, say: Callable[[str], None], data_dir: Path | None = None) -> None:
+    start = start_command(data_dir) if data_dir else "./run.sh"
     say(
         "\nAll set. Next:\n"
-        "  1. Start it:          ./run.sh\n"
+        f"  1. Start it:          {start}\n"
         f"  2. Open the console:  http://127.0.0.1:{plan.port}  (it asks for the console password)\n"
         "  3. The first time it needs Robinhood, the console shows a link to Robinhood's\n"
         "     own sign-in page (the terminal prints it too). Sign in there; you're sent\n"
@@ -702,24 +848,45 @@ def next_steps(plan: Plan, say: Callable[[str], None]) -> None:
         say("Check Claude Code is ready:  uv run python scripts/setup_claude_code.py")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
     import getpass
+
+    parser = argparse.ArgumentParser(
+        prog="./run.sh setup",
+        description="Answer a few questions, then save the keys and settings to your data folder.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        help="Data folder to set up. Overrides EVOTRADER_DATA_DIR; default: data/ in the project.",
+    )
+    args = parser.parse_args(argv)
+    if args.data_dir:
+        os.environ[paths.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
 
     data_dir = paths.data_dir()
     print("EvoTrader setup\n─────────────────")
     print(f"Data folder: {data_dir}\n")
-    ensure_data_folder(data_dir, print)
-    setup = Setup(data_dir, ask=input, ask_secret=getpass.getpass, say=print)
     try:
-        plan = setup.run()
+        undo = ensure_data_folder(data_dir, print)
+    except subprocess.CalledProcessError:
+        print("\nThe data folder could not be made (see above). Nothing was saved.")
+        return 1
+    try:
+        plan = Setup(data_dir, ask=input, ask_secret=getpass.getpass, say=print).run()
+        if plan is None:
+            undo()
+            print("Nothing was saved.")
+            return 1
+        apply(plan, data_dir)
     except (KeyboardInterrupt, EOFError):
+        undo()
         print("\nStopped. Nothing was saved.")
         return 1
-    if plan is None:
-        print("Nothing was saved.")
-        return 1
-    apply(plan, data_dir)
-    next_steps(plan, print)
+    except BaseException:
+        undo()
+        raise
+    next_steps(plan, print, data_dir)
     return 0
 
 
