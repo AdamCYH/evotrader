@@ -8,6 +8,8 @@ These tests drive the real questions with scripted answers.
 
 from __future__ import annotations
 
+import io
+import re
 import stat
 import textwrap
 from pathlib import Path
@@ -662,3 +664,130 @@ def test_settings_it_cannot_read_stop_setup_plainly(tmp_path, monkeypatch, capsy
     assert onboarding.main(["--data-dir", str(folder)]) == 1
     shown = capsys.readouterr().out
     assert "can't be read, so nothing was saved" in shown and "Traceback" not in shown
+
+
+def _uncoloured(text: str) -> str:
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+class TestLooks:
+    """Owner's ask (2026-09-26): colour, and a setup that is easier to read."""
+
+    EASY = (["1", "1", "", "", "y"], [KEY, PASSWORD, PASSWORD, ""])
+
+    def test_plain_is_the_text_as_it_was(self) -> None:
+        plain = onboarding.PLAIN
+        assert plain.bold("x") == plain.title("x") == plain.bad("x") == "x"
+        long = "word " * 40
+        assert plain.wrap(long) == long, "no line breaks in a pipe or a log"
+
+    def test_colour_only_for_a_person_at_a_terminal(self, monkeypatch) -> None:
+        monkeypatch.setattr(onboarding.sys, "stdout", _Terminal())
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("TERM", "xterm-256color")
+        assert onboarding.terminal_style().enabled
+        monkeypatch.setenv("NO_COLOR", "1")
+        assert not onboarding.terminal_style().enabled, "https://no-color.org"
+        monkeypatch.delenv("NO_COLOR")
+        monkeypatch.setenv("TERM", "dumb")
+        assert not onboarding.terminal_style().enabled
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(onboarding.sys, "stdout", io.StringIO())  # a pipe or a log
+        assert not onboarding.terminal_style().enabled
+
+    def test_colour_changes_how_it_looks_never_what_it_says(self, data) -> None:
+        plain = Script(*self.EASY)
+        onboarding.Setup(data, plain.ask, plain.ask_secret, plain.say).run()
+        coloured = Script(*self.EASY)
+        style = onboarding.Style(enabled=True, width=10_000)  # no line breaks, to compare
+        onboarding.Setup(data, coloured.ask, coloured.ask_secret, coloured.say, style=style).run()
+        assert any("\033[" in text for text in coloured.shown)
+        assert [_uncoloured(text) for text in coloured.shown] == plain.shown
+
+    def test_the_next_steps_too(self) -> None:
+        plan = onboarding.Plan(how="easy mode", models={}, port=9090, use_subscription=True)
+        plain: list[str] = []
+        coloured: list[str] = []
+        onboarding.next_steps(plan, plain.append)
+        onboarding.next_steps(plan, coloured.append, onboarding.Style(enabled=True))
+        assert [_uncoloured(text) for text in coloured] == plain != coloured
+
+    def test_long_explanations_are_broken_at_the_terminal_width(self, data) -> None:
+        script = Script(*self.EASY)
+        style = onboarding.Style(enabled=True, width=60)
+        onboarding.Setup(data, script.ask, script.ask_secret, script.say, style=style).run()
+        tip = next(_uncoloured(text) for text in script.shown if "Tip:" in text)
+        lines = tip.strip("\n").split("\n")
+        assert len(lines) > 1 and all(line.startswith("  ") for line in lines)
+        # The command stays on one line, to copy; only it may go past the width.
+        command = onboarding.paths.run_command("setup")
+        assert any(command in line for line in lines)
+        assert all(len(line) <= 60 or line.strip() == command for line in lines)
+
+    def test_each_part_has_a_heading(self, data) -> None:
+        _, script = run(data, *self.EASY)
+        headings = [text.strip() for text in script.shown if text.strip().startswith("── ")]
+        titles = [heading.strip("─ ") for heading in headings]
+        assert titles == [
+            "AI provider",
+            "What to trade",
+            "Console password",
+            "Market data (optional)",
+            "Practice money",
+            "Summary",
+        ]
+
+
+class TestSubscriptionTip:
+    """Owner's ask (2026-09-26): many people run agents on a Claude subscription
+    to save API costs. Easy mode mentions it where the paid key is asked for,
+    without setting anything up."""
+
+    TIP = "If you have a Claude Pro or Max subscription"
+
+    def test_easy_mode_mentions_it_just_before_the_key(self, data) -> None:
+        _, script = run(
+            data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""]
+        )
+        tip = next(i for i, text in enumerate(script.shown) if self.TIP in text)
+        key = next(i for i, text in enumerate(script.shown) if text.startswith("Google Gemini key"))
+        assert tip < key
+        how = f"run {onboarding.paths.run_command('setup')} again and choose Detailed"
+        assert how in script.shown[tip]
+        assert _load_settings(data).agent_runtime == {}, "only a mention: nothing changes"
+
+    def test_whichever_provider_is_chosen(self, data) -> None:
+        _, script = run(
+            data, answers=["1", "2", "", "", "y"], secrets=["sk-ant-x", PASSWORD, PASSWORD, ""]
+        )
+        assert sum(self.TIP in text for text in script.shown) == 1
+
+    def test_not_when_setup_asks_about_it_instead(self, data, monkeypatch) -> None:
+        monkeypatch.setattr(onboarding.shutil, "which", lambda _name: "/usr/local/bin/claude")
+        _, script = run(
+            data, answers=["1", "2", "", "", "", "y"], secrets=["sk-ant-x", PASSWORD, PASSWORD, ""]
+        )
+        assert not any(self.TIP in text for text in script.shown)
+        assert any("Use your Claude subscription for them?" in text for text in script.shown)
+
+    def test_not_when_agents_already_run_on_it(self, data) -> None:
+        custom = 'agent_runtime:\n  evolution: "claude_code"\n'
+        text = onboarding.replace_block(
+            (data / "settings.yaml").read_text(), "agent_runtime", custom
+        )
+        (data / "settings.yaml").write_text(text)
+        _, script = run(
+            data, answers=["1", "1", "", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""]
+        )
+        assert not any(self.TIP in text for text in script.shown)
+
+    def test_detailed_mode_mentions_it_when_it_cannot_ask(self, data) -> None:
+        # detailed, Gemini, Enter for the six agents, the port, the ticker and the play money
+        answers = ["2", "1", *[""] * 9, "y"]
+        _, script = run(data, answers=answers, secrets=[KEY, PASSWORD, PASSWORD, ""])
+        assert sum(self.TIP in text for text in script.shown) == 1

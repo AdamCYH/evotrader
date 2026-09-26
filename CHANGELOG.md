@@ -40,6 +40,20 @@ Fixes from trying the first public version the way a newcomer would.
 - The out-of-sample check no longer fails when trade times and the split date
   differ in having a time zone (it raised an error on a run with no trades).
 
+### Setup
+
+- **Easier to read.** Each part of `./run.sh setup` has a heading, choices and
+  defaults stand out, a key that works gets a green tick, and long
+  explanations are broken at the terminal's width (a command stays on one
+  line, to copy). No colour in a pipe or a log, or when `NO_COLOR` is set.
+  `scripts/setup.sh` colours its checks too.
+- **The Claude subscription is mentioned where the API key is asked for.**
+  API keys are paid per use; the strategy and evolution agents, which cost
+  the most, can run on a Claude Pro or Max subscription instead. Easy mode now
+  says so and sets nothing up: to switch later, run `./run.sh setup` again and
+  choose Detailed. Detailed mode says the same when Claude Code isn't
+  installed (with it installed, it asks).
+
 ### Skills
 
 - All skills now live in `.agents/skills/`, the shared folder of the Agent

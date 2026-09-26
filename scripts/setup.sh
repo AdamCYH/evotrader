@@ -34,32 +34,46 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 
 cd "$(dirname "$0")/.."
 
-say() { printf '%s\n' "$*"; }
+# Colour for a person at a terminal; plain text in a pipe or a log, or with
+# NO_COLOR set (https://no-color.org).
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    BOLD=$'\033[1m' DIM=$'\033[2m' GREEN=$'\033[1;32m' RED=$'\033[31m' CYAN=$'\033[1;36m'
+    RESET=$'\033[0m'
+else
+    BOLD="" DIM="" GREEN="" RED="" CYAN="" RESET=""
+fi
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+fail() { printf '%s✗ %s%s\n' "$RED" "$*" "$RESET"; }
+busy() { printf '%s… %s%s\n' "$DIM" "$*" "$RESET"; }
+skip() { printf '%s· %s%s\n' "$DIM" "$*" "$RESET"; }
 
-say "EvoTrader — first-time setup"
+say "${CYAN}EvoTrader — first-time setup${RESET}"
 say ""
 
 # uv manages Python and the dependencies (and installs Python 3.12 if needed).
 if ! command -v uv >/dev/null 2>&1; then
-    say "✗ uv is not installed. It installs Python and everything else for you."
-    say "  Install it from https://docs.astral.sh/uv/getting-started/installation/"
+    fail "uv is not installed. It installs Python and everything else for you."
+    say "  Install it from ${BOLD}https://docs.astral.sh/uv/getting-started/installation/${RESET}"
     say "  then open a new terminal and run scripts/setup.sh again."
     exit 1
 fi
-say "✓ uv $(uv --version | awk '{print $2}')"
+ok "uv $(uv --version | awk '{print $2}')"
 
-say "… installing dependencies (the first time takes a minute or two)"
+busy "installing dependencies (the first time takes a minute or two)"
 uv sync --all-extras --quiet
-say "✓ dependencies installed"
+ok "dependencies installed"
 
 # Optional tools: say what they are for, never block on them.
 if command -v node >/dev/null 2>&1; then
-    say "✓ node — used by the JavaScript tests"
+    ok "node — used by the JavaScript tests"
 else
-    say "· node not found — optional, only the JavaScript tests need it"
+    skip "node not found — optional, only the JavaScript tests need it"
 fi
 if command -v claude >/dev/null 2>&1; then
-    say "✓ Claude Code — agents can run on a Claude subscription"
+    ok "Claude Code — agents can run on a Claude subscription"
+else
+    skip "Claude Code not found — optional, lets two agents run on a Claude subscription"
 fi
 
 say ""

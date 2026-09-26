@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -320,6 +321,11 @@ def replace_block(text: str, key: str, block: str) -> str:
     return "".join(lines[:start]) + block + "".join(lines[body_end:])
 
 
+def can_use_subscription(settings_text: str) -> bool:
+    """Claude Code is installed and the settings define its runtime, so setup can offer it."""
+    return bool(shutil.which("claude")) and has_runtime(settings_text, SUBSCRIPTION_RUNTIME)
+
+
 def subscribed_agents(settings_text: str) -> set[str]:
     """The agents running on a Claude Code runtime now, by their ``agent_runtime`` names."""
     import yaml
@@ -458,6 +464,85 @@ def saved_values(data_dir: Path) -> dict[str, str]:
     return values
 
 
+# ── How it looks ─────────────────────────────────────────────────────
+
+
+class Style:
+    """Colour and tidy line breaks for a person at a terminal.
+
+    Disabled, every message is the plain text it always was: for a pipe, a
+    log file and the tests.
+    """
+
+    def __init__(self, enabled: bool, width: int = 80) -> None:
+        self.enabled = enabled
+        self.width = width
+
+    def _paint(self, code: str, text: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if self.enabled and text else text
+
+    def bold(self, text: str) -> str:
+        return self._paint("1", text)
+
+    def dim(self, text: str) -> str:
+        return self._paint("2", text)
+
+    def title(self, text: str) -> str:
+        return self._paint("1;36", text)
+
+    def link(self, text: str) -> str:
+        return self._paint("4;36", text)
+
+    def good(self, text: str) -> str:
+        return self._paint("1;32", text)
+
+    def bad(self, text: str) -> str:
+        return self._paint("31", text)
+
+    def warn(self, text: str) -> str:
+        return self._paint("33", text)
+
+    def tip(self, text: str) -> str:
+        return self._paint("1;33", text)
+
+    def wrap(self, text: str, indent: str = "", whole: str = "") -> str:
+        """A paragraph broken at the terminal's width; plain, it stays one line.
+
+        ``whole`` (a command to copy) is never broken across lines.
+        """
+        if not self.enabled:
+            return indent + text
+        if whole:  # textwrap breaks only at ASCII spaces, not at no-break ones
+            text = text.replace(whole, whole.replace(" ", " "))
+        return textwrap.fill(
+            text,
+            width=self.width,
+            initial_indent=indent,
+            subsequent_indent=indent,
+            break_long_words=False,  # a web address stays whole
+            break_on_hyphens=False,
+        ).replace(" ", " ")
+
+
+PLAIN = Style(enabled=False)
+
+
+def terminal_style() -> Style:
+    """Colour for a terminal; none in a pipe, with NO_COLOR set (no-color.org) or TERM=dumb."""
+    enabled = (
+        sys.stdout.isatty()
+        and not os.environ.get("NO_COLOR")
+        and os.environ.get("TERM", "") != "dumb"
+    )
+    columns = shutil.get_terminal_size((80, 24)).columns
+    return Style(enabled, width=max(40, min(88, columns - 2)))
+
+
+def heading(style: Style, title: str) -> str:
+    """A rule that starts the next part of the conversation."""
+    return "\n" + style.title(f"── {title} " + "─" * max(3, 44 - len(title)))
+
+
 # ── The conversation ─────────────────────────────────────────────────
 
 
@@ -491,6 +576,7 @@ class Setup:
         ask_secret: Ask,
         say: Callable[[str], None],
         check_key: Callable[[Provider, str], bool | None] | None = None,
+        style: Style = PLAIN,
     ) -> None:
         self.data_dir = data_dir
         self.ask = ask
@@ -498,6 +584,7 @@ class Setup:
         self.say = say
         self.saved = saved_values(data_dir)
         self.check_key = check_key  # None: new keys are not checked (tests)
+        self.style = style
         self.subscribed_now: set[str] = set()  # agents on a Claude subscription runtime now
 
     @property
@@ -524,19 +611,48 @@ class Setup:
 
     # small helpers
 
+    def section(self, title: str) -> None:
+        self.say(heading(self.style, title))
+
+    def tell(self, text: str, whole: str = "") -> None:
+        """A paragraph of explanation, broken at the terminal's width."""
+        lead = "\n" if text.startswith("\n") else ""
+        self.say(lead + self.style.wrap(text.lstrip("\n"), whole=whole))
+
+    def subscription_tip(self) -> None:
+        """Before a key that is paid per use: a Claude subscription can carry the costliest agents.
+
+        Only a mention (owner's ask, 2026-09-26): many people use one to save
+        API costs, and it can be set up later.
+        """
+        command = paths.run_command("setup")
+        text = (
+            "Tip: API keys are paid per use. If you have a Claude Pro or Max"
+            " subscription, the two agents that cost the most (strategy and evolution)"
+            " can run on it instead, which saves most of that cost. Nothing to do now:"
+            f" when you want it, install Claude Code and log in, then run {command}"
+            " again and choose Detailed. Guide: docs/claude_code_evolution.md"
+        )
+        wrapped = self.style.wrap(text, indent="  ", whole=command)
+        self.say("\n" + wrapped.replace("Tip:", self.style.tip("Tip:"), 1))
+
     def choose(self, question: str, options: list[tuple[str, str]], default: int = 1) -> int:
-        self.say(question)
+        s = self.style
+        self.say(s.bold(question))
         for n, (label, note) in enumerate(options, 1):
-            self.say(f"  [{n}] {label}" + (f" — {note}" if note else ""))
+            self.say(
+                f"  {s.title(f'[{n}]')} {s.bold(label)}" + (s.dim(f" — {note}") if note else "")
+            )
         while True:
-            answer = self.ask(f"Choose 1-{len(options)} [{default}]: ").strip() or str(default)
+            answer = self.ask(f"Choose 1-{len(options)} {s.dim(f'[{default}]')}: ").strip()
+            answer = answer or str(default)
             if answer.isdigit() and 1 <= int(answer) <= len(options):
                 return int(answer)
-            self.say(f"Please type a number from 1 to {len(options)}.")
+            self.say(s.bad(f"Please type a number from 1 to {len(options)}."))
 
     def yes(self, question: str, default: bool = False) -> bool:
         hint = "Y/n" if default else "y/N"
-        answer = self.ask(f"{question} [{hint}]: ").strip().lower()
+        answer = self.ask(f"{question} {self.style.dim(f'[{hint}]')}: ").strip().lower()
         return default if not answer else answer in ("y", "yes")
 
     def secret(
@@ -552,27 +668,26 @@ class Setup:
 
         ``also`` names other variables the same secret works under.
         """
+        s = self.style
         if env_var in self.saved:
-            answer = self.ask_secret(f"{what} (saved — press Enter to keep it): ").strip()
-            return answer or None
+            answer = self.ask_secret(f"{what} {s.dim('(saved — press Enter to keep it)')}: ")
+            return answer.strip() or None
         # Exported in the shell: the app uses it (the shell wins over .env).
         exported = next((name for name in (env_var, *also) if os.environ.get(name)), None)
         if exported:
-            answer = self.ask_secret(
-                f"{what} (found in your environment as {exported} — press Enter to use it): "
-            ).strip()
+            hint = f"(found in your environment as {exported} — press Enter to use it)"
+            answer = self.ask_secret(f"{what} {s.dim(hint)}: ").strip()
             return answer or None
+        optional = "" if required else " " + s.dim("(optional — press Enter to skip)")
         while True:
-            answer = self.ask_secret(
-                f"{what}{'' if required else ' (optional — press Enter to skip)'}: "
-            ).strip()
+            answer = self.ask_secret(f"{what}{optional}: ").strip()
             if answer or not required:
                 if answer and check:
                     warning = check(answer)
                     if warning:
-                        self.say(f"  Note: {warning}")
+                        self.say(s.warn(f"  Note: {warning}"))
                 return answer or None
-            self.say("  This one is needed to continue.")
+            self.say(s.warn("  This one is needed to continue."))
 
     def pick_provider(self, question: str, default: str = "gemini") -> Provider:
         keys = list(PROVIDERS)
@@ -590,7 +705,9 @@ class Setup:
         return [name for name in names if name in self.saved] or [provider.env_var]
 
     def provider_key(self, provider: Provider) -> str | None:
-        self.say(f"\n{provider.label} API key — get one at {provider.key_url}")
+        s = self.style
+        label = s.bold(f"{provider.label} API key")
+        self.say(f"\n{label} — get one at {s.link(provider.key_url)}")
 
         def check(key: str) -> str:
             if provider.key_prefix and not key.startswith(provider.key_prefix):
@@ -607,27 +724,37 @@ class Setup:
                 return key
             # A mistyped key otherwise shows only at the first trading cycle,
             # after the broker sign-in.
-            self.say(f"  Checking the key with {provider.label} …")
+            self.say(s.dim(f"  Checking the key with {provider.label} …"))
             works = self.check_key(provider, key)
             if works:
-                self.say("  ✓ It works.")
+                self.say(s.good("  ✓ It works."))
                 return key
             if works is None:
                 self.say(
-                    "  Couldn't check it (no connection, or the service is busy). Saved anyway."
+                    s.warn(
+                        "  Couldn't check it (no connection, or the service is busy). Saved anyway."
+                    )
                 )
                 return key
-            self.say(f"  ✗ {provider.label} doesn't accept this key. Look for a missing character.")
+            self.say(
+                s.bad(
+                    f"  ✗ {provider.label} doesn't accept this key. Look for a missing character."
+                )
+            )
             if self.yes("  Save it anyway?", default=False):
                 return key
 
     def console_password(self) -> str | None:
-        self.say(
-            "\nPassword for the web console. The console can approve trades, so it always"
+        s = self.style
+        self.section("Console password")
+        self.tell(
+            "Password for the web console. The console can approve trades, so it always"
             f" has one. At least {MIN_PASSWORD_LENGTH} characters."
         )
         if CONSOLE_PASSWORD in self.saved:
-            answer = self.ask_secret("Console password (saved — press Enter to keep it): ")
+            answer = self.ask_secret(
+                f"Console password {s.dim('(saved — press Enter to keep it)')}: "
+            )
             if not answer:
                 return None
         else:
@@ -636,11 +763,11 @@ class Setup:
             if not answer:
                 answer = self.ask_secret("Console password: ")
             if len(answer) < MIN_PASSWORD_LENGTH:
-                self.say(f"  Too short — use at least {MIN_PASSWORD_LENGTH} characters.")
+                self.say(s.bad(f"  Too short — use at least {MIN_PASSWORD_LENGTH} characters."))
                 answer = ""
                 continue
             if self.ask_secret("Type it again: ") != answer:
-                self.say("  The two didn't match. Let's try again.")
+                self.say(s.bad("  The two didn't match. Let's try again."))
                 answer = ""
                 continue
             return answer
@@ -649,21 +776,26 @@ class Setup:
         """The ticker to trade, or None to keep the current one."""
         import yaml
 
+        s = self.style
         current = ((yaml.safe_load(settings_text) or {}).get("asset") or {}).get(
             "primary_ticker"
         ) or ""
-        self.say(
-            "\nWhich stock or ETF should it trade? It starts in practice mode with play"
-            " money, so you can change this any time by running ./run.sh setup again."
+        self.section("What to trade")
+        command = paths.run_command("setup")
+        self.tell(
+            "Which stock or ETF should it trade? It starts in practice mode with play"
+            f" money, so you can change this any time by running {command} again.",
+            whole=command,
         )
         while True:
-            answer = self.ask(f"Ticker [{current}]: " if current else "Ticker: ").strip().upper()
+            prompt = f"Ticker {s.dim(f'[{current}]')}: " if current else "Ticker: "
+            answer = self.ask(prompt).strip().upper()
             if answer == current or (not answer and current):
                 return None
             if not answer:
                 continue
             if not _TICKER.match(answer):
-                self.say("  That doesn't look like a ticker — letters, like SPY or AAPL.")
+                self.say(s.bad("  That doesn't look like a ticker — letters, like SPY or AAPL."))
                 continue
             constitution = self.data_dir / "constitution.yaml"
             if constitution.is_file() and retarget(
@@ -671,16 +803,21 @@ class Setup:
             ):
                 return answer
             self.say(
-                "  Your settings have been customised, so change the ticker by hand: see"
-                " README.md, “Changing what it trades”. Keeping " + current + "."
+                s.warn(
+                    "  Your settings have been customised, so change the ticker by hand: see"
+                    " README.md, “Changing what it trades”. Keeping " + current + "."
+                )
             )
             return None
 
     def practice_money(self) -> float:
-        self.say("\nPractice mode trades a simulated account with play money, and yours is empty.")
+        s = self.style
+        self.section("Practice money")
+        self.tell("Practice mode trades a simulated account with play money, and yours is empty.")
         while True:
             answer = self.ask(
-                f"How much play money should it start with? [${DEFAULT_PRACTICE_CASH:,.0f}]: "
+                "How much play money should it start with?"
+                f" {s.dim(f'[${DEFAULT_PRACTICE_CASH:,.0f}]')}: "
             )
             answer = answer.strip().replace("$", "").replace(",", "")
             if not answer:
@@ -691,7 +828,7 @@ class Setup:
                 amount = -1.0
             if 1 <= amount <= MAX_PRACTICE_CASH:
                 return amount
-            self.say(f"  Please type an amount between $1 and ${MAX_PRACTICE_CASH:,.0f}.")
+            self.say(s.bad(f"  Please type an amount between $1 and ${MAX_PRACTICE_CASH:,.0f}."))
 
     def subscription(self, settings_text: str) -> bool | None:
         """Whether to switch the strategy and evolution agents onto a Claude subscription.
@@ -699,24 +836,33 @@ class Setup:
         None when there is nothing to change: Claude Code is not installed, the
         runtime isn't defined, or the answer matches the current setup.
         """
-        if not shutil.which("claude") or not has_runtime(settings_text, SUBSCRIPTION_RUNTIME):
+        if not can_use_subscription(settings_text):
             return None
         current = subscription_in_use(settings_text)
-        self.say(
-            "\nClaude Code is installed. The strategy and evolution agents can run on your"
+        self.section("Claude subscription")
+        self.tell(
+            "Claude Code is installed. The strategy and evolution agents can run on your"
             " Claude subscription instead of paying per use (you need to be logged in to"
             " Claude Code)."
         )
-        wanted = self.yes("Use your Claude subscription for them?", default=current)
+        wanted = self.yes(
+            self.style.bold("Use your Claude subscription for them?"), default=current
+        )
         return None if wanted == current else wanted
 
     # the two paths
 
     def easy(self, settings_text: str, provider_now: Provider | None) -> Plan:
+        self.section("AI provider")
         provider = self.pick_provider(
-            "\nWhich AI provider should the agents use?",
+            "Which AI provider should the agents use?",
             default=(provider_now or PROVIDERS["gemini"]).key,
         )
+        # Next is a key paid per use. Mention the subscription, unless the question
+        # about it follows (Claude, with Claude Code installed) or it is in use.
+        offered = provider.key == "anthropic" and can_use_subscription(settings_text)
+        if not offered and not self.subscribed_now:
+            self.subscription_tip()
         plan = Plan(
             how=f"easy mode, {provider.label}",
             models=models_for(provider),
@@ -731,7 +877,7 @@ class Setup:
             # Otherwise the summary would list the new provider's models for
             # agents that in fact keep running on the subscription.
             names = " and ".join(sorted(self.subscribed_now))
-            self.say(
+            self.tell(
                 f"\nThe {names} agent{'s' if len(self.subscribed_now) > 1 else ''} run on your"
                 f" Claude subscription (Claude Code), not on {provider.label}."
             )
@@ -741,9 +887,10 @@ class Setup:
 
     def model_for(self, agent: str, what: str, suggested: str) -> str:
         """One agent's model. A bare name goes to Gemini, so one that isn't Gemini's is queried."""
-        self.say(f"\n{agent} — {what}")
+        s = self.style
+        self.say(f"\n{s.bold(agent)}{s.dim(f' — {what}')}")
         while True:
-            answer = self.ask(f"Model [{suggested}]: ").strip()
+            answer = self.ask(f"Model {s.dim(f'[{suggested}]')}: ").strip()
             if not answer:
                 return suggested
             if "/" in answer or answer.startswith(("gemini", "gemma")):
@@ -755,7 +902,9 @@ class Setup:
                 if answer.startswith("claude")
                 else ""
             )
-            self.say(f"  “{answer}” has no provider in front, so it would go to Google Gemini.")
+            self.say(
+                s.warn(f"  “{answer}” has no provider in front, so it would go to Google Gemini.")
+            )
             if prefix and self.yes(f"  Use “{prefix}{answer}” instead?", default=True):
                 return prefix + answer
             if not prefix:
@@ -764,17 +913,19 @@ class Setup:
                 return answer
 
     def detailed(self, settings_text: str) -> Plan:
+        s = self.style
         # A re-run suggests today's models while the main provider stays the same,
         # so pressing Enter throughout changes nothing.
         now = {} if self.first_time else current_models(settings_text)
         now_default = current_default_model(settings_text) if now else None
         now_main = provider_of(now_default) if now_default else None
+        self.section("AI models")
         main_provider = self.pick_provider(
-            "\nMain AI provider (the default for every agent):",
+            "Main AI provider (the default for every agent):",
             default=(now_main or PROVIDERS["gemini"]).key,
         )
         keep = main_provider is now_main
-        self.say(
+        self.tell(
             "\nFor each agent, press Enter to keep the suggestion, or type a model name:"
             ' "anthropic/…" or "openai/…", or a Gemini name such as "gemini-3.7-flash".'
         )
@@ -794,20 +945,30 @@ class Setup:
             provider = provider_of(model)
             if provider is None:
                 self.say(
-                    f"\n“{model}” is from a provider this script doesn't know. Add its API key"
-                    f" to {self.data_dir / '.env'} yourself (see the LiteLLM docs for the name)."
+                    s.warn(
+                        f"\n“{model}” is from a provider this script doesn't know. Add its API"
+                        f" key to {self.data_dir / '.env'} yourself (see the LiteLLM docs for"
+                        " the name)."
+                    )
                 )
             else:
                 needed.setdefault(provider.key, provider)
+        if needed:
+            self.section("API keys")
+            # The subscription question comes after the keys when Claude Code is
+            # installed; otherwise this is the only mention of it.
+            if not can_use_subscription(settings_text) and not self.subscribed_now:
+                self.subscription_tip()
         for provider in needed.values():
             if key := self.provider_key(provider):
                 plan.env.update(dict.fromkeys(self.key_names(provider), key))
         plan.use_subscription = self.subscription(settings_text)
         plan.port = self.saved_port()
-        port = self.ask(f"\nConsole port [{plan.port}]: ").strip()
+        self.section("Console port")
+        port = self.ask(f"Console port {s.dim(f'[{plan.port}]')}: ").strip()
         if port:
             if not port.isdigit() or not 1024 <= int(port) <= 65535:
-                self.say("  Not a usable port (1024-65535); keeping the current one.")
+                self.say(s.bad("  Not a usable port (1024-65535); keeping the current one."))
             else:
                 plan.port = int(port)
                 plan.env[PORT] = port
@@ -834,25 +995,37 @@ class Setup:
         )
         plan = self.easy(settings_text, provider_now) if mode == 1 else self.detailed(settings_text)
         if practice_models_differ(settings_text):
-            self.say("\nPractice mode has model choices of its own in settings.yaml (model: sim).")
+            self.tell("\nPractice mode has model choices of its own in settings.yaml (model: sim).")
             plan.keep_practice_models = not self.yes(
                 "Use these choices for practice mode too?", default=False
             )
         plan.ticker = self.pick_ticker(settings_text)
         if password := self.console_password():
             plan.env[CONSOLE_PASSWORD] = password
+        self.section("Market data (optional)")
+        url = "https://www.alphavantage.co/support/#api-key"
         self.say(
-            "\nAlpha Vantage adds news and market data — free key at https://www.alphavantage.co/support/#api-key"
+            self.style.wrap(f"Alpha Vantage adds news and market data — free key at {url}").replace(
+                url, self.style.link(url)
+            )
         )
         if market_key := self.secret(MARKET_DATA_KEY, "Alpha Vantage key", required=False):
             plan.env[MARKET_DATA_KEY] = market_key
         if practice_account_is_empty(self.data_dir):
             plan.practice_cash = self.practice_money()
         self.summarise(plan)
-        return plan if self.yes("\nSave these settings?", default=True) else None
+        return (
+            plan if self.yes("\n" + self.style.bold("Save these settings?"), default=True) else None
+        )
 
     def summarise(self, plan: Plan) -> None:
-        self.say("\nHere is what will be saved:")
+        s = self.style
+
+        def row(label: str, value: str) -> None:
+            self.say(f"  {s.dim(f'{label:<22}')} {value}")
+
+        self.section("Summary")
+        self.say("Here is what will be saved:")
         for agent, model in plan.models.items():
             short = agent.removesuffix("_agent")
             if plan.use_subscription and short in SUBSCRIPTION_AGENTS:
@@ -863,19 +1036,20 @@ class Setup:
                     if plan.use_subscription is False
                     else "your Claude subscription (Claude Code), as now"
                 )
-            self.say(f"  {agent:<22} {model}")
+            row(agent, model)
         if plan.keep_practice_models:
-            self.say(f"  {'practice mode':<22} keeps its own models (model: sim)")
+            row("practice mode", "keeps its own models (model: sim)")
         if plan.ticker:
-            self.say(f"  {'trades':<22} {plan.ticker} (allowed in constitution.yaml too)")
+            row("trades", f"{plan.ticker} (allowed in constitution.yaml too)")
         if plan.practice_cash:
-            self.say(f"  {'practice account':<22} ${plan.practice_cash:,.0f} of play money")
+            row("practice account", f"${plan.practice_cash:,.0f} of play money")
         for env_var in plan.env:
-            self.say(
-                f"  {env_var:<22} {'port ' + plan.env[env_var] if env_var == PORT else 'saved (hidden)'}"
-            )
+            row(env_var, "port " + plan.env[env_var] if env_var == PORT else "saved (hidden)")
         self.say(
-            f"  to {self.data_dir / '.env'} (only you can read it) and {self.data_dir / 'settings.yaml'}"
+            s.dim(
+                f"  to {self.data_dir / '.env'} (only you can read it)"
+                f" and {self.data_dir / 'settings.yaml'}"
+            )
         )
 
 
@@ -1001,23 +1175,29 @@ def project_command(command: str) -> str:
     return f"{move}{data}{command}"
 
 
-def next_steps(plan: Plan, say: Callable[[str], None]) -> None:
+def next_steps(plan: Plan, say: Callable[[str], None], style: Style = PLAIN) -> None:
+    s = style
+    console = s.link(f"http://127.0.0.1:{plan.port}")
     say(
-        "\nAll set. Next:\n"
-        f"  1. Start it:          {paths.run_command()}\n"
-        f"  2. Open the console:  http://127.0.0.1:{plan.port}  (it asks for the console password)\n"
-        "  3. The first time it needs Robinhood, the console shows a link to Robinhood's\n"
+        "\n"
+        + s.good("All set.")
+        + " Next:\n"
+        + f"  {s.bold('1.')} Start it:          {s.bold(paths.run_command())}\n"
+        + f"  {s.bold('2.')} Open the console:  {console}"
+        + f"  {s.dim('(it asks for the console password)')}\n"
+        + f"  {s.bold('3.')} The first time it needs Robinhood, the console shows a link to"
+        " Robinhood's\n"
         "     own sign-in page (the terminal prints it too). Sign in there; you're sent\n"
         "     back to the console. Agentic trading must be enabled on the account —\n"
         "     practice mode needs it too, because market prices come from Robinhood.\n"
         "It starts in practice mode with play money. See README.md for switching to\n"
-        f"live trading. To change these answers, including what it trades, run:\n"
-        f"  {paths.run_command('setup')}"
+        "live trading. To change these answers, including what it trades, run:\n"
+        f"  {s.bold(paths.run_command('setup'))}"
     )
     if plan.use_subscription:
         say(
             "Check Claude Code is ready:  "
-            + project_command("uv run python scripts/setup_claude_code.py")
+            + s.bold(project_command("uv run python scripts/setup_claude_code.py"))
         )
 
 
@@ -1041,29 +1221,31 @@ def main(argv: list[str] | None = None) -> int:
         os.environ[paths.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
 
     data_dir = paths.data_dir()
-    print("EvoTrader setup\n─────────────────")
-    print(f"Data folder: {data_dir}\n")
+    style = terminal_style()
+    print(style.title("EvoTrader setup") + "\n" + style.dim("─────────────────"))
+    print(f"{style.dim('Data folder:')} {data_dir}\n")
     try:
         undo = ensure_data_folder(data_dir, print)
     except subprocess.CalledProcessError:
-        print("\nThe data folder could not be made (see above). Nothing was saved.")
+        print(style.bad("\nThe data folder could not be made (see above). Nothing was saved."))
         return 1
     try:
-        setup = Setup(data_dir, input, getpass.getpass, print, check_key=key_works)
+        setup = Setup(data_dir, input, getpass.getpass, print, check_key=key_works, style=style)
         plan = setup.run()
         if plan is None:
             undo()
-            print("Nothing was saved.")
+            print(style.warn("Nothing was saved."))
             return 1
         apply(plan, data_dir)
     except (KeyboardInterrupt, EOFError):
         undo()
-        print("\nStopped. Nothing was saved.")
+        print(style.warn("\nStopped. Nothing was saved."))
         return 1
     except (yaml.YAMLError, ValidationError) as error:
         undo()
         print(
-            f"\nThe settings in {data_dir} can't be read, so nothing was saved:\n{error}\n\n"
+            style.bad(f"\nThe settings in {data_dir} can't be read, so nothing was saved:")
+            + f"\n{error}\n\n"
             "Fix the file named above and run setup again. (YAML: indentation and quotes"
             " matter.)"
         )
@@ -1071,7 +1253,7 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         undo()
         raise
-    next_steps(plan, print)
+    next_steps(plan, print, style)
     return 0
 
 
