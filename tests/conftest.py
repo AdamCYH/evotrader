@@ -63,6 +63,19 @@ def _signin_folder_is_temporary(tmp_path_factory: pytest.TempPathFactory) -> Ite
         yield folder
 
 
+@pytest.fixture(autouse=True)
+def _no_live_holdings_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never ask Yahoo Finance what a fund holds.
+
+    A test that runs the app's start-up made that request live: slow, flaky in
+    CI and failing offline. With no provider the universe falls back to the
+    ticker alone, as when the lookup fails; tests of the lookup set their own.
+    """
+    from evotrader.tools import universe
+
+    monkeypatch.setattr(universe, "_PROVIDERS", ())
+
+
 # ---------------------------------------------------------------------------
 # The data folder: every test gets its own copy of starter_data/
 # ---------------------------------------------------------------------------
