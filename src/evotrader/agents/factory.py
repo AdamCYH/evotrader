@@ -635,12 +635,17 @@ def _create_single_mcp_toolset(
 
                 api_keys_str = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
                 api_keys = [k.strip() for k in api_keys_str.split(",") if k.strip()]
-                if not api_keys:
+                if api_keys:
+                    logger.info(
+                        "Configuring Alpha Vantage key rotation factory with %d keys",
+                        len(api_keys),
+                    )
+                else:
                     api_keys = [""]
-                logger.info(
-                    "Configuring Alpha Vantage key rotation factory with %d keys",
-                    len(api_keys),
-                )
+                    logger.info(
+                        "No Alpha Vantage key: its news and market data tools will fail"
+                        " (free key: https://www.alphavantage.co/support/#api-key)"
+                    )
                 kwargs["httpx_client_factory"] = create_alpha_vantage_httpx_factory(api_keys)
 
             connection_params = StreamableHTTPConnectionParams(

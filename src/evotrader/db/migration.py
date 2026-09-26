@@ -60,7 +60,7 @@ async def apply_migrations(conn: aiosqlite.Connection) -> None:
 
     for file_path in pending:
         version = file_path.name
-        logger.info(f"Applying migration: {version}")
+        logger.debug(f"Applying migration: {version}")
 
         with open(file_path, encoding="utf-8") as f:
             sql_script = f.read()
@@ -81,7 +81,7 @@ async def apply_migrations(conn: aiosqlite.Connection) -> None:
 
             await conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
             await conn.commit()
-            logger.info(f"Successfully applied {version}")
+            logger.debug(f"Successfully applied {version}")
         except Exception as e:
             logger.error(f"Failed to apply migration {version}: {e}")
             await conn.rollback()
