@@ -21,7 +21,7 @@ flowchart TB
             risk["Risk-manager agent"]
             exec["Executor agent<br/>+ risk gate (code)"]
         end
-        evo["Evolution agent<br/>(weekly)"]
+        evo["Evolution agent<br/>(on schedule)"]
     end
 
     you --> console
@@ -71,7 +71,7 @@ Gemini are reached through LiteLLM).
 | strategy | Weighs the algorithm's signal, the news and the market snapshot; proposes a trade or a reasoned no-trade; writes the note for the next cycle | No — proposes only |
 | risk_manager | Checks each proposal against the constitution with a code tool | No |
 | executor | Turns an approved proposal into broker orders (named `execution` inside the cycle) | Yes, through the risk gate |
-| evolution | Weekly: studies results and code, writes proposals and reviews | No |
+| evolution | On `schedule.evolution_cron` (weekly by default): studies results and code, writes proposals and reviews | No |
 
 The strategy and evolution agents can also run on Claude Code, billed to a
 Claude subscription; the other agents always use the API
@@ -202,7 +202,7 @@ the strategy named an order but the risk or execution step never ran.
 ```text
 every cycle      ->  signal record: what each witness said, before they were combined
 after the market ->  forward returns filled in (1 and 5 trading days later)
-weekly           ->  evolution agent: reads cycles, scores and code; writes proposals
+on schedule      ->  evolution agent: reads cycles, scores and code; writes proposals
 you              ->  review in the console: activate, apply or reject
 self-evolve      ->  implement: failing test, fix, full tests, practice cycle
 ```
@@ -213,7 +213,7 @@ self-evolve      ->  implement: failing test, fix, full tests, practice cycle
   did, so the system can measure which witness actually predicts, and whether
   stated confidence matches the hit rate. *Code:* `db/signal_attribution.py`,
   `evolution/attribution_scorer.py`.
-- **The evolution run.** Weekly on `schedule.evolution_cron`, or on the
+- **The evolution run.** On `schedule.evolution_cron` (weekly by default), or on the
   **Evolve** button (you can add a question for it). The agent reads a digest
   of recent cycles, performance figures, the scored record and the source code,
   then writes:

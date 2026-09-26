@@ -2,9 +2,11 @@
 
 **A self-evolving AI agent that trades.**
 
-EvoTrader is a team of AI agents that trades one US stock or ETF through your
-own Robinhood account, inside hard limits the agents cannot change. Each week an
-evolution agent reviews what the traders did, checks which of their signals
+EvoTrader is a team of AI agents that trades a US stock or ETF you choose — and
+any others you permit, such as an inverse fund for a bearish view — through your
+own Robinhood account, inside hard limits the agents cannot change. On a schedule
+you set (weekly in the starter settings), an evolution agent reviews what the
+traders did, checks which of their signals
 turned out to be right, and writes proposals to improve the strategy and the
 code. You decide what gets built; changes land with tests; the loop runs again.
 
@@ -37,21 +39,22 @@ Created by Adam Chiu · ImmersiaLabs
 - **An AI that improves its own trading.** EvoTrader's bet is that AI agents
   can find a trading algorithm that works and keep recalibrating it as the
   market changes. Every decision is scored against what the price actually did;
-  every week an evolution agent studies that record and proposes better
+  on the schedule you set, an evolution agent studies that record and proposes better
   strategies and parameters; you approve what ships, and a coding agent builds
   it with tests. Then the loop runs again.
 - **Built to run safely while it learns.** Hard limits the agents cannot
   change, a risk check in code on every order, practice mode with play money by
   default, and your approval before anything trades real money.
-- **Early days (version 0.2.0, alpha).** It trades one instrument at a time,
-  during US market hours, through Robinhood only. Expect rough edges.
+- **Early days (version 0.2.0, alpha).** Its algorithm runs on one primary
+  instrument (plus any others you permit), during US market hours, through
+  Robinhood only. Expect rough edges.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A["Trading cycle<br/>agents decide, risk checks,<br/>order or no trade"] --> B["Signal record<br/>each signal's call, later scored<br/>against the real price move"]
-    B --> C["Weekly evolution<br/>proposals and code reviews"]
+    B --> C["Evolution run<br/>proposals and code reviews"]
     C --> D["You review<br/>in the web console"]
     D --> E["Self-evolve<br/>implement with tests,<br/>check on a practice cycle"]
     E --> A
@@ -69,7 +72,8 @@ flowchart LR
    records what each "witness" said: the algorithm, the news, and the strategy
    agent's own reasoning. Once the market has moved, the system scores each one
    against what the price actually did one and five trading days later.
-3. **Weekly evolution.** An evolution agent reads the recent cycles, the scored
+3. **Evolution run.** On the schedule you set (weekly by default), an evolution
+   agent reads the recent cycles, the scored
    record and the source code, then writes *strategy proposals* (new strategies,
    weight or parameter changes) and *code reviews* (bugs it found, with
    suggested fixes) into your data folder.
@@ -149,7 +153,7 @@ Now press **Trade** on the dashboard to run a cycle, and follow the agents'
 reasoning in **Run History**. The starter settings trade SPY, a fund that
 tracks the S&P 500 index. Scheduled runs start switched off: when you want
 cycles every hour of the trading day, turn on the **AUTO** switch next to
-**Trade** (and the one next to **Evolve** for the weekly review). Outside US
+**Trade** (and the one next to **Evolve** for the evolution run). Outside US
 market hours, `./run.sh --mock-time` lets you try a cycle as if it were a
 weekday morning.
 
@@ -286,7 +290,7 @@ AI usage is billed by your provider. Rough figures measured by the author:
   through the API it cost roughly **$0.40 per cycle**; at seven to nine cycles
   a trading day (the starter schedule runs seven), that is **about $3–4 a day**,
   or $60–80 a month.
-- The **weekly evolution run** cost **a few dollars** per run through the API,
+- The **evolution run** cost **a few dollars** per run through the API,
   with prompt caching on.
 - The other agents run on cheaper, faster models (Gemini Flash in the starter
   settings) and add comparatively little. Gemini is the lowest-cost provider
