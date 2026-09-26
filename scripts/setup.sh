@@ -16,6 +16,7 @@ set -euo pipefail
 # A data folder you name is relative to where you are, not to the project:
 # make it absolute before moving there.
 CALLER_DIR="$(pwd)"
+export EVOTRADER_CALLER_DIR="$CALLER_DIR"  # for advice that names run.sh
 absolute() { case "$1" in /*|"~"*) printf '%s' "$1" ;; *) printf '%s/%s' "$CALLER_DIR" "$1" ;; esac; }
 if [ -n "${EVOTRADER_DATA_DIR:-}" ]; then
     EVOTRADER_DATA_DIR="$(absolute "$EVOTRADER_DATA_DIR")"

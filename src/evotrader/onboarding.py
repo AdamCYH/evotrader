@@ -196,26 +196,58 @@ def key_works(provider: Provider, key: str, timeout: float = 10.0) -> bool | Non
 # ── Editing settings.yaml ────────────────────────────────────────────
 
 
-def current_models(settings_text: str) -> dict[str, str]:
-    """Each agent's model as the settings name it now (the live block), for the agents setup asks about."""
+def _models_of(settings_text: str, mode: str) -> dict:
+    """``model.<mode>`` (``model`` itself when it isn't split into live and sim)."""
     import yaml
 
     block = (yaml.safe_load(settings_text) or {}).get("model") or {}
-    live = block.get("live", block) if isinstance(block, dict) else {}
-    if not isinstance(live, dict):
-        return {}
-    models = {agent: live.get(agent) or live.get("default") for agent in AGENTS}
+    part = block.get(mode, block) if isinstance(block, dict) else {}
+    return part if isinstance(part, dict) else {}
+
+
+def current_models(settings_text: str, mode: str = "live") -> dict[str, str]:
+    """Each agent's model as the settings name it now, for the agents setup asks about."""
+    part = _models_of(settings_text, mode)
+    models = {agent: part.get(agent) or part.get("default") for agent in AGENTS}
     return {agent: str(model) for agent, model in models.items() if model}
 
 
-def current_default_model(settings_text: str) -> str | None:
-    """The model the settings give any agent without its own (the live block's ``default``)."""
-    import yaml
-
-    block = (yaml.safe_load(settings_text) or {}).get("model") or {}
-    live = block.get("live", block) if isinstance(block, dict) else {}
-    default = live.get("default") if isinstance(live, dict) else None
+def current_default_model(settings_text: str, mode: str = "live") -> str | None:
+    """The model the settings give any agent without its own (``default``)."""
+    default = _models_of(settings_text, mode).get("default")
     return str(default) if default else None
+
+
+def practice_models_differ(settings_text: str) -> bool:
+    """True when practice mode (``model.sim``) has model choices of its own."""
+    return any(
+        pick(settings_text, "sim") != pick(settings_text, "live")
+        for pick in (current_models, current_default_model)
+    )
+
+
+def written_by_setup(settings_text: str) -> bool:
+    """True once setup has written the model choices (the starter data's are not)."""
+    return "Written by `./run.sh setup`" in settings_text
+
+
+def mode_block_text(settings_text: str, mode: str) -> str | None:
+    """The lines of ``model.<mode>`` exactly as written, comments included."""
+    lines = settings_text.splitlines(keepends=True)
+    inside = False
+    for i, line in enumerate(lines):
+        if re.match(r"model:(\s|$)", line):
+            inside = True
+        elif inside and line.strip() and line[0] not in " \t":
+            return None  # the next top-level key: no such block
+        elif inside and re.match(rf"  {re.escape(mode)}:(\s|$)", line):
+            end = i + 1
+            while end < len(lines) and (not lines[end].strip() or lines[end].startswith("   ")):
+                end += 1
+            while end > i + 1 and not lines[end - 1].strip():
+                end -= 1
+            return "".join(lines[i:end])
+    return None
 
 
 def easy_provider(models: dict[str, str]) -> Provider | None:
@@ -223,12 +255,15 @@ def easy_provider(models: dict[str, str]) -> Provider | None:
     return next((p for p in PROVIDERS.values() if models == models_for(p)), None)
 
 
-def model_block(models: dict[str, str], how: str, default: str | None = None) -> str:
+def model_block(
+    models: dict[str, str], how: str, default: str | None = None, sim_text: str | None = None
+) -> str:
     """The top-level ``model:`` block: the same choice for live and practice mode.
 
     ``default`` (the most common model when not given) is what any agent not
     listed uses; agents that differ get their own line, the rest stay null
-    (which means "use default").
+    (which means "use default"). ``sim_text`` keeps practice mode's own block
+    as it was written instead.
     """
     if default is None:
         counts: dict[str, int] = {}
@@ -240,6 +275,9 @@ def model_block(models: dict[str, str], how: str, default: str | None = None) ->
         f"  # Written by `./run.sh setup` ({how}). null = use `default`.",
     ]
     for mode in ("live", "sim"):
+        if mode == "sim" and sim_text is not None:
+            lines.append(sim_text.rstrip("\n"))
+            continue
         lines.append(f"  {mode}:")
         lines.append(f'    default: "{default}"')
         for agent, model in models.items():
@@ -280,6 +318,16 @@ def replace_block(text: str, key: str, block: str) -> str:
     while body_end > start + 1 and not lines[body_end - 1].strip():
         body_end -= 1
     return "".join(lines[:start]) + block + "".join(lines[body_end:])
+
+
+def subscribed_agents(settings_text: str) -> set[str]:
+    """The agents running on a Claude Code runtime now, by their ``agent_runtime`` names."""
+    import yaml
+
+    runtimes = (yaml.safe_load(settings_text) or {}).get("agent_runtime") or {}
+    return {
+        str(agent) for agent, name in runtimes.items() if str(name).startswith(SUBSCRIPTION_RUNTIME)
+    }
 
 
 def subscription_in_use(settings_text: str) -> bool:
@@ -430,6 +478,7 @@ class Plan:
     port: int = DEFAULT_PORT
     ticker: str | None = None  # None: keep what the settings trade now
     practice_cash: float | None = None  # play money for an empty practice account
+    keep_practice_models: bool = False  # practice mode keeps its own hand-made models
 
 
 class Setup:
@@ -449,6 +498,7 @@ class Setup:
         self.say = say
         self.saved = saved_values(data_dir)
         self.check_key = check_key  # None: new keys are not checked (tests)
+        self.subscribed_now: set[str] = set()  # agents on a Claude subscription runtime now
 
     @property
     def first_time(self) -> bool:
@@ -457,6 +507,16 @@ class Setup:
         for p in PROVIDERS.values():
             names.update((p.env_var, *p.other_env_vars))
         return not names & self.saved.keys()
+
+    def provider_with_a_key(self) -> Provider | None:
+        """The one provider whose key is saved or exported, if there is exactly one."""
+        found = [
+            p
+            for p in PROVIDERS.values()
+            for name in (p.env_var, *p.other_env_vars)
+            if name in self.saved or os.environ.get(name)
+        ]
+        return found[0] if len(set(found)) == 1 else None
 
     def saved_port(self) -> int:
         port = str(self.saved.get(PORT, DEFAULT_PORT))
@@ -480,11 +540,27 @@ class Setup:
         return default if not answer else answer in ("y", "yes")
 
     def secret(
-        self, env_var: str, what: str, *, required: bool, check: Callable[[str], str] | None = None
+        self,
+        env_var: str,
+        what: str,
+        *,
+        required: bool,
+        check: Callable[[str], str] | None = None,
+        also: tuple[str, ...] = (),
     ) -> str | None:
-        """A secret, or None to keep the saved one / skip an optional one."""
+        """A secret, or None to keep the saved one, use one from the environment, or skip it.
+
+        ``also`` names other variables the same secret works under.
+        """
         if env_var in self.saved:
             answer = self.ask_secret(f"{what} (saved — press Enter to keep it): ").strip()
+            return answer or None
+        # Exported in the shell: the app uses it (the shell wins over .env).
+        exported = next((name for name in (env_var, *also) if os.environ.get(name)), None)
+        if exported:
+            answer = self.ask_secret(
+                f"{what} (found in your environment as {exported} — press Enter to use it): "
+            ).strip()
             return answer or None
         while True:
             answer = self.ask_secret(
@@ -522,8 +598,11 @@ class Setup:
             return ""
 
         name = self.key_names(provider)[0]
+        others = tuple(n for n in (provider.env_var, *provider.other_env_vars) if n != name)
         while True:
-            key = self.secret(name, f"{provider.label} key", required=True, check=check)
+            key = self.secret(
+                name, f"{provider.label} key", required=True, check=check, also=others
+            )
             if key is None or self.check_key is None:  # kept the saved key, or no checking
                 return key
             # A mistyped key otherwise shows only at the first trading cycle,
@@ -648,6 +727,16 @@ class Setup:
             plan.env.update(dict.fromkeys(self.key_names(provider), key))
         if provider.key == "anthropic":
             plan.use_subscription = self.subscription(settings_text)
+        elif self.subscribed_now:
+            # Otherwise the summary would list the new provider's models for
+            # agents that in fact keep running on the subscription.
+            names = " and ".join(sorted(self.subscribed_now))
+            self.say(
+                f"\nThe {names} agent{'s' if len(self.subscribed_now) > 1 else ''} run on your"
+                f" Claude subscription (Claude Code), not on {provider.label}."
+            )
+            if not self.yes("Keep them on your Claude subscription?", default=True):
+                plan.use_subscription = False
         return plan
 
     def model_for(self, agent: str, what: str, suggested: str) -> str:
@@ -666,14 +755,11 @@ class Setup:
                 if answer.startswith("claude")
                 else ""
             )
-            self.say(
-                f"  “{answer}” has no provider in front, so it would go to Google Gemini."
-                + (
-                    f" Did you mean “{prefix}{answer}”?"
-                    if prefix
-                    else ' Other providers\' models start with the provider, like "anthropic/…".'
-                )
-            )
+            self.say(f"  “{answer}” has no provider in front, so it would go to Google Gemini.")
+            if prefix and self.yes(f"  Use “{prefix}{answer}” instead?", default=True):
+                return prefix + answer
+            if not prefix:
+                self.say('  Other providers\' models start with the provider, like "anthropic/…".')
             if self.yes("  Use it as a Gemini model anyway?", default=False):
                 return answer
 
@@ -732,8 +818,12 @@ class Setup:
         settings_text = settings_path.read_text(encoding="utf-8")
         # A re-run starts from how things are set up now: models that are one
         # provider's easy-mode picks mean easy mode, anything else detailed.
-        now = {} if self.first_time else current_models(settings_text)
-        provider_now = easy_provider(now) if now else None
+        # Models setup never wrote (the starter data's) mean a first setup.
+        now = current_models(settings_text) if written_by_setup(settings_text) else {}
+        if self.first_time:
+            now = {}
+        provider_now = easy_provider(now) if now else self.provider_with_a_key()
+        self.subscribed_now = subscribed_agents(settings_text)
         mode = self.choose(
             "How much do you want to set up?",
             [
@@ -743,6 +833,11 @@ class Setup:
             default=2 if now and provider_now is None else 1,
         )
         plan = self.easy(settings_text, provider_now) if mode == 1 else self.detailed(settings_text)
+        if practice_models_differ(settings_text):
+            self.say("\nPractice mode has model choices of its own in settings.yaml (model: sim).")
+            plan.keep_practice_models = not self.yes(
+                "Use these choices for practice mode too?", default=False
+            )
         plan.ticker = self.pick_ticker(settings_text)
         if password := self.console_password():
             plan.env[CONSOLE_PASSWORD] = password
@@ -759,12 +854,18 @@ class Setup:
     def summarise(self, plan: Plan) -> None:
         self.say("\nHere is what will be saved:")
         for agent, model in plan.models.items():
-            runtime = (
-                " (switching to your Claude subscription)"
-                if plan.use_subscription and agent.removesuffix("_agent") in SUBSCRIPTION_AGENTS
-                else ""
-            )
-            self.say(f"  {agent:<22} {model}{runtime}")
+            short = agent.removesuffix("_agent")
+            if plan.use_subscription and short in SUBSCRIPTION_AGENTS:
+                model += " (switching to your Claude subscription)"
+            elif short in self.subscribed_now:
+                model = (
+                    f"{model} (moving off your Claude subscription)"
+                    if plan.use_subscription is False
+                    else "your Claude subscription (Claude Code), as now"
+                )
+            self.say(f"  {agent:<22} {model}")
+        if plan.keep_practice_models:
+            self.say(f"  {'practice mode':<22} keeps its own models (model: sim)")
         if plan.ticker:
             self.say(f"  {'trades':<22} {plan.ticker} (allowed in constitution.yaml too)")
         if plan.practice_cash:
@@ -826,7 +927,10 @@ def apply(plan: Plan, data_dir: Path) -> None:
     settings_path = data_dir / "settings.yaml"
     constitution_path = data_dir / "constitution.yaml"
     text = settings_path.read_text(encoding="utf-8")
-    text = replace_block(text, "model", model_block(plan.models, plan.how, plan.default_model))
+    sim_text = mode_block_text(text, "sim") if plan.keep_practice_models else None
+    text = replace_block(
+        text, "model", model_block(plan.models, plan.how, plan.default_model, sim_text)
+    )
     if plan.use_subscription is not None:
         text = replace_block(text, "agent_runtime", agent_runtime_block(plan.use_subscription))
     constitution = None
@@ -887,34 +991,42 @@ def ensure_data_folder(data_dir: Path, say: Callable[[str], None]) -> Callable[[
     return undo
 
 
-def start_command(data_dir: Path) -> str:
-    """How to start the app on this data folder."""
-    if data_dir == paths.project_root() / "data":
-        return "./run.sh"
-    return f'./run.sh --data-dir "{data_dir}"'
+def project_command(command: str) -> str:
+    """A command run in the project folder, on the data folder in use."""
+    root = paths.project_root()
+    folder = paths.data_dir(root)
+    data = f'EVOTRADER_DATA_DIR="{folder}" ' if folder != root / "data" else ""
+    caller = os.environ.get(paths.CALLER_DIR_ENV, "").strip()
+    move = f'cd "{root}" && ' if caller and Path(caller).resolve() != root.resolve() else ""
+    return f"{move}{data}{command}"
 
 
-def next_steps(plan: Plan, say: Callable[[str], None], data_dir: Path | None = None) -> None:
-    start = start_command(data_dir) if data_dir else "./run.sh"
+def next_steps(plan: Plan, say: Callable[[str], None]) -> None:
     say(
         "\nAll set. Next:\n"
-        f"  1. Start it:          {start}\n"
+        f"  1. Start it:          {paths.run_command()}\n"
         f"  2. Open the console:  http://127.0.0.1:{plan.port}  (it asks for the console password)\n"
         "  3. The first time it needs Robinhood, the console shows a link to Robinhood's\n"
         "     own sign-in page (the terminal prints it too). Sign in there; you're sent\n"
         "     back to the console. Agentic trading must be enabled on the account —\n"
         "     practice mode needs it too, because market prices come from Robinhood.\n"
         "It starts in practice mode with play money. See README.md for switching to\n"
-        "live trading. Run ./run.sh setup any time to change these answers, including\n"
-        "what it trades."
+        f"live trading. To change these answers, including what it trades, run:\n"
+        f"  {paths.run_command('setup')}"
     )
     if plan.use_subscription:
-        say("Check Claude Code is ready:  uv run python scripts/setup_claude_code.py")
+        say(
+            "Check Claude Code is ready:  "
+            + project_command("uv run python scripts/setup_claude_code.py")
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import getpass
+
+    import yaml
+    from pydantic import ValidationError
 
     parser = argparse.ArgumentParser(
         prog="./run.sh setup",
@@ -948,10 +1060,18 @@ def main(argv: list[str] | None = None) -> int:
         undo()
         print("\nStopped. Nothing was saved.")
         return 1
+    except (yaml.YAMLError, ValidationError) as error:
+        undo()
+        print(
+            f"\nThe settings in {data_dir} can't be read, so nothing was saved:\n{error}\n\n"
+            "Fix the file named above and run setup again. (YAML: indentation and quotes"
+            " matter.)"
+        )
+        return 1
     except BaseException:
         undo()
         raise
-    next_steps(plan, print, data_dir)
+    next_steps(plan, print)
     return 0
 
 

@@ -56,8 +56,12 @@ def data(tmp_path, monkeypatch) -> Path:
     folder = tmp_path / "data"
     folder.mkdir()
     (folder / "settings.yaml").write_text(SETTINGS)
-    # Keep the real project's .env out of "already saved" detection.
+    # Keep the real project's .env, and any key in the shell, out of "already saved".
     monkeypatch.setattr(onboarding.paths, "project_root", lambda: tmp_path)
+    for p in onboarding.PROVIDERS.values():
+        for name in (p.env_var, *p.other_env_vars):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv(onboarding.CONSOLE_PASSWORD, raising=False)
     monkeypatch.setattr(onboarding.shutil, "which", lambda _name: None)  # no Claude Code
     return folder
 
@@ -245,8 +249,29 @@ class TestDetailedMode:
             (data / "settings.yaml").read_text(), "agent_runtime", custom
         )
         (data / "settings.yaml").write_text(text)
-        run(data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""])
+        _, script = run(
+            data,
+            answers=["1", "1", "", "", "", "y"],  # ... keep it on the subscription: Enter
+            secrets=[KEY, PASSWORD, PASSWORD, ""],
+        )
         assert _load_settings(data).agent_runtime == {"evolution": "claude_code"}
+        # Found 2026-09-26: the summary listed a Gemini model for it regardless.
+        assert any(
+            "evolution_agent" in line and "Claude subscription (Claude Code), as now" in line
+            for line in script.shown
+        )
+
+    def test_easy_mode_can_move_agents_off_the_subscription(self, data) -> None:
+        custom = 'agent_runtime:\n  strategy: "claude_code"\n  evolution: "claude_code"\n'
+        text = onboarding.replace_block(
+            (data / "settings.yaml").read_text(), "agent_runtime", custom
+        )
+        (data / "settings.yaml").write_text(text)
+        _, script = run(
+            data, answers=["1", "1", "n", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""]
+        )
+        assert _load_settings(data).agent_runtime == {}
+        assert any("moving off your Claude subscription" in line for line in script.shown)
 
 
 class TestReplaceBlock:
@@ -363,13 +388,22 @@ class TestModelNames:
     def test_a_bare_name_that_is_not_gemini_is_queried(self, data) -> None:
         """Found 2026-09-26: "gpt-5" without "openai/" was taken as a Gemini model."""
         answers = [
-            *("2", "1", "gpt-5", "n", "openai/gpt-5"),  # typed, queried, retyped
+            *("2", "1", "gpt-5", ""),  # typed; "Use openai/gpt-5 instead?" Enter = yes
             *("", "", "", "", ""),  # the other five agents
             *("", "", "", "y"),  # port, ticker, play money, save
         ]
         _, script = run(data, answers=answers, secrets=["sk-x", KEY, PASSWORD, PASSWORD, ""])
-        assert any("Did you mean “openai/gpt-5”?" in line for line in script.shown)
+        assert any("Use “openai/gpt-5” instead?" in line for line in script.shown)
         assert models(data)["orchestrator"] == "openai/gpt-5"
+
+    def test_saying_no_twice_asks_for_the_name_again(self, data) -> None:
+        answers = [
+            *("2", "1", "claude-opus-5", "n", "n", "anthropic/claude-opus-5"),
+            *("", "", "", "", ""),
+            *("", "", "", "y"),
+        ]
+        run(data, answers=answers, secrets=["sk-ant-x", KEY, PASSWORD, PASSWORD, ""])
+        assert models(data)["orchestrator"] == "anthropic/claude-opus-5"
 
 
 def _quit(_prompt: str) -> str:
@@ -401,12 +435,25 @@ class TestQuitting:
         assert (folder / ".env").read_text() == "GEMINI_API_KEY=mine\n"
 
 
-def test_the_next_steps_name_a_data_folder_of_your_own(tmp_path) -> None:
+def test_the_next_steps_name_a_data_folder_of_your_own(tmp_path, monkeypatch) -> None:
+    """Found 2026-09-26: advice that drops --data-dir starts or sets up ./data instead."""
+    monkeypatch.setenv(onboarding.paths.DATA_DIR_ENV, str(tmp_path / "mine"))
+    monkeypatch.delenv(onboarding.paths.CALLER_DIR_ENV, raising=False)
     shown: list[str] = []
     plan = onboarding.Plan(how="easy mode", models={}, port=9090)
-    onboarding.next_steps(plan, shown.append, tmp_path / "mine")
+    onboarding.next_steps(plan, shown.append)
     assert f'./run.sh --data-dir "{tmp_path / "mine"}"' in shown[0]
+    assert f'./run.sh setup --data-dir "{tmp_path / "mine"}"' in shown[0]
     assert "http://127.0.0.1:9090" in shown[0]
+
+
+def test_advice_names_run_sh_from_where_you_typed(tmp_path, monkeypatch) -> None:
+    root = onboarding.paths.project_root()
+    monkeypatch.delenv(onboarding.paths.DATA_DIR_ENV, raising=False)
+    monkeypatch.setenv(onboarding.paths.CALLER_DIR_ENV, str(root.parent))
+    assert onboarding.paths.run_command("setup") == f"{root.name}/run.sh setup"
+    monkeypatch.setenv(onboarding.paths.CALLER_DIR_ENV, str(tmp_path))  # far away
+    assert onboarding.paths.run_command() == str(root / "run.sh")
 
 
 class TestMissingKeys:
@@ -563,3 +610,55 @@ class TestKeyWorks:
 
         answer(urllib.error.URLError("no route"))
         assert onboarding.key_works(onboarding.PROVIDERS["openai"], "k") is None
+
+
+class TestWhatIsAlreadyThere:
+    """Found 2026-09-26 by the second first-time-user walkthrough."""
+
+    def test_a_key_exported_in_the_shell_counts(self, data, monkeypatch) -> None:
+        monkeypatch.setenv("GOOGLE_API_KEY", "AIza-from-the-shell")
+        _, script = run(data, answers=["1", "1", "", "", "y"], secrets=["", PASSWORD, PASSWORD, ""])
+        assert any("found in your environment as GOOGLE_API_KEY" in line for line in script.shown)
+        env = dotenv_values(data / ".env")
+        assert "GEMINI_API_KEY" not in env and "GOOGLE_API_KEY" not in env, "used, not copied"
+
+    def test_a_hand_made_env_does_not_mean_detailed_mode(self, data) -> None:
+        """Only an Anthropic key saved by hand: Easy, with Anthropic, is the default."""
+        (data / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-mine\n")
+        run(data, answers=["", "", "", "", "y"], secrets=["", PASSWORD, PASSWORD, ""])
+        assert models(data)["default"] == onboarding.PROVIDERS["anthropic"].standard
+
+    def test_practice_mode_keeps_models_of_its_own(self, data) -> None:
+        run(data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""])
+        text = (data / "settings.yaml").read_text()
+        sim = onboarding.mode_block_text(text, "sim")
+        hand_made = sim.replace(
+            "    strategy_agent: ",
+            '    strategy_agent: "gemini-3.7-flash"  # cheaper here\n    # was: ',
+        )
+        (data / "settings.yaml").write_text(text.replace(sim, hand_made))
+        # Re-run, Enter throughout; "Use these choices for practice mode too?" Enter = no.
+        run(data, answers=["", "", "", "", "y"], secrets=["", "", ""])
+        assert onboarding.mode_block_text((data / "settings.yaml").read_text(), "sim") == hand_made
+        assert models(data, "sim")["strategy_agent"] == "gemini-3.7-flash"
+
+    def test_or_takes_the_new_ones_when_asked(self, data) -> None:
+        run(data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""])
+        text = (data / "settings.yaml").read_text()
+        sim = onboarding.mode_block_text(text, "sim")
+        (data / "settings.yaml").write_text(
+            text.replace(sim, sim.replace("default: ", 'default: "gemma-3"  # was: '))
+        )
+        run(data, answers=["", "", "y", "", "y"], secrets=["", "", ""])
+        assert models(data, "sim") == models(data, "live")
+
+
+def test_settings_it_cannot_read_stop_setup_plainly(tmp_path, monkeypatch, capsys) -> None:
+    """Found 2026-09-26: a broken settings.yaml gave setup a traceback."""
+    folder = tmp_path / "data"
+    folder.mkdir()
+    (folder / "settings.yaml").write_text("model: [unclosed\n")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+    assert onboarding.main(["--data-dir", str(folder)]) == 1
+    shown = capsys.readouterr().out
+    assert "can't be read, so nothing was saved" in shown and "Traceback" not in shown

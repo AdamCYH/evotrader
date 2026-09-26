@@ -53,3 +53,27 @@ def signin_dir() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return Path.home() / ".evotrader"
+
+
+# Set by run.sh and scripts/setup.sh: the folder the command was typed in.
+CALLER_DIR_ENV = "EVOTRADER_CALLER_DIR"
+
+
+def run_command(args: str = "") -> str:
+    """What to type for ``./run.sh ARGS`` on the data folder in use.
+
+    Names the data folder when it isn't the default (advice that drops it would
+    set up or start the wrong one), and gives the path to run.sh from where the
+    person typed the command, when that isn't the project folder.
+    """
+    root = project_root()
+    script = "./run.sh"
+    caller = os.environ.get(CALLER_DIR_ENV, "").strip()
+    if caller and Path(caller).resolve() != root.resolve():
+        relative = os.path.relpath(root / "run.sh", caller)
+        script = str(root / "run.sh") if relative.startswith("../..") else relative
+    command = f"{script} {args}".strip()
+    folder = data_dir(root)
+    if folder != root / "data":
+        command += f' --data-dir "{folder}"'
+    return command
