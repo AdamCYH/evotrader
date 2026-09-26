@@ -1,0 +1,78 @@
+# The sub-strategies the composite algorithm is built from.
+# The runtime loads each active entry from its module and class; its
+# parameters and weights come from the active version's config.yaml.
+# status: active | disabled | experimental — only `active` entries are loaded.
+
+strategies:
+  momentum:
+    module: evotrader.algorithms.strategies.momentum
+    class: MomentumStrategy
+    description: "Trend-following via EMA/SMA crossovers and MACD"
+    status: active
+    added_in: v001
+
+  mean_reversion:
+    module: evotrader.algorithms.strategies.mean_reversion
+    class: MeanReversionStrategy
+    description: "RSI/Bollinger/IBS/VWAP mean reversion"
+    status: active
+    added_in: v001
+
+  gap:
+    module: evotrader.algorithms.strategies.gap
+    class: GapStrategy
+    description: "Gap fade and opening range analysis"
+    status: active
+    added_in: v001
+
+  intraday_vwap_zscore:
+    module: evotrader.algorithms.strategies.intraday_vwap_zscore
+    class: IntradayVwapZscoreStrategy
+    description: "Intraday VWAP z-score reversion with staleness decay"
+    status: active
+    added_in: v001
+
+  event_window_timing:
+    module: evotrader.algorithms.strategies.event_window_timing
+    class: EventWindowTimingStrategy
+    description: "Event window gating and post-event amplification overlay"
+    status: active
+    added_in: v001
+
+  range_break_continuation:
+    module: evotrader.algorithms.strategies.range_break_continuation
+    class: RangeBreakContinuationStrategy
+    description: "Intraday Bollinger Band breakout/breakdown continuation with MACD + magnitude confirmation"
+    status: active
+    added_in: v001
+
+  options_positioning:
+    module: evotrader.algorithms.strategies.options_positioning
+    class: OptionsPositioningStrategy
+    description: "Contrarian/confirmation signal from options put/call positioning"
+    status: active
+    added_in: v001
+
+  swing_failure_reversal:
+    module: evotrader.algorithms.strategies.swing_failure_reversal
+    class: SwingFailureReversalStrategy
+    description: "Structural reversal detection: fires long after a flush holds a higher low and reclaims"
+    status: active
+    added_in: v001
+
+  trend_persistence:
+    module: evotrader.algorithms.strategies.trend_persistence
+    class: TrendPersistenceStrategy
+    description: "Multi-session directional grind detection via persistence, displacement and efficiency"
+    status: active
+    added_in: v001
+
+  vwap_reclaim_continuation:
+    module: evotrader.algorithms.strategies.vwap_reclaim_continuation
+    class: VwapReclaimContinuationStrategy
+    description: "Trend-aligned intraday VWAP pullback-and-reclaim continuation entry"
+    # Shadow mode: active, so it runs and its firings are recorded, but
+    # weighted 0 in every regime, so it does not vote. Promote it on its
+    # record of firings, not on a hunch.
+    status: active
+    added_in: v001

@@ -1,0 +1,55 @@
+name: hist_large_advance
+description: 'Real QQQ snapshot, 2026-04-01 18:30. Forward-return bucket: large_advance.'
+facts:
+  historical: true
+  has_open_position: false
+  price: 585.03
+  atr: 11.29
+market: "## CYCLE INPUT \u2014 QQQ @ 2026-04-01 18:30 UTC\n\nprice: $585.03    regime: trending_bear (confidence\
+  \ 0.8047)\nportfolio: $5,000 cash, no open positions\ncomposite_signal: -0.0338\n\n### Indicators\n\
+  \  rsi_14: 42.0975\n  macd_histogram: -2.5652\n  atr_14: 11.2948\n  bollinger_upper: 622.4824\n  bollinger_middle:\
+  \ 591.9455\n  bollinger_lower: 561.4086\n  vwap: 584.4632\n  relative_volume: 1.3154\n  ema_9: 577.7555\n\
+  \  ema_21: 588.3331\n  sma_20: 591.9455\n  sma_50: 604.3184\n  daily_change_pct: 1.3601\n  gap_pct:\
+  \ 0.745\n\n### Sub-signals\n  momentum                   value=-0.223492  weight=0.19  ma_signal=-0.7280633880533877,\
+  \ macd_signal=-0.5042765615763417, ma_saturated=False, macd_saturated=False, signal_saturated=False\n\
+  \  mean_reversion             value=+0.090073  weight=0.12  rsi_signal=0.1436825424248432, bollinger_signal=0.045292574776916054,\
+  \ ibs_signal=-0.025974231747487805, component_count=3, vwap_anchor_at_co\n  gap                    \
+  \    value=-0.000000  weight=0.07  gap_pct=0.745, daily_change_pct=1.3601, gap_type=moderate, fill_remaining=None,\
+  \ decay_factor=0.0\n  intraday_vwap_zscore       value=+0.000000  weight=0.18  applicable=True, z=0.3346,\
+  \ sd_raw=0.1448, sd_floored=True, deviation_atr=0.0502\n  event_window_timing        value=+0.000000\
+  \  weight=0.02  applicable=False, mode=no_event_data, reason=event_context_not_available\n  range_break_continuation\
+  \   value=+0.000000  weight=0.10  day_chg_source=snapshot, day_chg=1.3601, macd_histogram=-2.565, close_vs_lower=23.621,\
+  \ close_vs_upper=-37.452\n  options_positioning        value=+0.000000  weight=0.08  applicable=False,\
+  \ reason=no_options_data\n  swing_failure_reversal     value=+0.000000  weight=0.12  applicable=False,\
+  \ reason=insufficient_data\n  trend_persistence          value=+0.000000  weight=0.12  down_frac=0.667,\
+  \ up_frac=0.333, cum_move_atr=-0.958, bear_stack=False, bull_stack=False\n\n### News & Sentiment Agent\
+  \ report\n  aggregate_score: 0.0\n  confidence: 0.0\n  items: []\n  key_events: []\n  reasoning: \"\
+  No news retrieved for this historical replay.\"\n\n### Tool results\n  compute_risk_budget -> {\"risk_budget\"\
+  : 0.98, \"target_volatility\": 0.20, \"max_exposure\": 1.0}"
+outcome:
+  forward_return_pct: 4.1622
+  horizon_bars: 35
+  bucket: large_advance
+  note: HIDDEN FROM THE AGENT. Used only to score the decision.
+rules:
+- name: logs_attribution
+  description: Attribution must be logged every cycle, traded or not.
+  require:
+  - log_signal_attribution
+  severity: error
+placeholders:
+  PRIMARY_TICKER: QQQ
+  ALLOWED_TICKERS: QQQ (Nasdaq-100 ETF; the traded instrument), PSQ (-1x inverse QQQ ETF;
+    bearish vehicle ONLY, never its own thesis)
+  BEARISH_VEHICLE: 'buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis)
+    — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in
+    the ticker, not the direction. No margin and no expiry.'
+  DIRECTIONS_AVAILABLE: |-
+    **LONG ONLY.** Short-selling shares of QQQ requires a margin account, and this is a cash account — so it is unavailable regardless of what the symbol permits. It is also disabled in the constitution (`allow_short_sell`/`allow_margin`).
+      - `side: 'buy'` opens or adds to a long.
+      - `side: 'sell'` CLOSES a long you already hold. It does NOT open a short. If a long is open, sending `sell` for a bearish thesis will LIQUIDATE that long — an unintended exit, not a short.
+      - Never propose or place `direction: SHORT` on QQQ.
+    To act on a bearish view, buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis) — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in the ticker, not the direction. No margin and no expiry.
+    This is the limited-risk route: the most a bought put can lose is the premium paid, whereas short-selling shares can lose without limit.
+  SCHEDULE: Every hour during regular market hours on weekdays; ad-hoc via UI outside market
+    hours

@@ -1,0 +1,163 @@
+# Parameters of the composite algorithm: one block per sub-strategy, then the
+# `composite` block that weights them, per market regime. These are starting
+# values, not a proven edge. The evolution agent proposes changes as new
+# versions; you approve them in the console.
+momentum:
+  ema_short: 9
+  ema_long: 21
+  sma_short: 20
+  sma_long: 50
+  volume_confirmation: true
+  volume_dampener_floor: 0.7
+  intraday_divergence_decay: 0.5
+  # Today's move against the daily trend, in daily ATRs: 0.5 is half an
+  # ordinary day on any instrument. The percent is used only when a snapshot
+  # has no ATR.
+  divergence_day_change_atr: 0.5   # 0.5 daily ATR
+  divergence_day_change_pct: 0.6   # 0.6% — fallback only
+  rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
+mean_reversion:
+  rsi_period: 14
+  rsi_oversold: 28
+  rsi_overbought: 72
+  bollinger_period: 20
+  bollinger_std: 2.0
+  ibs_oversold: 0.2
+  ibs_overbought: 0.8
+  rsi_weight: 0.6
+  bollinger_weight: 0.2
+  ibs_weight: 0.2
+  trend_fade_decay: 0.2
+gap:
+  min_gap_pct: 0.3
+  gap_fade_threshold: 1.0
+  decay_minutes: 120
+intraday_vwap_zscore:
+  zscore_window: 20
+  entry_z: 1.1
+  countertrend_dampener: 0.5
+  with_trend_trigger_scale: 0.7
+  z_scale: 0.5
+  staleness_decay: 0.92
+  min_std: 0.15
+  max_rvol_for_fade: 1.5
+  high_vol_dampener: 0.4
+  rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
+event_window_timing:
+  blackout_hours: 30
+  post_event_hours: 48
+  min_iv_crush: 0.1
+  min_overextension: 0.015
+  pre_event_dampener: 0.05
+  post_event_boost: 1.5
+range_break_continuation:
+  min_break_pct: 0.7
+  macd_confirm_floor: 0.0
+  base_strength: 0.45
+  penetration_scale: 0.35
+  vwap_confirm: true
+  ibs_confirm: 0.7
+options_positioning:
+  pcr_baseline: 1.0
+  pcr_std: 0.5
+  extreme_z: 2.0
+  contrarian_scale: 0.3
+  confirm_scale: 0.15
+  event_window_hours: 36
+  post_event_hours: 48
+  unwind_threshold: 0.5
+  post_event_kicker: 0.3
+swing_failure_reversal:
+  lookback_bars: 20   # intraday bars; a longer window leaves early-session cycles without enough bars
+  min_confirm_bars: 2
+  max_confirm_bars: 14
+  min_stretch_atr: 0.3
+  stretch_scale: 0.3
+  confirm_decay: 0.87
+  reclaim_scale: 0.5
+  base_strength: 0.8
+  require_current_session_anchor: true
+trend_persistence:
+  lookback_days: 7
+  min_persistence_frac: 0.6
+  min_cum_atr: 1.5
+  min_efficiency: 0.35
+  cum_scale: 2.0
+  base_strength: 0.75
+  exhaustion_atr: 5.0
+  exhaustion_decay: 0.5
+  counter_day_pct: 1.0
+  counter_day_decay: 0.5
+vwap_reclaim_continuation:
+  lookback_bars: 30
+  min_dip_bars: 2
+  min_dip_atr: 0.1
+  max_dip_atr: 0.9
+  max_minutes_since_reclaim: 90.0
+  dip_scale: 0.35
+  reclaim_decay: 0.8
+  base_strength: 0.75
+  min_rvol: 0.5
+  rvol_scale: 1.0
+  require_current_session_anchor: true
+  rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
+composite:
+  momentum_weight: 0.2
+  mean_reversion_weight: 0.18
+  gap_weight: 0.0
+  intraday_vwap_zscore_weight: 0.14
+  event_window_timing_weight: 0.06
+  range_break_continuation_weight: 0.13
+  options_positioning_weight: 0.1
+  swing_failure_reversal_weight: 0.12
+  trend_persistence_weight: 0.0
+  regime_adaptive: true
+  renormalize_on_abstain: true
+  # With regime_adaptive on, these weights replace the flat ones above for the
+  # regime detected this cycle. vwap_reclaim_continuation is weighted 0 in
+  # every regime: it runs and is recorded, but does not vote until promoted.
+  regime_weights:
+    trending_bull:
+      momentum: 0.2045
+      vwap_reclaim_continuation: 0.0
+      mean_reversion: 0.129
+      gap: 0.0
+      intraday_vwap_zscore: 0.1935
+      event_window_timing: 0.0215
+      range_break_continuation: 0.1075
+      options_positioning: 0.086
+      swing_failure_reversal: 0.129
+      trend_persistence: 0.129
+    trending_bear:
+      momentum: 0.2045
+      vwap_reclaim_continuation: 0.0
+      mean_reversion: 0.129
+      gap: 0.0
+      intraday_vwap_zscore: 0.1935
+      event_window_timing: 0.0215
+      range_break_continuation: 0.1075
+      options_positioning: 0.086
+      swing_failure_reversal: 0.129
+      trend_persistence: 0.129
+    range_bound:
+      momentum: 0.22
+      vwap_reclaim_continuation: 0.0
+      mean_reversion: 0.12
+      gap: 0.0
+      intraday_vwap_zscore: 0.4
+      event_window_timing: 0.03
+      range_break_continuation: 0.04
+      options_positioning: 0.05
+      swing_failure_reversal: 0.12
+      trend_persistence: 0.02
+    high_volatility:
+      momentum: 0.3375
+      vwap_reclaim_continuation: 0.0
+      mean_reversion: 0.1538
+      gap: 0.0
+      intraday_vwap_zscore: 0.1183
+      event_window_timing: 0.0355
+      range_break_continuation: 0.0
+      options_positioning: 0.1183
+      swing_failure_reversal: 0.1183
+      trend_persistence: 0.1183

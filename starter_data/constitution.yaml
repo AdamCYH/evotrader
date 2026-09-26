@@ -1,0 +1,55 @@
+# ═══════════════════════════════════════════════════════════════════
+#  EVOTRADER — CONSTITUTION
+# ═══════════════════════════════════════════════════════════════════
+#  Hard risk rules. No agent may change this file; only you do. The app
+#  reads it when it starts: restart it after an edit.
+#
+#  Every value below is shown to the risk manager agent, which checks each
+#  order against it. Values marked [code] are also enforced by the system's
+#  own checks, whatever an agent decides. Values marked [agent] rely on the
+#  risk manager's judgement alone.
+#
+#  UNITS: every *_pct value is in percent (5 = 5%, 100 = 100%).
+#
+#  These starting values are deliberately cautious. Fit them to your own
+#  account and your own tolerance for loss before you trade real money.
+# ═══════════════════════════════════════════════════════════════════
+
+risk_limits:
+  max_single_position_pct: 50     # [agent] largest single position, % of the portfolio (consider less for one volatile stock)
+  max_short_position_pct: 5       # [agent] largest short position; matters only if shorting is enabled
+  max_total_exposure_pct: 80      # [code] ceiling of the sizing risk budget; [agent] everything invested at once
+  max_daily_loss_pct: 2           # [code] past this loss in a day (closed trades), no new entries until the next session; exits stay allowed
+  max_weekly_loss_pct: 5          # [agent]
+  max_drawdown_pct: 10            # [agent] fall from the portfolio's peak
+  require_stop_loss: true         # [agent] every share position carries a resting stop order
+  max_stop_loss_pct: 5            # [agent] widest stop, % from entry; keep it wider than 1.5 × ATR of the instrument
+  max_order_value_usd: 5000       # [code] largest single NEW order in dollars; closing or protecting what you hold is never capped; fit it to your account
+
+trading_rules:
+  allowed_tickers: ["SPY"]        # [code] symbols the agents may open positions in; exits are always allowed
+  allow_extended_hours: true      # [code] orders outside regular hours (limit orders only); false refuses them all, exits included
+  allow_short_sell: false         # [code] shorting shares also needs allow_margin and a margin account
+  allow_margin: false             # [code]
+  allow_options: true             # [code] buying calls and puts; set false to trade shares only
+  allow_option_writing: false     # [code] selling (writing) options to open
+  max_option_premium_pct: 5       # [code] largest premium for one option trade, % of the portfolio
+  max_total_option_exposure_pct: 20  # [agent]
+  pdt_protection: true            # [agent] respect the pattern-day-trader rule (accounts under 25,000 USD)
+  max_trades_per_day: 10          # [code] once this many orders are journaled today (protective ones count too), new entries are refused; exits never are
+  min_holding_period_seconds: 60  # [agent]
+
+circuit_breakers:
+  consecutive_losses_pause: 5     # [code] after this many losing trades in a row in a session, no new entries...
+  pause_duration_minutes: 60      # [code] ...until this long after the last loss
+  flash_crash_detection: true     # [agent] shown to the risk manager; no code watches for a crash
+
+wash_sale_guard:
+  enabled: true                   # [code] check tax lots before re-buying something sold at a loss
+  mode: warn                      # warn | block
+  lookback_days: 30
+
+level_ii:
+  enabled: true                   # [code] read order-book depth before an order
+  depth_levels: 5
+  thin_book_warn_pct: 50          # [code] warn when an order is larger than this % of the visible depth

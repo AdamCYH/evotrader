@@ -1,0 +1,24 @@
+# If you keep this data folder in a git repository of its own (a private one),
+# this keeps your keys and the app's run-time files out of it. Settings, the
+# constitution, agent instructions, algorithm versions, scenarios, evolution
+# notes and your notes are the part worth versioning.
+
+# Keys and passwords (written by `./run.sh setup`)
+.env
+
+# Databases, semantic memory, sessions and logs
+*.db
+*.db-shm
+*.db-wal
+db/
+sim/
+memory/
+sessions/
+logs/
+
+# Caches and generated files
+cache/
+trading/
+backtest/cache/
+backtest/reports/
+mcp_tool_schemas.json

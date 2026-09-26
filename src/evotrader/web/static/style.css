@@ -1,0 +1,8 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   EvoTrader — Main Stylesheet Coordinator
+   Loads modular subsystems utilizing native browser CSS @import.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+@import url("css/tokens.css");
+@import url("css/layout.css");
+@import url("css/components.css");

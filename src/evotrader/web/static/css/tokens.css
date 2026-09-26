@@ -1,0 +1,67 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   EvoTrader — Design Tokens (Claude-like Warm Light Theme)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+    /* Backgrounds */
+    --bg-light: #fbfaf7;
+    --bg-card: #f6f5ef;
+    --bg-header: #f0ede4;
+    --bg-input: #ffffff;
+    --bg-hover: #e8e5d8;
+    --bg-active: #dfdbce;
+
+    /* Borders & Dividers */
+    --border-color: #e3dfd0;
+    --border-hover: #cfcaa9;
+
+    /* Text Colors */
+    --text-primary: #191919;
+    --text-secondary: #6b6b66;
+    --text-dim: #949080;
+    --text-white: #ffffff;
+
+    /* Typography */
+    --font-serif: 'Lora', Georgia, 'Times New Roman', serif;
+    --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', "SFMono-Regular", Consolas, monospace;
+
+    /* Brand & Accents */
+    --amber: #b45309;
+    --amber-bg: #fef3c7;
+    --amber-border: #fcd34d;
+    --amber-glow: rgba(180, 83, 9, 0.15);
+
+    --emerald: #15803d;
+    --emerald-bg: #dcfce7;
+    --emerald-border: #86efac;
+    --emerald-glow: rgba(21, 128, 61, 0.15);
+
+    --crimson: #b91c1c;
+    --crimson-bg: #fee2e2;
+    --crimson-border: #fca5a5;
+    --crimson-glow: rgba(185, 28, 28, 0.15);
+
+    --cyan: #0369a1;
+    --cyan-bg: #e0f2fe;
+    --cyan-border: #7dd3fc;
+    --cyan-glow: rgba(3, 105, 161, 0.15);
+
+    --purple: #6b21a8;
+    --purple-bg: #f3e8ff;
+    --purple-border: #d8b4fe;
+    --purple-glow: rgba(107, 33, 168, 0.15);
+
+    --gold: #c2410c;
+    --gold-glow: rgba(194, 65, 12, 0.2);
+
+    /* Shadow & Glows */
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.04);
+    --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.03);
+    
+    /* Layout Sizes */
+    --border-radius: 8px;
+    --border-radius-sm: 4px;
+    --border-radius-lg: 12px;
+}

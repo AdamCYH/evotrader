@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvoTrader — Autonomous Trading Console</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪙</text></svg>">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+        rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- KaTeX for math rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <!-- Marked for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <!-- ── AUTH LOGIN MODAL ── -->
+    <div id="login-modal" class="modal-overlay hidden">
+        <div class="glass-card login-card">
+            <h2><i class="fa-solid fa-lock text-cyan"></i> Console Security</h2>
+            <p>Authentication required to access the live trading terminal.</p>
+            <form id="login-form">
+                <input type="password" id="login-password" placeholder="Enter Dashboard Password" required
+                    autocomplete="current-password">
+                <button type="submit" class="btn btn-primary">Unlock Console</button>
+            </form>
+            <div id="login-error" class="error-msg hidden">Incorrect password. Please try again.</div>
+        </div>
+    </div>
+
+    <!-- ── MAIN TERMINAL CONTAINER ── -->
+    <div class="app-container">
+
+        <!-- ── HEADER & NAVIGATION GROUP ── -->
+        <div class="header-nav-group">
+            <!-- ── HEADER ── -->
+            <header class="main-header glass-card">
+                <div class="header-brand">
+                    <span class="brand-logo"><i class="fa-solid fa-sack-dollar"></i></span>
+                    <div>
+                        <h1>EvoTrader</h1>
+                        <span class="sub-heading">Self-Evolving Agent Trader by ImmersiaLabs</span>
+                    </div>
+                </div>
+
+                <div class="header-badges">
+                    <div class="badge badge-outline badge-tickers">
+                        <span class="dot dot-cyan"></span>
+                        <span id="badge-ticker">—</span><!-- filled from /api/portfolio local.tickers -->
+                    </div>
+                    <div class="badge badge-outline">
+                        <span class="badge-label">ALGO:</span>
+                        <span id="badge-version">v001_initial</span>
+                    </div>
+                    <div class="badge" id="badge-mode">
+                        <span id="badge-mode-text">PAPER TRADING</span>
+                    </div>
+
+                    <div class="badge" id="badge-status">
+                        <span class="pulse-ring"></span>
+                        <span id="badge-status-text">CONNECTING</span>
+                    </div>
+                    <button id="btn-refresh-token" class="btn btn-icon" title="Refresh Broker Token">
+                        <i class="fa-solid fa-link"></i>
+                    </button>
+                    <button id="logout-btn" class="btn btn-icon" title="Lock Console"><i
+                            class="fa-solid fa-right-from-bracket"></i></button>
+                </div>
+            </header>
+        </div>
+
+        <!-- ── TOP TAB NAVIGATION ── -->
+        <nav class="app-nav">
+            <button id="nav-dashboard" class="nav-btn active"><i class="fa-solid fa-chart-simple"></i>
+                <span class="nav-btn-text">Dashboard</span></button>
+            <button id="nav-explorer" class="nav-btn"><i class="fa-solid fa-compass"></i> <span class="nav-btn-text">Run
+                    History</span></button>
+            <button id="nav-memory" class="nav-btn"><i class="fa-solid fa-brain"></i> <span class="nav-btn-text">Memory
+                    & Notes</span> <span id="badge-nav-memory" class="badge badge-xs badge-purple hidden"
+                    style="margin-left: 0.5rem;">0</span></button>
+        </nav>
+
+        <!-- ── TAB VIEW 1: DASHBOARD ── -->
+        <div id="view-dashboard" class="tab-sheet active">
+
+            <!-- GLOBAL CONTROLS -->
+            <div class="global-controls-row">
+                <div class="global-period-control">
+                    <span class="global-period-label"><i class="fa-solid fa-clock text-cyan"></i> Period</span>
+                    <select id="performance-period">
+                        <option value="today">Today</option>
+                        <option value="week" selected>This Week</option>
+                        <option value="month">This Month</option>
+                        <option value="all">All Time</option>
+                    </select>
+                </div>
+                <button id="btn-sync" class="btn btn-sm btn-secondary"
+                    title="Reconcile Database and Broker Positions"><i class="fa-solid fa-arrows-rotate"></i>
+                    Sync Positions</button>
+            </div>
+
+            <!-- ═══ SECTION 1: PORTFOLIO OVERVIEW ═══ -->
+            <div class="dashboard-section">
+                <div class="workspace-grid workspace-grid-tight">
+
+                    <!-- Left: Account Summary -->
+                    <div class="workspace-left">
+                        <div class="glass-card summary-card summary-card-wide">
+                            <div class="metrics-grid metrics-grid-6">
+                                <div class="metric-box">
+                                    <span class="metric-label">Account Value</span>
+                                    <span id="broker-total" class="metric-value">$0.00</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-label">Cash Balance</span>
+                                    <span id="broker-cash" class="metric-value">$0.00</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-label">Buying Power</span>
+                                    <span id="broker-bp" class="metric-value">$0.00</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-label">Realized P&L</span>
+                                    <span id="today-pnl" class="metric-value">$0.00</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-label">Trades</span>
+                                    <span id="today-trades" class="metric-value">0</span>
+                                    <span id="no-trade-streak" class="metric-streak-badge streak-info"
+                                        style="display: none;">🧊 0 no-trade streak</span>
+                                </div>
+                                <div class="metric-box">
+                                    <span class="metric-label">Win / Loss</span>
+                                    <span id="win-loss-count" class="metric-value">0 / 0</span>
+                                    <span id="loss-streak" class="metric-streak-badge" style="display: none;">🔥 0
+                                        streak</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Pending Approval (hidden by default) -->
+                        <div id="approval-panel" class="glass-card panel-card hidden">
+                            <div class="panel-header animated-border">
+                                <h2 class="text-gold"><i class="fa-solid fa-triangle-exclamation pulse-ring"></i> ACTION
+                                    REQUIRED: Trade Approval</h2>
+                                <span class="countdown-badge">Semi-Autonomous Gate</span>
+                            </div>
+                            <div id="approval-card-content" class="approval-content"></div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Positions (Holdings + Sync Status) -->
+                    <div class="workspace-right">
+                        <div class="glass-card panel-card">
+                            <div class="panel-header">
+                                <h2><i class="fa-solid fa-briefcase text-emerald"></i> Positions</h2>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <span id="holdings-total-pnl" class="sync-badge neutral">$0.00</span>
+                                    <span id="sync-status" class="sync-badge in-sync"><i
+                                            class="fa-solid fa-circle-check"></i> In Sync</span>
+                                </div>
+                            </div>
+                            <div class="comparison-table-container">
+                                <table class="comparison-table holdings-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Position</th>
+                                            <th class="text-right">Avg Cost</th>
+                                            <th class="text-right">Market</th>
+                                            <th class="text-right">Value</th>
+                                            <th class="text-right">P&L</th>
+                                            <th class="text-right">Sync</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="holdings-table-body">
+                                        <tr>
+                                            <td colspan="6" class="text-center text-dim text-small py-4">No active
+                                                holdings found.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ SECTION 2: PERFORMANCE & MARKET TECHNICALS ═══ -->
+            <div class="dashboard-section">
+                <div class="workspace-grid workspace-grid-tight">
+
+                    <!-- Left: Performance Charts (Account / P&L) -->
+                    <div class="workspace-left">
+                        <div class="glass-card panel-card account-value-panel" style="height: 100%; display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem;">
+                            <div class="panel-header"
+                                style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                <h2 id="perf-chart-title"><i class="fa-solid fa-wallet text-emerald"></i> Account
+                                    Value</h2>
+                                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                    <button id="btn-chart-tab-account" class="btn btn-sm btn-primary">Account</button>
+                                    <button id="btn-chart-tab-pnl" class="btn btn-sm btn-secondary">P&L</button>
+                                    <button id="btn-log-deposit" class="btn btn-sm btn-ghost"
+                                        title="Log a deposit or withdrawal to calibrate the equity curve">
+                                        <i class="fa-solid fa-money-bill-transfer"></i> Adjust
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- Equity Chart Canvas -->
+                            <div class="chart-container" id="perf-chart-container" style="position: relative; height: 210px; width: 100%;">
+                                <canvas id="perfChart"></canvas>
+                            </div>
+                            <!-- Account stats -->
+                            <div id="indicator-grid-account" class="indicator-grid">
+                                <div class="indicator-badge">
+                                    <span>Account Value</span>
+                                    <span id="stat-account-value" class="font-mono text-emerald">--</span>
+                                </div>
+                                <div class="indicator-badge">
+                                    <span>Total Deposits</span>
+                                    <span id="stat-total-deposits" class="font-mono text-amber">--</span>
+                                </div>
+                                <div class="indicator-badge">
+                                    <span>Net Gain</span>
+                                    <span id="stat-net-gain" class="font-mono">--</span>
+                                </div>
+                            </div>
+                            <!-- P&L stats (hidden by default) -->
+                            <div id="indicator-grid-pnl" class="indicator-grid" style="display: none;">
+                                <div class="indicator-badge">
+                                    <span>Total P&L</span>
+                                    <span id="stat-total-pnl" class="font-mono">--</span>
+                                </div>
+                                <div class="indicator-badge">
+                                    <span>Total Deposits</span>
+                                    <span id="stat-pnl-deposits" class="font-mono text-amber">--</span>
+                                </div>
+                                <div class="indicator-badge">
+                                    <span>Return %</span>
+                                    <span id="stat-return-pct" class="font-mono">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Real-time Technical & Decision Context -->
+                    <div class="workspace-right">
+                        <div class="glass-card panel-card technicals-panel" style="height: 100%;">
+                            <div class="panel-header technicals-panel-header">
+                                <div class="technicals-header-left">
+                                    <h2><i class="fa-solid fa-gauge-high text-cyan"></i> Market Technicals</h2>
+                                    <span id="tech-ticker-badge" class="badge badge-outline text-dim font-mono">—</span>
+                                </div>
+                                <div class="technicals-header-right">
+                                    <span id="market-regime-badge" class="badge badge-emerald" title="Current Market Regime" style="display: none;">
+                                        <i class="fa-solid fa-compass"></i> <span id="market-regime-text">TREND</span>
+                                    </span>
+                                    <div class="btn-group-sm tech-chart-tabs" id="tech-chart-tabs">
+                                        <button class="btn btn-xs btn-tab active" data-mode="signals" id="tab-chart-signals" title="The combined signal over recent cycles">History</button>
+                                        <button class="btn btn-xs btn-tab" data-mode="strategies" id="tab-chart-strategies" title="Which channels are pushing the signal, and why the rest are quiet">Drivers</button>
+                                        <button class="btn btn-xs btn-tab" data-mode="technicals" id="tab-chart-technicals" title="The indicators the channels read">Indicators</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Price, day's move, and when this reading was taken -->
+                            <div class="technicals-subheader" id="technicals-subheader">
+                                <span id="tech-price" class="font-mono tech-price">--</span>
+                                <span id="tech-day-change" class="font-mono tech-day-change"></span>
+                                <span id="tech-asof" class="tech-asof"></span>
+                            </div>
+
+                            <!-- Composite Signal Score Meter -->
+                            <div class="composite-score-container" id="composite-score-container">
+                                <div class="composite-score-header">
+                                    <div class="composite-score-title" title="The algorithm's channels combined into one number from -1 (bearish) to +1 (bullish). The trading agent decides what to do with it.">
+                                        <span class="text-dim text-xs uppercase tracking-wider">Combined signal</span>
+                                        <span id="composite-score-val" class="font-mono font-bold text-lg text-emerald">--</span>
+                                    </div>
+                                    <div class="composite-action-badge">
+                                        <span id="composite-action-badge" class="badge badge-outline">Awaiting data</span>
+                                    </div>
+                                </div>
+                                <div class="composite-gauge-track" title="Combined signal from -1.0 to +1.0. The strategy reads |0.03| (trending) or |0.05| as a lean, and |0.10| or more as strong.">
+                                    <div class="gauge-center-line"></div>
+                                    <div class="gauge-thresh-buy" title="Strong bullish (+0.10)"></div>
+                                    <div class="gauge-thresh-sell" title="Strong bearish (-0.10)"></div>
+                                    <div class="composite-gauge-bar" id="composite-gauge-bar"></div>
+                                    <div class="composite-gauge-marker" id="composite-gauge-marker"></div>
+                                </div>
+                                <div class="gauge-labels">
+                                    <span>-1.0 Bearish</span>
+                                    <span class="text-dim">0.0 Neutral</span>
+                                    <span>+1.0 Bullish</span>
+                                </div>
+                            </div>
+
+                            <!-- View 1: Chart Canvas Container (Active in Signals tab) -->
+                            <div class="chart-container" id="tech-chart-container" style="position: relative; height: 210px;">
+                                <canvas id="indicatorChart"></canvas>
+                            </div>
+
+                            <!-- View 2: Sub-Signals Breakdown List (Active in Strategies tab) -->
+                            <div class="sub-signals-container" id="sub-signals-container" style="display: none; height: 210px;">
+                                <div class="sub-signals-header">
+                                    <div class="sub-signals-title"><i class="fa-solid fa-layer-group text-cyan"></i> What's driving the signal</div>
+                                    <span id="algo-version-tag" class="algo-version-tag font-mono"></span>
+                                </div>
+                                <div class="sub-signals-list" id="sub-signals-list">
+                                    <div class="empty-sub-signals text-dim text-xs">Awaiting market cycle data...</div>
+                                </div>
+                            </div>
+
+                            <!-- View 3: Categorized Technical Indicators Matrix (Active in Technicals tab) -->
+                            <div class="technicals-matrix-container" id="technicals-matrix-container" style="display: none; height: 210px; overflow-y: auto;">
+                                <div class="technicals-matrix-grid">
+                                    <!-- Column 1: Trend & Averages -->
+                                    <div class="tech-category-card">
+                                        <div class="tech-category-title"><i class="fa-solid fa-arrow-trend-up text-cyan"></i> Trend & Averages</div>
+                                        <div class="tech-category-items">
+                                            <div class="tech-item-row" title="Short averages of the daily close (9 and 21 days, recent days weighted more)"><span>EMA 9 / 21</span><span id="matrix-ema" class="font-mono text-cyan">-- / --</span></div>
+                                            <div class="tech-item-row" title="Plain averages of the daily close over 20 and 50 days"><span>SMA 20 / 50</span><span id="matrix-sma" class="font-mono text-cyan">-- / --</span></div>
+                                        </div>
+                                    </div>
+                                    <!-- Column 2: Momentum & Oscillators -->
+                                    <div class="tech-category-card">
+                                        <div class="tech-category-title"><i class="fa-solid fa-gauge-simple text-purple"></i> Momentum</div>
+                                        <div class="tech-category-items">
+                                            <div class="tech-item-row"><span>RSI (14)</span><span id="matrix-rsi" class="font-mono text-cyan">--</span></div>
+                                            <div class="tech-item-row"><span>MACD Line/Sig</span><span id="matrix-macd-line" class="font-mono">-- / --</span></div>
+                                            <div class="tech-item-row"><span>MACD Hist</span><span id="matrix-macd-hist" class="font-mono font-bold">--</span></div>
+                                            <div class="tech-item-row" title="Where the price sits in today's range: 0 = at the low, 1 = at the high. Live session only."><span>IBS</span><span id="matrix-ibs" class="font-mono">--</span></div>
+                                        </div>
+                                    </div>
+                                    <!-- Column 3: Volatility & Channels -->
+                                    <div class="tech-category-card">
+                                        <div class="tech-category-title"><i class="fa-solid fa-chart-line text-amber"></i> Volatility & Levels</div>
+                                        <div class="tech-category-items">
+                                            <div class="tech-item-row" title="Today's average traded price, weighted by volume. Live session only."><span>VWAP</span><span id="matrix-vwap" class="font-mono">--</span></div>
+                                            <div class="tech-item-row" title="How far the price is above (+) or below (-) today's VWAP. Live session only."><span>VWAP Dist</span><span id="matrix-vwap-dist" class="font-mono">--</span></div>
+                                            <div class="tech-item-row" title="Width of the Bollinger bands as a share of price: how wide the recent trading range is"><span>BB Width</span><span id="matrix-bb-width" class="font-mono">--</span></div>
+                                            <div class="tech-item-row" title="Average daily price range over 14 days, in dollars"><span>ATR (14)</span><span id="matrix-atr" class="font-mono">--</span></div>
+                                            <div class="tech-item-row" title="Volume against normal. 'today' compares with the same time of day over the last 20 sessions; 'yesterday' is the prior session's whole-day ratio."><span>Volume vs normal</span><span id="matrix-rvol" class="font-mono">--</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Dynamic / Evolved Indicators Sub-Tray -->
+                                <div class="dynamic-indicators-wrapper" id="dynamic-indicators-wrapper" style="display: none;">
+                                    <div class="dynamic-indicators-header">
+                                        <span class="text-dim font-mono text-xs uppercase tracking-wider font-bold">Self-Evolved Indicators</span>
+                                    </div>
+                                    <div class="dynamic-indicators-grid" id="dynamic-indicators-grid"></div>
+                                </div>
+                            </div>
+
+                            <!-- Single-Row Anchor KPI Badges Grid (4 Pillars) -->
+                            <div class="indicator-grid indicator-grid-technicals">
+                                <div class="indicator-badge btn-indicator-info" data-indicator="rsi"
+                                    style="cursor: pointer;" title="Click to learn about RSI (14)">
+                                    <span>RSI (14)</span>
+                                    <span id="anchor-rsi-val" class="font-mono text-cyan">--</span>
+                                </div>
+                                <div class="indicator-badge btn-indicator-info" data-indicator="vwap"
+                                    style="cursor: pointer;" title="Click to learn about VWAP Dist">
+                                    <span>VWAP Dist</span>
+                                    <span id="anchor-vwap-val" class="font-mono text-cyan">--</span>
+                                </div>
+                                <div class="indicator-badge btn-indicator-info" data-indicator="macd"
+                                    style="cursor: pointer;" title="Click to learn about MACD Histogram">
+                                    <span>MACD Hist</span>
+                                    <span id="anchor-macd-val" class="font-mono">--</span>
+                                </div>
+                                <div class="indicator-badge btn-indicator-info" data-indicator="atr"
+                                    style="cursor: pointer;" title="Click to learn about Average True Range (14)">
+                                    <span>ATR (14)</span>
+                                    <span id="anchor-atr-val" class="font-mono">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ SECTION 3: OPERATIONS (RUN HISTORY & EVOLUTION) ═══ -->
+            <div class="dashboard-section">
+                <div class="workspace-grid workspace-grid-tight">
+
+                    <!-- Left: Run History -->
+                    <div class="workspace-left">
+                        <div class="glass-card panel-card"
+                            style="height: 100%; max-height: 320px; display: flex; flex-direction: column;">
+                            <div class="panel-header"
+                                style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                <h2><i class="fa-solid fa-clock-history text-amber"></i> Run History</h2>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button id="btn-trigger" class="btn btn-sm btn-primary"><i
+                                            class="fa-solid fa-play"></i> Trade</button>
+                                    <div class="badge badge-outline" id="badge-cycle-scheduler"
+                                        style="display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.5rem;"
+                                        title="Automated Trading scheduler">
+                                        <span class="badge-label"
+                                            style="font-size: 0.75rem; margin-right: 0.15rem; font-weight: normal; color: var(--text-secondary);">AUTO:</span>
+                                        <label class="switch-sm">
+                                            <input type="checkbox" id="cycle-cron-toggle">
+                                            <span class="slider round"></span>
+                                        </label>
+                                        <span id="cycle-cron-countdown" class="font-mono text-cyan"
+                                            style="font-size: 0.75rem; margin-left: 0.25rem; min-width: 50px; text-align: right;">--:--:--</span>
+                                        <span id="badge-cycle-cron" style="display: none;"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="dashboard-cycles-container" class="cycle-list-container"
+                                style="flex: 1; min-height: 0;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Evolution Engine -->
+                    <div class="workspace-right">
+                        <div class="glass-card panel-card evolution-panel"
+                            style="height: 100%; max-height: 320px; display: flex; flex-direction: column;">
+                            <div class="panel-header"
+                                style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                <h2><i class="fa-solid fa-dna text-purple"></i> Evolution Engine</h2>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button id="btn-trigger-evolution" class="btn btn-sm btn-purple"><i
+                                            class="fa-solid fa-play"></i> Evolve</button>
+                                    <div class="badge badge-outline" id="badge-evolve-scheduler"
+                                        style="display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.5rem;"
+                                        title="Automated Self-Evolution scheduler">
+                                        <span class="badge-label"
+                                            style="font-size: 0.75rem; margin-right: 0.15rem; font-weight: normal; color: var(--text-secondary);">AUTO:</span>
+                                        <label class="switch-sm">
+                                            <input type="checkbox" id="evolution-cron-toggle">
+                                            <span class="slider round"></span>
+                                        </label>
+                                        <span id="evolution-cron-countdown" class="font-mono text-cyan"
+                                            style="font-size: 0.75rem; margin-left: 0.25rem; min-width: 50px; text-align: right;">--:--:--</span>
+                                        <span id="badge-evolve-cron" style="display: none;"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="evolution-list" id="evolution-container"
+                                style="flex: 1; min-height: 0; max-height: none;">
+                                <div class="evolution-item empty-evolution">
+                                    <span class="text-dim text-small">No algorithm changes or instruction updates
+                                        recorded.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ SECTION 4: TRADE ACTIVITY ═══ -->
+            <div class="dashboard-section">
+                <div class="glass-card panel-card journal-panel" style="min-width: 0;">
+                    <div class="panel-header">
+                        <h2><i class="fa-solid fa-book-open text-cyan"></i> Trade Journal</h2>
+                    </div>
+                    <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+                        <table class="journal-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Time</th>
+                                    <th>Asset</th>
+                                    <th>Trade</th>
+                                    <th class="text-right">Qty</th>
+                                    <th class="text-right">Price</th>
+                                    <th class="text-right">P&L</th>
+                                    <th>Regime</th>
+                                    <th>Reasoning</th>
+                                </tr>
+                            </thead>
+                            <tbody id="journal-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ SECTION 5: SYSTEM ANALYTICS ═══ -->
+            <div class="dashboard-section">
+                <div class="glass-card panel-card" style="min-width: 0;">
+                    <div class="panel-header"
+                        style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                        <h2><i class="fa-solid fa-brain text-purple"></i> Token Usage & LLM Efficiency Analysis</h2>
+                        <button id="btn-toggle-llm-details" class="btn btn-sm btn-secondary"
+                            style="display: flex; align-items: center; gap: 0.35rem;">
+                            <i class="fa-solid fa-chevron-up"></i> Hide Details
+                        </button>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1rem;">
+                        <div class="metric-card-small"
+                            style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1rem; border-radius: 6px; display: flex; flex-direction: column; gap: 0.25rem;">
+                            <span
+                                style="font-size: 0.72rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total
+                                LLM Calls</span>
+                            <span id="metric-llm-calls"
+                                style="font-size: 1.8rem; font-weight: 700; color: var(--text-primary);">0</span>
+                        </div>
+                        <div class="metric-card-small"
+                            style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1rem; border-radius: 6px; display: flex; flex-direction: column; gap: 0.25rem;">
+                            <span
+                                style="font-size: 0.72rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total
+                                Tokens Used</span>
+                            <span id="metric-total-tokens"
+                                style="font-size: 1.8rem; font-weight: 700; color: var(--text-primary);">0</span>
+                        </div>
+                        <div class="metric-card-small"
+                            style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1rem; border-radius: 6px; display: flex; flex-direction: column; gap: 0.25rem;">
+                            <span
+                                style="font-size: 0.72rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Average
+                                Latency</span>
+                            <span id="metric-avg-latency"
+                                style="font-size: 1.8rem; font-weight: 700; color: var(--cyan);">0.00s</span>
+                        </div>
+                        <div class="metric-card-small"
+                            style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 1rem; border-radius: 6px; display: flex; flex-direction: column; gap: 0.25rem;">
+                            <span
+                                style="font-size: 0.72rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Token
+                                Efficiency (Out/In)</span>
+                            <span id="metric-efficiency"
+                                style="font-size: 1.8rem; font-weight: 700; color: var(--emerald);">0.0%</span>
+                        </div>
+                    </div>
+
+                    <div id="llm-details-grid" class="metrics-details-grid" style="height: 300px; overflow: hidden;">
+                        <div
+                            style="display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; min-height: 0; height: 100%;">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-shrink: 0;">
+                                <h3
+                                    style="font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; gap: 0.4rem; color: var(--text-primary); margin: 0;">
+                                    <i class="fa-solid fa-microchip text-dim"></i> Model Distribution
+                                </h3>
+                                <div style="display: flex; gap: 0.5rem; margin: 0; padding: 0;">
+                                    <button id="model-dist-tab-calls" class="btn btn-sm btn-primary"
+                                        onclick="switchModelDistTab('calls')">Calls</button>
+                                    <button id="model-dist-tab-tokens" class="btn btn-sm btn-secondary"
+                                        onclick="switchModelDistTab('tokens')">Tokens</button>
+                                </div>
+                            </div>
+                            <div id="model-distribution-list-calls"
+                                style="display: flex; flex-direction: column; gap: 0.50rem; flex: 1; min-height: 0; overflow-y: auto; padding-right: 0.5rem;">
+                                <div class="text-dim text-small">No model distribution data available.</div>
+                            </div>
+                            <div id="model-distribution-list-tokens"
+                                style="display: none; flex-direction: column; gap: 0.50rem; flex: 1; min-height: 0; overflow-y: auto; padding-right: 0.5rem;">
+                            </div>
+                        </div>
+                        <div
+                            style="display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; min-height: 0; height: 100%;">
+                            <h3
+                                style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.4rem; color: var(--text-primary); flex-shrink: 0;">
+                                <i class="fa-solid fa-list-check text-dim"></i> Usage by Session
+                            </h3>
+                            <div class="table-container session-table-container" style="flex: 1; min-height: 0; overflow: auto;">
+                                <table class="journal-table session-usage-table"
+                                    style="font-size: 0.75rem; width: 100%; min-width: 660px;">
+                                    <thead>
+                                        <tr>
+                                            <th style="width: 140px;">Session ID</th>
+                                            <th style="width: 105px;">Type</th>
+                                            <th style="width: 135px;">Last Active</th>
+                                            <th class="text-right" style="width: 75px;">LLM Calls</th>
+                                            <th class="text-right" style="width: 90px;">Input</th>
+                                            <th class="text-right" style="width: 90px;">Output</th>
+                                            <th class="text-right" style="width: 95px;">Avg Latency</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="metrics-session-table-body">
+                                        <tr>
+                                            <td colspan="7" class="text-center text-dim text-small py-4">No session
+                                                usage
+                                                data available.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ── TAB VIEW 2: RUN HISTORY EXPLORER ── -->
+        <div id="view-explorer" class="tab-sheet">
+            <div class="explorer-layout">
+                <!-- Left Sidebar listing past sessions -->
+                <div class="explorer-sidebar glass-card panel-card">
+                    <div class="panel-header">
+                        <h2><i class="fa-solid fa-clock-history"></i> Past Runs</h2>
+                    </div>
+                    <div id="explorer-cycles-container" class="cycle-list-container">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+
+                <!-- Main area displaying details & thoughts -->
+                <div class="explorer-main">
+                    <div class="glass-card panel-card stream-panel">
+                        <div class="panel-header stream-header">
+                            <h2><i class="fa-solid fa-brain text-cyan"></i> Agent Thoughts & Decision Timeline</h2>
+                            <div class="stream-actions" style="display: flex; align-items: center; gap: 0.4rem;">
+                                <button id="explorer-btn-toggle-markdown" class="btn btn-sm btn-secondary"
+                                    title="Toggle Rendered Markdown / Raw Markdown across all cards"
+                                    style="font-size: 0.72rem; padding: 0.2rem 0.55rem; display: inline-flex; align-items: center; gap: 0.35rem;">
+                                    <i class="fa-brands fa-markdown"></i> <span>Raw Markdown</span>
+                                </button>
+                                <button id="explorer-btn-autoscroll" class="btn btn-icon btn-sm active"
+                                    title="Toggle autoscroll"><i class="fa-solid fa-angles-down"></i></button>
+                            </div>
+                        </div>
+
+                        <div class="panel-header"
+                            style="border-bottom: none; padding-bottom: 0; display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                            <h2 id="explorer-selected-title"
+                                style="font-size: 0.95rem; color: var(--text-secondary); margin: 0; display: inline-flex; align-items: center;">
+                                Select a run to view reasoning</h2>
+                            <div style="display: flex; align-items: center; gap: 0.35rem;">
+                                <button id="explorer-btn-continue-cycle" class="btn-continue-cycle hidden"
+                                    title="Resume this evolution cycle">
+                                    <i class="fa-solid fa-rotate-right"></i> Continue
+                                </button>
+                                <button id="explorer-btn-delete-cycle" class="btn btn-icon btn-sm hidden"
+                                    title="Delete & Revert Run"
+                                    style="background: none; border: none; padding: 0.2rem; color: var(--text-dim); cursor: pointer; transition: color 0.2s; display: inline-flex; align-items: center; justify-content: center;"><i
+                                        class="fa-solid fa-trash-can"></i></button>
+                            </div>
+                        </div>
+
+                        <!-- THOUGHTS STREAM VIEW -->
+                        <div id="explorer-thoughts-container" class="stream-content thoughts-stream">
+                            <div class="empty-thoughts-msg text-dim text-small">
+                                No past run selected. Select a run from the sidebar to inspect its reasoning stream.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── TAB VIEW 3: SEMANTIC MEMORY & NOTES ── -->
+        <div id="view-memory" class="tab-sheet">
+            <div class="memory-layout">
+                <!-- Left Sidebar for sub-navigation -->
+                <div class="memory-sidebar glass-card panel-card">
+                    <div class="panel-header">
+                        <h2><i class="fa-solid fa-folder-open"></i> Sections</h2>
+                    </div>
+                    <div class="memory-nav">
+                        <button id="mem-nav-vector" class="memory-nav-btn active"><i class="fa-solid fa-database"></i>
+                            Vector Explorer</button>
+                        <button id="mem-nav-instructions" class="memory-nav-btn"><i class="fa-solid fa-scroll"></i>
+                            Agent Instructions <span id="badge-nav-instructions"
+                                class="badge badge-xs badge-purple hidden" style="margin-left: auto;">0</span></button>
+                        <button id="mem-nav-algorithms" class="memory-nav-btn"><i class="fa-solid fa-gears"></i>
+                            Algorithm Proposals <span id="badge-nav-algorithms"
+                                class="badge badge-xs badge-purple hidden" style="margin-left: auto;">0</span></button>
+                        <button id="mem-nav-reviews" class="memory-nav-btn"><i class="fa-solid fa-code"></i>
+                            Proposals <span id="badge-nav-reviews" class="badge badge-xs badge-purple hidden"
+                                style="margin-left: auto;">0</span></button>
+                        <button id="mem-nav-notes" class="memory-nav-btn"><i class="fa-solid fa-file-lines"></i>
+                            Note
+                            Files (.md)</button>
+                    </div>
+                </div>
+
+                <!-- Main workspace panel -->
+                <div class="memory-main">
+
+                    <!-- PANEL A: NOTE FILES MANAGER -->
+                    <div id="panel-notes" class="memory-panel">
+                        <div class="notes-workspace">
+                            <!-- Note files list sidebar -->
+                            <div class="notes-sidebar glass-card panel-card">
+                                <div class="panel-header">
+                                    <h3>Files</h3>
+                                    <button id="notes-btn-new" class="btn btn-sm btn-primary"><i
+                                            class="fa-solid fa-plus"></i> New Note</button>
+                                </div>
+                                <div id="notes-list-container" class="notes-list-container">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Note editor / preview container -->
+                            <div class="notes-editor-container glass-card panel-card">
+                                <div class="panel-header notes-editor-header hidden" id="editor-header">
+                                    <div class="editor-title-group">
+                                        <input type="text" id="editor-note-title"
+                                            placeholder="Note filename (e.g. market_rules.md)"
+                                            class="editor-input-title">
+                                        <span id="editor-note-source-badge" class="badge badge-xs badge-evolution hidden"
+                                            title="This note is managed by the Self-Evolve Agent"><i class="fa-solid fa-dna"></i> Evolution Note</span>
+                                    </div>
+                                    <div class="editor-actions">
+                                        <button id="editor-btn-save" class="btn btn-sm btn-primary"><i
+                                                class="fa-solid fa-floppy-disk"></i> Save Note</button>
+                                        <button id="editor-btn-delete" class="btn btn-sm btn-danger"><i
+                                                class="fa-solid fa-trash"></i> Delete</button>
+                                    </div>
+                                </div>
+
+                                <div class="editor-settings-row hidden" id="editor-settings-row">
+                                    <div class="setting-item">
+                                        <label for="editor-note-target">Target Agent:</label>
+                                        <select id="editor-note-target" class="editor-select">
+                                            <option value="user">Trading Agent (data/notes)</option>
+                                            <option value="evolution">Evolution Agent (data/evolution/notes)</option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-item">
+                                        <label for="editor-note-category">Category:</label>
+                                        <select id="editor-note-category" class="editor-select">
+                                            <option value="instruction">Instruction (Rules)</option>
+                                            <option value="market_insight">Market Insight</option>
+                                            <option value="strategy_hint">Strategy Hint</option>
+                                            <option value="observation">Observation</option>
+                                            <option value="general">General</option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-item">
+                                        <label for="editor-note-priority">Priority:</label>
+                                        <select id="editor-note-priority" class="editor-select">
+                                            <option value="critical">Critical</option>
+                                            <option value="high">High</option>
+                                            <option value="normal" selected>Normal</option>
+                                            <option value="low">Low</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="editor-body-split hidden" id="editor-body-split">
+                                    <div class="editor-textarea-wrapper">
+                                        <textarea id="editor-note-body"
+                                            placeholder="Write notes here... (Markdown is supported)"></textarea>
+                                    </div>
+                                    <div class="editor-preview-wrapper">
+                                        <div class="preview-title">Markdown Preview</div>
+                                        <div id="editor-note-preview" class="markdown-body"></div>
+                                    </div>
+                                </div>
+
+                                <div class="editor-empty-state" id="editor-empty-state">
+                                    <i class="fa-solid fa-pen-nib text-dim"
+                                        style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                                    <span class="text-dim">Select a note from the files list or create a new note to
+                                        start editing.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- PANEL C: SYSTEM INSTRUCTIONS EXPLORER -->
+                    <div id="panel-instructions" class="memory-panel">
+                        <div class="notes-workspace">
+                            <!-- Instructions list sidebar -->
+                            <div class="notes-sidebar glass-card panel-card">
+                                <div class="panel-header">
+                                    <h3><i class="fa-solid fa-robot"></i> Agents</h3>
+                                </div>
+                                <div id="instructions-list-container" class="notes-list-container">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Instruction file viewer -->
+                            <div class="notes-editor-container glass-card panel-card">
+                                <div class="panel-header notes-editor-header hidden" id="instruction-header">
+                                    <div class="editor-title-group"
+                                        style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <h3 id="instruction-agent-name" style="margin: 0; text-transform: capitalize;">
+                                            orchestrator</h3>
+                                        <span class="badge badge-xs badge-cyan"
+                                            id="instruction-active-badge">Active</span>
+                                    </div>
+                                    <div class="editor-actions"
+                                        style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <button id="btn-activate-instruction" class="btn btn-sm btn-purple hidden"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-check"></i> Activate
+                                        </button>
+                                        <button id="btn-reject-instruction" class="btn btn-sm btn-danger hidden"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-xmark"></i> Reject
+                                        </button>
+                                        <span class="bullet-separator" id="instruction-actions-separator"
+                                            style="display: none;">│</span>
+                                        <span style="font-size: 0.85rem; color: var(--text-secondary);">Version
+                                            Details</span>
+                                    </div>
+                                </div>
+
+
+                                <!-- View Tabs for Instructions Explorer -->
+                                <div id="instruction-tabs-container" class="instruction-view-tabs hidden">
+                                    <button id="btn-instruction-tab-summary" class="instruction-tab-btn hidden">
+                                        <i class="fa-solid fa-code-pull-request"></i> Proposal Summary
+                                    </button>
+                                    <button id="btn-instruction-tab-full" class="instruction-tab-btn active">
+                                        <i class="fa-solid fa-file-lines"></i> Full Content
+                                    </button>
+                                    <button id="btn-instruction-tab-diff" class="instruction-tab-btn">
+                                        <i class="fa-solid fa-code-compare"></i> Diff View
+                                    </button>
+                                </div>
+
+                                <div class="editor-body-split hidden" id="instruction-body-split"
+                                    style="grid-template-columns: 1fr;">
+                                    <div class="editor-preview-wrapper" style="border: none;">
+                                        <div id="instruction-summary-preview" class="markdown-body hidden"></div>
+                                        <div id="instruction-content-preview" class="markdown-body"></div>
+                                        <div id="instruction-diff-preview"
+                                            class="markdown-body diff-view-container hidden"></div>
+                                    </div>
+                                </div>
+
+                                <div class="editor-empty-state" id="instruction-empty-state">
+                                    <i class="fa-solid fa-scroll text-dim"
+                                        style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                                    <span class="text-dim">Select an agent from the list to view its system
+                                        instructions.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- PANEL D: ALGORITHM VERSIONS EXPLORER -->
+                    <div id="panel-algorithms" class="memory-panel">
+                        <div class="notes-workspace">
+                            <!-- Algorithms list sidebar -->
+                            <div class="notes-sidebar glass-card panel-card">
+                                <div class="panel-header">
+                                    <h3><i class="fa-solid fa-gears"></i> Algorithm Proposals</h3>
+                                </div>
+                                <div id="algorithms-list-container" class="notes-list-container">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Algorithm file viewer -->
+                            <div class="notes-editor-container glass-card panel-card">
+                                <div class="panel-header notes-editor-header hidden" id="algorithm-header">
+                                    <div class="editor-title-group"
+                                        style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <h3 id="algorithm-version-name" style="margin: 0; font-family: monospace;">
+                                            v001_initial</h3>
+                                        <span class="badge badge-xs badge-cyan"
+                                            id="algorithm-active-badge">Active</span>
+                                    </div>
+                                    <div class="editor-actions"
+                                        style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <button id="btn-activate-algorithm" class="btn btn-sm btn-cyan hidden"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-check"></i> Activate
+                                        </button>
+                                        <button id="btn-reject-algorithm" class="btn btn-sm btn-danger hidden"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-xmark"></i> Reject
+                                        </button>
+                                        <span class="bullet-separator" id="algorithm-actions-separator"
+                                            style="display: none;">│</span>
+                                        <span style="font-size: 0.85rem; color: var(--text-secondary);">Version
+                                            Details</span>
+                                    </div>
+                                </div>
+
+
+                                <!-- View Tabs for Algorithms Explorer -->
+                                <div id="algorithm-tabs-container" class="instruction-view-tabs hidden">
+                                    <button id="btn-algorithm-tab-summary" class="instruction-tab-btn hidden">
+                                        <i class="fa-solid fa-code-pull-request"></i> Proposal Summary
+                                    </button>
+                                    <button id="btn-algorithm-tab-full" class="instruction-tab-btn active">
+                                        <i class="fa-solid fa-file-lines"></i> Full Config (YAML)
+                                    </button>
+                                    <button id="btn-algorithm-tab-diff" class="instruction-tab-btn">
+                                        <i class="fa-solid fa-code-compare"></i> Diff View
+                                    </button>
+                                </div>
+
+                                <div class="editor-body-split hidden" id="algorithm-body-split"
+                                    style="grid-template-columns: 1fr;">
+                                    <div class="editor-preview-wrapper" style="border: none;">
+                                        <div id="algorithm-summary-preview" class="markdown-body hidden"></div>
+                                        <pre id="algorithm-content-preview" class="yaml-code-block font-mono text-small"
+                                            style="margin: 0; padding: 1rem; background: rgba(0, 0, 0, 0.2); border-radius: 6px; overflow-x: auto; color: var(--text-primary); text-align: left;"></pre>
+                                        <div id="algorithm-diff-preview"
+                                            class="markdown-body diff-view-container hidden"></div>
+                                    </div>
+                                </div>
+
+                                <div class="editor-empty-state" id="algorithm-empty-state">
+                                    <i class="fa-solid fa-sliders text-dim"
+                                        style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                                    <span class="text-dim">Select an algorithm version from the list to inspect
+                                        parameters and activate it.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- PANEL E: CODE REVIEWS PANEL -->
+                    <div id="panel-reviews" class="memory-panel">
+                        <div class="notes-workspace">
+                            <!-- Code reviews list sidebar -->
+                            <div class="notes-sidebar glass-card panel-card">
+                                <div class="panel-header">
+                                    <h3><i class="fa-solid fa-code"></i> Evolution Proposals</h3>
+                                </div>
+                                <div id="reviews-list-container" class="notes-list-container">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Code review viewer -->
+                            <div class="notes-editor-container glass-card panel-card">
+                                <div class="panel-header notes-editor-header hidden" id="review-header">
+                                    <div class="editor-title-group"
+                                        style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                        <h3 id="review-name"
+                                            style="margin: 0; font-family: monospace; font-size: 1.1rem; line-height: 1.2; word-break: break-all;">
+                                            Review Details</h3>
+                                        <span class="badge badge-xs badge-success hidden"
+                                            id="review-active-badge">Applied</span>
+                                        <span class="badge badge-xs badge-warning" id="review-pending-badge">Pending
+                                            Review</span>
+                                        <span class="badge badge-xs badge-danger hidden"
+                                            id="review-rejected-badge">Rejected</span>
+                                    </div>
+                                    <div class="editor-actions"
+                                        style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <button id="btn-apply-review" class="btn btn-sm btn-success"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-check"></i> Mark as Applied
+                                        </button>
+                                        <button id="btn-reject-review" class="btn btn-sm btn-danger"
+                                            style="padding: 0.25rem 0.6rem; font-size: 0.75rem; display: flex; align-items: center; gap: 0.3rem; margin: 0; min-height: 24px; line-height: 1;">
+                                            <i class="fa-solid fa-circle-xmark"></i> Reject
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="editor-body-split hidden" id="review-body-split"
+                                    style="grid-template-columns: 1fr;">
+                                    <div class="editor-preview-wrapper" style="border: none;">
+                                        <div id="review-content-preview" class="markdown-body"
+                                            style="padding: 1.5rem; text-align: left; overflow-y: auto; max-height: calc(100vh - 280px);">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="editor-empty-state" id="review-empty-state">
+                                    <i class="fa-solid fa-code text-dim"
+                                        style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                                    <span class="text-dim">Select an evolution proposal from the list to inspect
+                                        findings and suggestions.</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- PANEL B: VECTOR DB EXPLORER -->
+                    <div id="panel-vector" class="memory-panel active">
+
+                        <!-- Control stats row -->
+                        <div class="summary-grid" style="margin-bottom: 1.5rem;">
+                            <div class="glass-card summary-card" style="padding: 1.25rem;">
+                                <div class="card-header" style="border-bottom: none; margin-bottom: 0;">
+                                    <h3><i class="fa-solid fa-chart-pie text-cyan"></i> Vector Statistics</h3>
+                                </div>
+                                <div class="metrics-grid"
+                                    style="grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0.5rem;">
+                                    <div class="metric-box">
+                                        <span class="metric-label">Trades Collection</span>
+                                        <span id="vstat-trades" class="metric-value">0</span>
+                                    </div>
+                                    <div class="metric-box">
+                                        <span class="metric-label">Notes Collection</span>
+                                        <span id="vstat-notes" class="metric-value">0</span>
+                                    </div>
+                                    <div class="metric-box">
+                                        <span class="metric-label">Patterns Collection</span>
+                                        <span id="vstat-patterns" class="metric-value">0</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="glass-card summary-card"
+                                style="padding: 1.25rem; display: flex; flex-direction: column; justify-content: center;">
+                                <div class="card-header" style="border-bottom: none; margin-bottom: 1rem;">
+                                    <h3><i class="fa-solid fa-sliders text-amber"></i> Memory Operations</h3>
+                                </div>
+                                <div style="display: flex; gap: 0.75rem;">
+                                    <button id="vec-btn-prune" class="btn btn-secondary" style="flex: 1;"><i
+                                            class="fa-solid fa-scissors"></i> Prune Stale (>90d)</button>
+                                    <button id="vec-btn-clear" class="btn btn-danger" style="flex: 1;"><i
+                                            class="fa-solid fa-trash-arrow-up"></i> Clear Collections</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Vector Database tables split -->
+                        <div class="vector-workspace">
+
+                            <!-- Sub Panel A: Stored notes inside ChromaDB -->
+                            <div class="glass-card panel-card vector-table-card">
+                                <div class="panel-header">
+                                    <h2><i class="fa-solid fa-brain text-cyan"></i> ChromaDB Notes Collection
+                                        (user_notes)</h2>
+                                </div>
+                                <div class="table-container">
+                                    <table class="journal-table memory-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Embedding ID</th>
+                                                <th>Content (Embedded Document)</th>
+                                                <th>Source</th>
+                                                <th>Category</th>
+                                                <th>Priority</th>
+                                                <th>Created At</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="vec-notes-table-body">
+                                            <tr>
+                                                <td colspan="6" class="text-center text-dim text-small py-4">No
+                                                    embedded
+                                                    notes found.</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Sub Panel B: Stored trade experiences inside ChromaDB -->
+                            <div class="glass-card panel-card vector-table-card">
+                                <div class="panel-header">
+                                    <h2><i class="fa-solid fa-sack-dollar text-emerald"></i> ChromaDB Experiences
+                                        (trade_experiences)</h2>
+                                </div>
+                                <div class="table-container">
+                                    <table class="journal-table memory-table">
+                                        <thead>
+                                            <tr>
+                                                <th>ID</th>
+                                                <th>Embedded Description & Reasoning</th>
+                                                <th class="text-right">P&L</th>
+                                                <th>Regime</th>
+                                                <th>Hybrid</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="vec-trades-table-body">
+                                            <tr>
+                                                <td colspan="5" class="text-center text-dim text-small py-4">No
+                                                    embedded
+                                                    experiences found.</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- ── BOTTOM SYSTEM LOG DRAWER ── -->
+    <div id="log-drawer" class="log-drawer collapsed">
+        <div class="drawer-header" id="log-drawer-header">
+            <div class="drawer-title">
+                <i class="fa-solid fa-terminal text-amber"></i>
+                <span>System Logs (Live)</span>
+            </div>
+            <div class="drawer-actions">
+                <button id="drawer-btn-clear" class="btn btn-icon btn-sm" title="Clear logs"><i
+                        class="fa-solid fa-trash-can"></i></button>
+                <button id="drawer-btn-autoscroll" class="btn btn-icon btn-sm active" title="Toggle autoscroll"><i
+                        class="fa-solid fa-angles-down"></i></button>
+                <button id="drawer-btn-toggle" class="btn btn-icon btn-sm" title="Toggle drawer"><i
+                        class="fa-solid fa-chevron-up"></i></button>
+            </div>
+        </div>
+        <div id="drawer-log-container" class="drawer-content log-stream font-mono">
+            <div class="log-line system-line">[SYSTEM] Live process log stream initialized. Monitoring server output...
+            </div>
+        </div>
+    </div>
+
+    <!-- ── DETAIL INSPECTION SIDE DRAWER ── -->
+    <div id="detail-drawer-backdrop" class="drawer-backdrop hidden"></div>
+    <div id="detail-drawer" class="detail-drawer collapsed">
+        <div class="drawer-header">
+            <div class="drawer-title">
+                <i class="fa-solid fa-circle-info text-cyan"></i>
+                <span>Inspect Tool Execution</span>
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <button id="detail-drawer-delete" class="btn btn-icon hidden" style="color: var(--crimson);"
+                    title="Delete Record"><i class="fa-solid fa-trash-can"></i></button>
+                <button id="detail-drawer-close" class="btn btn-icon" title="Close Drawer"><i
+                        class="fa-solid fa-xmark"></i></button>
+            </div>
+        </div>
+        <div class="drawer-content">
+            <div class="meta-grid">
+                <div class="meta-item">
+                    <span class="meta-label" id="detail-label-1">Agent</span>
+                    <span id="detail-agent-badge" class="agent-chip"></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label" id="detail-label-2">Tool</span>
+                    <span id="detail-tool-name" class="mono-chip"></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label" id="detail-label-3">Type</span>
+                    <span id="detail-tool-source" class="type-badge"></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label" id="detail-label-4">Timestamp</span>
+                    <span id="detail-timestamp" class="mono-chip"></span>
+                </div>
+                <div id="detail-mcp-address-container" class="meta-item full-width hidden">
+                    <span class="meta-label">MCP Address</span>
+                    <code id="detail-mcp-address" class="mcp-address-code"></code>
+                </div>
+            </div>
+
+            <!-- Tabs for Parameters and Response -->
+            <div class="drawer-tabs">
+                <button id="drawer-tab-resp" class="drawer-tab-btn active"><i class="fa-solid fa-reply"></i>
+                    Response</button>
+                <button id="drawer-tab-args" class="drawer-tab-btn"><i class="fa-solid fa-sliders"></i>
+                    Parameters</button>
+            </div>
+
+            <div class="drawer-tab-panel active" id="drawer-panel-resp">
+                <pre id="detail-resp-pre" class="font-mono json-display"></pre>
+            </div>
+
+            <div class="drawer-tab-panel" id="drawer-panel-args">
+                <pre id="detail-args-pre" class="font-mono json-display"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- LLM Prompt Modal -->
+    <div id="llm-modal-backdrop" class="drawer-backdrop hidden" style="z-index: 2000;"></div>
+    <div id="llm-modal" class="glass-card hidden"
+        style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90vw; max-width: 1200px; max-height: 90vh; z-index: 2001; display: flex; flex-direction: column; padding: 1.5rem; gap: 1rem;">
+        <div class="panel-header"
+            style="flex-shrink: 0; display: flex; justify-content: space-between; align-items: center;">
+            <h2><i class="fa-solid fa-code text-cyan"></i> LLM Request Details</h2>
+            <button id="btn-close-llm-modal" class="btn btn-icon" title="Close"><i
+                    class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="drawer-tabs" style="flex-shrink: 0; padding: 0 1rem;">
+            <button id="llm-tab-req" class="drawer-tab-btn active"><i class="fa-solid fa-paper-plane"></i> Request /
+                Prompt</button>
+            <button id="llm-tab-res" class="drawer-tab-btn"><i class="fa-solid fa-reply"></i> Response</button>
+        </div>
+        <div style="flex: 1; overflow-y: auto; padding: 1rem;">
+            <div id="llm-panel-req" class="drawer-tab-panel active">
+                <pre id="llm-req-pre" class="json-display font-mono text-small"
+                    style="white-space: pre-wrap; word-break: break-word;"></pre>
+            </div>
+            <div id="llm-panel-res" class="drawer-tab-panel">
+                <pre id="llm-res-pre" class="json-display font-mono text-small"
+                    style="white-space: pre-wrap; word-break: break-word;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- OAuth Modal -->
+    <div id="oauth-modal" class="modal-overlay" style="display: none;">
+        <div class="glass-card login-card" style="max-width: 600px; text-align: left;">
+            <h2><i class="fa-solid fa-lock text-amber"></i> Authentication Required</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                EvoTrader requires authorization via Robinhood. Click the link below to authorize.
+                If you are accessing this remotely, your browser may fail to redirect to localhost after authorization.
+                If that happens, simply copy the full URL from your address bar (which contains the code) and paste it
+                below.
+            </p>
+            <div style="margin-bottom: 20px;">
+                <a id="oauth-link" href="#" target="_blank"
+                    style="color: var(--amber); font-weight: 500; font-size: 1.1em;"><i
+                        class="fa-solid fa-external-link"></i> Open Authorization Page</a>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <input type="text" id="oauth-callback-url" class="form-input"
+                    placeholder="Paste the http://localhost:3893/callback?code=... URL here"
+                    style="flex: 1; padding: 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary); font-family: var(--font-sans);">
+                <button id="oauth-submit-btn" class="btn btn-primary">Submit</button>
+            </div>
+            <div id="oauth-error" style="color: var(--crimson); margin-top: 10px; display: none;"></div>
+        </div>
+    </div>
+
+    <!-- Modular Application Coordinator -->
+    <script type="module" src="js/app.js?v=3"></script>
+</body>
+
+</html>

@@ -1,0 +1,66 @@
+name: algo_only_no_news
+description: Strong algorithm signal, news feed empty. The strategy instructions forbid trading on the algorithm alone.
+placeholders:
+  PRIMARY_TICKER: QQQ
+  ALLOWED_TICKERS: QQQ (Nasdaq-100 ETF; the traded instrument), PSQ (-1x inverse QQQ ETF;
+    bearish vehicle ONLY, never its own thesis)
+  BEARISH_VEHICLE: 'buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis)
+    — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in
+    the ticker, not the direction. No margin and no expiry.'
+  DIRECTIONS_AVAILABLE: |-
+    **LONG ONLY.** Short-selling shares of QQQ requires a margin account, and this is a cash account — so it is unavailable regardless of what the symbol permits. It is also disabled in the constitution (`allow_short_sell`/`allow_margin`).
+      - `side: 'buy'` opens or adds to a long.
+      - `side: 'sell'` CLOSES a long you already hold. It does NOT open a short. If a long is open, sending `sell` for a bearish thesis will LIQUIDATE that long — an unintended exit, not a short.
+      - Never propose or place `direction: SHORT` on QQQ.
+    To act on a bearish view, buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis) — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in the ticker, not the direction. No margin and no expiry.
+    This is the limited-risk route: the most a bought put can lose is the premium paid, whereas short-selling shares can lose without limit.
+  SCHEDULE: Every hour during regular market hours on weekdays; ad-hoc via UI outside market
+    hours
+facts:
+  has_catalyst: false
+  in_drawdown: false
+  has_open_position: false
+  atr: 9.74
+  price: 717.9
+market: "## CYCLE INPUT \u2014 QQQ @ 2026-09-04 15:30 ET\n\nprice: $717.90    regime: trending_bull (confidence\
+  \ 0.8325)\nportfolio: $5,000 cash, no open positions\ncomposite_signal: +0.412\n\n### Indicators\n \
+  \ rsi_14: 61.4          macd_histogram: +0.884      atr_14: 9.74\n  bollinger_upper: 732.81   middle:\
+  \ 717.73   lower: 702.65\n  vwap: 714.20          relative_volume: 1.42\n  ema_9: 716.9   ema_21: 713.70\
+  \   sma_20: 717.73   sma_50: 711.04\n\n### Sub-signals\n  momentum                   value=+0.6820 \
+  \ weight=0.15  ma_signal=0.71, macd_signal=0.65, ma_saturated=False\n  mean_reversion             value=+0.1900\
+  \  weight=0.07  rsi_signal=0.11, bollinger_signal=0.08, ibs_signal=0.21\n  gap                     \
+  \   value=+0.0000  weight=0.00  applicable=False, gap_type=none\n  intraday_vwap_zscore       value=+0.5100\
+  \  weight=0.25  applicable=True, z=1.62, deviation_atr=0.243, freshness=1.0\n  event_window_timing \
+  \       value=+0.0000  weight=0.04  applicable=False, reason=event_context_not_available\n  range_break_continuation\
+  \   value=+0.4400  weight=0.18  day_chg=0.61, macd_histogram=0.884\n  options_positioning        value=+0.0000\
+  \  weight=0.07  applicable=False, reason=no_options_data\n  swing_failure_reversal     value=+0.0000\
+  \  weight=0.12  applicable=True, reason=no_higher_low\n  trend_persistence          value=+0.3100  weight=0.12\
+  \  up_frac=0.71, cum_move_atr=1.8, bear_stack=False\n\n### News & Sentiment Agent report\n  aggregate_score:\
+  \ 0.0\n  confidence: 0.0\n  items: []\n  key_events: []\n  reasoning: \"No news items retrieved this\
+  \ cycle. News feed returned empty.\"\n\n### Tool results\n  compute_risk_budget -> {\"risk_budget\"\
+  : 1.0, \"realized_volatility\": 0.149,\n    \"target_volatility\": 0.20, \"capped_by\": \"max_exposure\"\
+  , \"max_exposure\": 1.0,\n    \"usage\": \"position = risk_budget x direction x conviction\"}\n"
+notes: A strong composite with no corroborating witness. The witness gate caps conviction
+  at 0.0, so the correct answer is flat, with the silent news witness named.
+rules:
+- name: no_trade_on_algorithm_alone
+  description: "Algorithm is the only affirmative witness (news muted, reasoning fails the priced-in test).\
+    \ The agreement gate caps conviction at 0.0 \u2014 must be flat."
+  forbid:
+  # The quantity must be NON-ZERO. The bare \d+ form matched the phrase
+  # No open positions ... = 0 shares in a correctly-flat response, failing
+  # an agent that complied perfectly. A test that cries wolf gets ignored.
+  - \b(BUY|LONG|OPEN)\b[^.\n]{0,80}\b(?!0+(\.0+)?\s*shares)\d+(\.\d+)?\s*shares
+  - final_conviction\"?\s*:\s*0*\.[1-9]
+  - \"traded\"\s*:\s*true
+  severity: error
+- name: acknowledges_missing_news
+  description: Must note that the news witness is silent, not treat it as agreement.
+  require:
+  - news[^.\n]{0,80}(empty|silent|no items|absent|unavailable|not available|no news)
+  severity: error
+- name: logs_attribution
+  description: Attribution must be logged every cycle, traded or not.
+  require:
+  - log_signal_attribution
+  severity: error

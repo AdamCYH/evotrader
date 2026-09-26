@@ -1,0 +1,76 @@
+name: drawdown_no_cut
+description: Portfolio in drawdown, position underwater, stale news, annihilated vwap channel.
+placeholders:
+  PRIMARY_TICKER: QQQ
+  ALLOWED_TICKERS: QQQ (Nasdaq-100 ETF; the traded instrument), PSQ (-1x inverse QQQ ETF;
+    bearish vehicle ONLY, never its own thesis)
+  BEARISH_VEHICLE: 'buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis)
+    — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in
+    the ticker, not the direction. No margin and no expiry.'
+  DIRECTIONS_AVAILABLE: |-
+    **LONG ONLY.** Short-selling shares of QQQ requires a margin account, and this is a cash account — so it is unavailable regardless of what the symbol permits. It is also disabled in the constitution (`allow_short_sell`/`allow_margin`).
+      - `side: 'buy'` opens or adds to a long.
+      - `side: 'sell'` CLOSES a long you already hold. It does NOT open a short. If a long is open, sending `sell` for a bearish thesis will LIQUIDATE that long — an unintended exit, not a short.
+      - Never propose or place `direction: SHORT` on QQQ.
+    To act on a bearish view, buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis) — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in the ticker, not the direction. No margin and no expiry.
+    This is the limited-risk route: the most a bought put can lose is the premium paid, whereas short-selling shares can lose without limit.
+  SCHEDULE: Every hour during regular market hours on weekdays; ad-hoc via UI outside market
+    hours
+facts:
+  has_catalyst: false
+  in_drawdown: true
+  has_open_position: true
+  atr: 11.86
+  price: 702.15
+  stop_breached: true
+market: "## CYCLE INPUT \u2014 QQQ @ 2026-09-04 10:30 ET\n\nprice: $702.15    regime: trending_bear (confidence\
+  \ 0.8501)\nportfolio: $4,180 equity (started the month at $5,050), one open position:\n  QQQ 6 shares\
+  \ @ $728.40 entry, now $702.15  (unrealised -$157.50, -3.6%)\n  protective stop: MANUAL at $713.00 \u2014\
+  \ price $702.15 is BELOW it (breached)\ncomposite_signal: -0.298\n\n### Indicators\n  rsi_14: 31.2 \
+  \         macd_histogram: -1.940     atr_14: 11.86\n  bollinger_upper: 738.10   middle: 716.50   lower:\
+  \ 694.90\n  vwap: 705.80          relative_volume: 1.88\n  ema_9: 709.4   ema_21: 716.2   sma_20: 716.50\
+  \   sma_50: 712.30\n\n### Sub-signals\n  momentum                   value=-0.5100  weight=0.15  ma_signal=-0.55,\
+  \ macd_signal=-0.47\n  mean_reversion             value=+0.3400  weight=0.07  rsi_signal=0.42, bollinger_signal=0.28\n\
+  \  gap                        value=-0.2200  weight=0.00  gap_pct=-0.9, gap_type=gap_down, applicable=True\n\
+  \  intraday_vwap_zscore       value=-0.000164 weight=0.25  applicable=True, z=-1.85, deviation_atr=-0.278,\
+  \ freshness=0.0002\n  event_window_timing        value=+0.0000  weight=0.04  applicable=False, reason=event_context_not_available\n\
+  \  range_break_continuation   value=-0.3800  weight=0.18  day_chg=-1.42, macd_histogram=-1.940\n  options_positioning\
+  \        value=+0.0000  weight=0.07  applicable=False, reason=no_options_data\n  swing_failure_reversal\
+  \     value=+0.0000  weight=0.12  applicable=False, reason=stale_vwap_anchor\n  trend_persistence  \
+  \        value=-0.4100  weight=0.12  down_frac=0.71, cum_move_atr=-2.1, bear_stack=True\n\n### News\
+  \ & Sentiment Agent report\n  aggregate_score: -0.25\n  confidence: 0.35\n  items:\n    - source: MarketWatch,\
+  \ headline: \"Tech selloff continues for third session\"\n      sentiment: -0.4, relevance: 0.7, timestamp:\
+  \ 2026-09-02T14:10:00Z\n  key_events: []\n  reasoning: \"Broad risk-off tone. The selloff has been running\
+  \ three sessions\n   and is widely reported.\"\n\n### Tool results\n  compute_risk_budget -> {\"risk_budget\"\
+  : 0.71, \"realized_volatility\": 0.282,\n    \"target_volatility\": 0.20, \"capped_by\": null, \"max_exposure\"\
+  : 1.0,\n    \"usage\": \"position = risk_budget x direction x conviction\"}\n"
+notes: "Three rules collide here: the drawdown rule (no cutting on a directional view), the priced-in\
+  \ test (the selloff is three sessions old and widely reported), and zero-typing (vwap_zscore shows z=-1.85\
+  \ with freshness 0.0002 \u2014 an annihilated channel, not a quiet one)."
+rules:
+- name: no_panic_exit
+  description: Must not close on a directional view. Exiting on the breached stop is a named non-market
+    cause and is correct.
+  forbid:
+  - (close|exit|liquidat|sell)\w*[^.\n]{0,80}(because|since|as)[^.\n]{0,80}(falling|declin|downtrend|bearish|deteriorat|worse)
+  severity: error
+- name: identifies_annihilated_channel
+  description: Must recognise z=-1.85 with freshness 0.0002 as annihilated, not calm.
+  require:
+  - (annihilat|freshness|crushed|amplifier)
+  severity: error
+- name: applies_priced_in_test
+  description: Three-session-old widely-reported selloff is priced; must say so.
+  require:
+  - (priced[ -]?in|already (priced|known|reflected)|stale|three session|old news)
+  severity: warning
+- name: logs_attribution
+  description: Attribution must be logged every cycle, traded or not.
+  require:
+  - log_signal_attribution
+  severity: error
+- name: honours_breached_stop
+  description: A breached manual stop must be exited marketably, not held.
+  require:
+  - (breach|honour|honor)[^.\n]{0,60}(stop|exit)|stop[^.\n]{0,40}breach
+  severity: error

@@ -1,0 +1,39 @@
+"""Where the app finds its project folder and its data folder.
+
+Code and data live apart. The code can be public; the data folder is each
+user's own: settings, agent instructions, algorithm versions, the trade journal,
+memory and keys. By default it is ``data/`` inside the project. Set
+``EVOTRADER_DATA_DIR`` (or pass ``--data-dir``) to keep it anywhere else — for
+example in a private repository of its own, so updating the code never touches
+it.
+
+Every path into the data folder should come from :func:`data_dir`, so that one
+setting moves all of them together.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+DATA_DIR_ENV = "EVOTRADER_DATA_DIR"
+
+
+def project_root() -> Path:
+    """The folder holding ``pyproject.toml``, searched upwards from the working directory.
+
+    Falls back to this package's own checkout, then to the working directory.
+    """
+    for start in (Path.cwd(), Path(__file__).resolve().parent):
+        for folder in (start, *start.parents):
+            if (folder / "pyproject.toml").exists():
+                return folder
+    return Path.cwd()
+
+
+def data_dir(root: Path | None = None) -> Path:
+    """The data folder: ``EVOTRADER_DATA_DIR`` when set, else ``data/`` in the project."""
+    configured = os.environ.get(DATA_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (root or project_root()) / "data"

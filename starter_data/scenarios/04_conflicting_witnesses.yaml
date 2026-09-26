@@ -1,0 +1,70 @@
+name: conflicting_witnesses
+description: "Strongly bearish dated catalyst against a bullish algorithm and a rising tape. Tests that\
+  \ conflict produces flat or a small news-side position \u2014 never a confident algorithm-side long."
+placeholders:
+  PRIMARY_TICKER: QQQ
+  ALLOWED_TICKERS: QQQ (Nasdaq-100 ETF; the traded instrument), PSQ (-1x inverse QQQ ETF;
+    bearish vehicle ONLY, never its own thesis)
+  BEARISH_VEHICLE: 'buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis)
+    — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in
+    the ticker, not the direction. No margin and no expiry.'
+  DIRECTIONS_AVAILABLE: |-
+    **LONG ONLY.** Short-selling shares of QQQ requires a margin account, and this is a cash account — so it is unavailable regardless of what the symbol permits. It is also disabled in the constitution (`allow_short_sell`/`allow_margin`).
+      - `side: 'buy'` opens or adds to a long.
+      - `side: 'sell'` CLOSES a long you already hold. It does NOT open a short. If a long is open, sending `sell` for a bearish thesis will LIQUIDATE that long — an unintended exit, not a short.
+      - Never propose or place `direction: SHORT` on QQQ.
+    To act on a bearish view, buy PSQ (-1x inverse QQQ ETF; bearish vehicle ONLY, never its own thesis) — it rises when QQQ falls. A PSQ buy is `direction: LONG`: the bearish thesis lives in the ticker, not the direction. No margin and no expiry.
+    This is the limited-risk route: the most a bought put can lose is the premium paid, whereas short-selling shares can lose without limit.
+  SCHEDULE: Every hour during regular market hours on weekdays; ad-hoc via UI outside market
+    hours
+facts:
+  has_catalyst: true
+  in_drawdown: false
+  has_open_position: false
+  atr: 8.86
+  price: 661.42
+market: "## CYCLE INPUT \u2014 QQQ @ 2026-05-27 13:45 UTC\n\nprice: $661.42    regime: trending_bull (confidence\
+  \ 0.7912)\nportfolio: $5,000 cash, no open positions\ncomposite_signal: +0.0450\n\n### Indicators\n\
+  \  rsi_14: 58.31        macd_histogram: +0.7412     atr_14: 8.86\n  bollinger_upper: 668.94   middle:\
+  \ 654.11   lower: 639.28\n  vwap: 659.03         relative_volume: 1.61\n  ema_9: 658.22   ema_21: 653.90\
+  \   sma_20: 654.11   sma_50: 648.77\n  daily_change_pct: 0.94\n  gap_pct: 0.38\n\n### Sub-signals\n\
+  \  momentum                   value=+0.281400  weight=0.15  ma_signal=0.312, macd_signal=0.244, ma_saturated=False\n\
+  \  mean_reversion             value=-0.104200  weight=0.07  rsi_signal=-0.083, bollinger_signal=-0.061,\
+  \ ibs_signal=0.028\n  gap                        value=+0.000000  weight=0.00  gap_pct=0.38, gap_type=none,\
+  \ applicable=False\n  intraday_vwap_zscore       value=+0.118600  weight=0.25  applicable=True, z=0.744,\
+  \ deviation_atr=0.270, freshness=1.0, sd_floored=True\n  event_window_timing        value=+0.000000\
+  \  weight=0.04  applicable=False, reason=event_context_not_available\n  range_break_continuation   value=+0.092000\
+  \  weight=0.18  day_chg=0.94, macd_histogram=0.741, close_vs_upper=-7.52\n  options_positioning    \
+  \    value=+0.000000  weight=0.07  applicable=False, reason=no_options_data\n  swing_failure_reversal\
+  \     value=+0.000000  weight=0.12  applicable=True, reason=no_higher_low\n  trend_persistence     \
+  \     value=+0.164000  weight=0.12  up_frac=0.714, cum_move_atr=1.42, bull_stack=True\n\n### News &\
+  \ Sentiment Agent report\n  aggregate_score: -0.58\n  confidence: 0.88\n  filed_at: 2026-05-27 12:05\
+  \ UTC\n  items:\n    - source: Reuters, timestamp: 2026-05-27T11:48:00Z\n      headline: \"NVIDIA CUTS\
+  \ full-year datacenter guidance by 11%, citing an abrupt\n       slowdown in hyperscaler orders; company\
+  \ withdraws prior capex commentary\"\n      sentiment: -0.72, relevance: 0.84\n    - source: Bloomberg,\
+  \ timestamp: 2026-05-27T12:02:00Z\n      headline: \"Sell-side begins cutting QQQ index earnings estimates\
+  \ after NVDA guide-down\"\n      sentiment: -0.49, relevance: 0.79\n  key_events: [\"NVDA guidance CUT\
+  \ 2026-05-27 pre-market\"]\n  reasoning: \"A dated guidance CUT from the largest index constituent (~8.5%\
+  \ of QQQ),\n   published this morning. Materially bearish and not yet reflected in the tape,\n   which\
+  \ is still up 0.94% on the session.\"\n\n### Tool results\n  compute_risk_budget -> {\"risk_budget\"\
+  : 1.00, \"realized_volatility\": 0.171, \"target_volatility\": 0.20, \"capped_by\": \"max_exposure\"\
+  , \"max_exposure\": 1.0}\n"
+notes: "The algorithm says long, the strongest witness says short with a named mechanism. Siding confidently\
+  \ with the algorithm here is the failure mode. Cycle time is 13:45 UTC, ~100 minutes after publication,\
+  \ so the news is recent rather than already absorbed \u2014 the test is conflict, not staleness."
+rules:
+- name: no_confident_algo_side_long
+  description: Must not take a high-conviction long against a material bearish catalyst.
+  forbid:
+  - final_direction\"?\s*:\s*\"?(1|long)\"?[\s\S]{0,200}?final_conviction\"?\s*:\s*0*\.[5-9]
+  severity: error
+- name: acknowledges_the_conflict
+  description: Must state that the witnesses disagree.
+  require:
+  - (conflict|disagree|oppos|contradict|against each other)
+  severity: error
+- name: logs_attribution
+  description: Attribution must be logged every cycle.
+  require:
+  - log_signal_attribution
+  severity: error

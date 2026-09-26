@@ -1,0 +1,11 @@
+name: Initial Composite Strategy
+version: v001_initial
+description: Starting parameters for the composite of ten sub-strategies (momentum,
+  mean reversion, gap, intraday VWAP z-score, event-window timing, range-break continuation,
+  options positioning, swing-failure reversal, trend persistence and VWAP-reclaim continuation)
+  with regime-adaptive weights. A starting point, not a proven edge.
+created_by: system
+created_at: ''
+status: active
+parent_version: null
+is_sim: false

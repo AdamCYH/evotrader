@@ -1,0 +1,72 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment secrets
+.env
+data/.env
+
+# Runtime data (persisted locally, not in version control)
+data/trading/
+logs/
+data/db/
+data/conversations/
+data/memory/
+data/evolution/reviews/
+data/cache/
+
+# User notes are personal — only track the README template
+data/notes/*
+!data/notes/README_TEMPLATE.md
+
+# Test / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# Backtest artifacts — downloaded market data and generated reports.
+# These are reproducible from the runner and can be large; keep them local.
+data/backtest/cache/
+data/backtest/reports/
+
+# Scratch / debug
+debug.txt
+scratch/*.txt
+*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cycle logs written by ./run.sh offline
+data/logs/
+
+# ── Your data folder ───────────────────────────────────────────────
+# Your settings, instructions, journal, memory and keys live in data/ (or
+# wherever EVOTRADER_DATA_DIR points). They are yours: never commit them here.
+/data/

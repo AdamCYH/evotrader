@@ -1,0 +1,238 @@
+# ═══════════════════════════════════════════════════════════════════
+#  EVOTRADER — SETTINGS
+# ═══════════════════════════════════════════════════════════════════
+#  The app reads this file when it starts: restart it after an edit.
+#  Hard risk limits live in constitution.yaml, which no agent may change.
+#  docs/settings_reference.md explains the keys in more detail.
+#
+#  `./run.sh setup` rewrites the `model:` block and, if you choose your
+#  Claude subscription, the `agent_runtime:` block. The rest is yours.
+#
+#  CONTENTS
+#    1  MODE & ASSET ......... paper or live, and what to trade
+#    2  SCHEDULE ............. when cycles run
+#    3  AGENT RUNTIMES ....... API (per token) or a Claude subscription
+#    4  MODELS ............... which model each agent uses
+#    5  PROMPT CACHING ....... Anthropic cache tuning
+#    6  DATA SOURCES ......... broker and research connections
+#    7  EVOLUTION ............ approval and rate limit for self-improvement
+#    8  SIM BROKER ........... paper-trading fills
+#    9  WEB CONSOLE .......... trade approval
+# ═══════════════════════════════════════════════════════════════════
+
+
+# ── 1 ── MODE & ASSET ──────────────────────────────────────────────
+
+# sim  = paper trading, a dry run: orders go to a simulated broker and no real
+#        money moves. Prices still come from Robinhood, so you sign in either way.
+# live = real orders in your own Robinhood account.
+mode: sim
+
+asset:
+  primary_ticker: "SPY"
+  # An inverse ETF that rises when the traded ticker falls, to act on a
+  # bearish view without margin (for example "SH" for SPY). null = none. It
+  # must track the traded ticker exactly, be listed in constitution.yaml's
+  # allowed_tickers, and have an entry under `instruments` with its leverage.
+  inverse_ticker: null
+  # What each permitted symbol is, shown to the agents beside the ticker.
+  # `leverage` goes into their sizing guidance for a leveraged fund (-2.0 for a
+  # fund that moves -2x the traded ticker).
+  instruments:
+    SPY:
+      description: "S&P 500 index ETF; the traded instrument"
+      role: "primary"
+      leverage: 1.0
+  # For a fund: its largest holdings, resolved from live data for whatever
+  # ticker is configured (used for their earnings and to filter news).
+  universe:
+    top_n: 15               # largest holdings treated as relevant
+    min_weight_pct: 1.0     # plus anything at or above this % of the fund
+    cache_ttl_days: 7       # how long a resolved holdings list is reused
+
+# Position sizing. The risk budget — the most capital a position may use — is
+# this target divided by the instrument's realised annual volatility, kept
+# between 0.3 and the constitution's max_total_exposure_pct. 0.15 is about fully
+# invested in a broad index ETF.
+position_sizing:
+  volatility_target_annual: 0.15   # other instrument? set it to (share of capital to hold) × its realised annual volatility
+
+
+# ── 2 ── SCHEDULE ──────────────────────────────────────────────────
+
+schedule:
+  # Shown to the agents, so they choose a holding period that fits.
+  description: "Hourly during regular market hours on weekdays, plus runs started from the console"
+
+  # Automatic runs are started by the web console. They stay off until you
+  # switch them on, here or in the console; until then you start each cycle.
+  cycle_cron_enabled: false
+  evolution_cron_enabled: false
+
+  # Cron times are US/Eastern. A list fires a cycle when ANY entry matches.
+  cycle_cron: "30 9-15 * * 1-5"    # 09:30 to 15:30 ET, Monday to Friday
+  evolution_cron: "0 17 * * 5"     # weekly review, Fridays 17:00 ET
+
+  overnight_interval_seconds: 3600
+  max_cycle_events: 100            # a cycle is stopped after this many events
+
+
+# ── 3 ── AGENT RUNTIMES ────────────────────────────────────────────
+# Two ways to run an agent:
+#   api  — the model provider's API, billed per token. Every agent uses it
+#          unless `agent_runtime` below says otherwise.
+#   cli  — a hosted agent harness (Claude Code) run as a subprocess and billed
+#          to your Claude subscription. Only the strategy and evolution agents
+#          can use it. It is for your own personal use; check your plan's terms.
+
+cli_runtimes:
+  claude_code:
+    driver: "claude_code"     # the adapter that runs this runtime
+
+    # subscription — withhold the API key, so a run is billed to your Claude
+    #                subscription or fails (log in to Claude Code first).
+    # api          — bill per token.
+    # auto         — try the subscription; fall back to the API on a login failure.
+    billing: "subscription"
+
+    model: "opus"             # alias (opus, sonnet, haiku) or a full model id; "" = harness default
+    thinking: "default"       # default (harness decides) | adaptive | off | <token budget>
+    effort: null              # null | low | medium | high | xhigh | max
+    max_turns: 80             # stops a runaway loop from using up your usage window
+    permission_mode: "dontAsk"
+    allow_file_tools: true    # may Read/Grep/Glob the repo; never Write, Edit or Bash
+
+    quota:
+      warn_utilization: 0.85  # send the NEXT task to the API at this share of the usage window
+      on_exhausted: "api"     # api (keep trading, costs money) | skip | fail
+
+# Which runtime each agent uses: "api", or a cli_runtimes key above.
+# Agents not listed use "api". `./run.sh setup` sets strategy and evolution to
+# "claude_code" if you choose your Claude subscription.
+agent_runtime: {}
+
+
+# ── 4 ── MODELS (api runtime) ──────────────────────────────────────
+# Available: gemini-3.1-flash-lite, gemini-3.5-flash, gemini-3.7-flash,
+#            gemini-3.1-pro-preview, anthropic/claude-haiku-4-5-20251001,
+#            anthropic/claude-sonnet-5, anthropic/claude-opus-5
+# A bare name is a Gemini model (GEMINI_API_KEY); "anthropic/..." needs
+# ANTHROPIC_API_KEY. null = use `default`. `live` applies in live mode and
+# `sim` in paper trading.
+
+model:
+  live:
+    default: "gemini-3.7-flash"
+    orchestrator: null
+    strategy_agent: null
+    news_sentiment_agent: null
+    risk_manager_agent: null
+    executor_agent: "gemini-3.1-flash-lite"   # mechanical tool calls: the cheapest model
+    evolution_agent: null
+  sim:
+    default: "gemini-3.7-flash"
+    orchestrator: null
+    strategy_agent: null
+    news_sentiment_agent: null
+    risk_manager_agent: null
+    executor_agent: "gemini-3.1-flash-lite"
+    evolution_agent: null
+
+
+# ── 5 ── PROMPT CACHING (Anthropic models, api runtime) ────────────
+# The unchanged start of a request is read back from cache at about a tenth of
+# the input price. Caching the conversation history, not just the system
+# prompt, is where most of the saving is.
+
+caching:
+  enabled: true
+  message_breakpoints: 2    # 0 = tools and system prompt only; at most 3
+  min_cacheable_chars: 4000 # don't pay for a cache write nothing will read
+  require_multi_turn: true  # skip caching a session's very first call
+  ttl: "5m"                 # "5m" (writes cost 1.25x) or "1h" (writes cost 2x)
+
+
+# ── 6 ── DATA SOURCES ──────────────────────────────────────────────
+
+mcp:
+  providers:
+    robinhood_official:
+      url: "https://agent.robinhood.com/mcp/trading"
+      auth: "oauth"                  # sign in in the browser on first start; no token in .env
+      transport: "streamable_http"
+
+    alpha_vantage:
+      url: "https://mcp.alphavantage.co/mcp"
+      transport: "streamable_http"   # key from ALPHA_VANTAGE_API_KEY (optional)
+
+    stock_analysis:
+      command: "python"
+      args: ["-m", "stock_analysis.server"]
+      transport: "stdio"             # yfinance-based, installed with the project
+
+  # Each role binds to one or more providers, first choice first. Agents get
+  # only the tools of their role.
+  roles:
+    trading: "robinhood_official"    # quotes, orders, positions
+    research:                        # news, sentiment, fundamentals
+      - "alpha_vantage"
+      - "stock_analysis"             # fallback
+
+  # Hide tool descriptions an agent never uses; each one costs tokens on every
+  # call. Exclusion only: a tool no pattern matches stays visible, so a wrong
+  # pattern costs tokens rather than an order the agent cannot place.
+  tool_filter:
+    enabled: true
+    exclude:
+      execution:          # places and watches orders, nothing else
+        - "crypto"
+        - "watchlist"
+        - "scan"
+        - "alert"
+    always_keep:          # never hidden, whatever the patterns match
+      - "place_equity_order"
+      - "place_option_order"
+      - "review_equity_order"
+      - "review_option_order"
+      - "cancel_equity_order"
+      - "cancel_option_order"
+
+  # Trim oversized research responses (news feeds, economic time series) as they
+  # arrive. From order-path tools only an exact duplicate copy of the payload is
+  # ever dropped; nothing else is cut.
+  curation:
+    enabled: true
+    dedupe_structured_content: true  # drop a byte-identical copy of the payload
+    timeseries_max_rows: 120         # ~6 months of daily data, plus a summary of the full history
+    news_max_age_days: 21            # keep articles from the last 21 days; 0 = off
+    news_max_articles: 0             # hard ceiling after the age window; 0 = none
+    news_min_articles: 8             # always keep at least this many
+    news_filter_ticker_sentiment: true  # keep per-ticker sentiment rows for relevant symbols only
+    news_prefer_latest: true         # ask for newest first where the tool allows it
+    backstop_max_chars: 40000        # cut any other oversized response; 0 = off
+    backstop_roles:                  # research only: order-path answers are never cut
+      - research
+
+
+# ── 7 ── EVOLUTION ─────────────────────────────────────────────────
+# Which runtime runs the evolution agent is set in `agent_runtime` above.
+
+evolution:
+  auto_promote: false                  # false = new algorithm and instruction versions wait for you to activate them in the console
+  max_instruction_changes_per_week: 1  # instruction versions the evolution agent may propose per week
+
+
+# ── 8 ── SIM BROKER ────────────────────────────────────────────────
+
+sim_broker:
+  slippage_model: "spread"         # none | spread | fixed
+  slippage_bps: 5                  # used by the fixed model
+  auto_close_expired_options: true
+
+
+# ── 9 ── WEB CONSOLE ───────────────────────────────────────────────
+
+require_trade_approval: true       # each order waits for your click in the console (runs without the console are not held)
+
+logging:
+  level: "INFO"

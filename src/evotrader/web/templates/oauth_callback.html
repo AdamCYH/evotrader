@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    $refresh
+    <title>$title · EvoTrader</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪙</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@600;700&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        /* The console's own design tokens (web/static/css/tokens.css), inlined
+           when the page is served so the two never drift apart. */
+        $tokens
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 1.5rem;
+            background: var(--bg-light, #fbfaf7);
+            color: var(--text-primary, #191919);
+            font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .card {
+            width: 100%;
+            max-width: 26rem;
+            padding: 2.25rem 2rem 2rem;
+            text-align: center;
+            background: var(--bg-card, #f6f5ef);
+            border: 1px solid var(--border-color, #e3dfd0);
+            border-radius: var(--border-radius-lg, 12px);
+            box-shadow: var(--shadow-lg, 0 10px 25px -5px rgba(0, 0, 0, 0.05));
+        }
+
+        .brand {
+            display: flex;
+            align-items: baseline;
+            justify-content: center;
+            gap: 0.4rem;
+            margin-bottom: 1.75rem;
+        }
+
+        .brand-name {
+            font-family: var(--font-serif, Georgia, serif);
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: -0.2px;
+        }
+
+        .brand-by {
+            color: var(--text-dim, #949080);
+            font-size: 0.8rem;
+        }
+
+        .status {
+            width: 3.5rem;
+            height: 3.5rem;
+            margin: 0 auto 1.25rem;
+            display: grid;
+            place-items: center;
+            border-radius: 50%;
+            border: 1px solid;
+        }
+
+        .status svg { width: 1.6rem; height: 1.6rem; }
+
+        .status.ok {
+            color: var(--emerald, #15803d);
+            background: var(--emerald-bg, #dcfce7);
+            border-color: var(--emerald-border, #86efac);
+        }
+
+        .status.warn {
+            color: var(--amber, #b45309);
+            background: var(--amber-bg, #fef3c7);
+            border-color: var(--amber-border, #fcd34d);
+        }
+
+        h1 {
+            margin: 0 0 0.5rem;
+            font-family: var(--font-serif, Georgia, serif);
+            font-size: 1.5rem;
+            font-weight: 700;
+            line-height: 1.25;
+            letter-spacing: -0.3px;
+        }
+
+        p {
+            margin: 0 0 0.5rem;
+            color: var(--text-secondary, #6b6b66);
+            font-size: 0.95rem;
+            line-height: 1.55;
+        }
+
+        .actions { margin-top: 1.5rem; }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.55rem 1.1rem;
+            border-radius: var(--border-radius-sm, 4px);
+            background: var(--amber, #b45309);
+            color: var(--bg-light, #fbfaf7);
+            font-family: var(--font-sans, sans-serif);
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover { background: #92400e; transform: translateY(-1px); }
+
+        .countdown {
+            height: 3px;
+            margin-top: 1.5rem;
+            overflow: hidden;
+            border-radius: 999px;
+            background: var(--border-color, #e3dfd0);
+        }
+
+        .countdown span {
+            display: block;
+            height: 100%;
+            background: var(--emerald, #15803d);
+            transform-origin: left;
+            animation: drain ${seconds}s linear forwards;
+        }
+
+        @keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+        @media (prefers-reduced-motion: reduce) {
+            .countdown span { animation: none; }
+            .btn:hover { transform: none; }
+        }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <div class="brand">
+            <span class="brand-name">EvoTrader</span>
+            <span class="brand-by">by ImmersiaLabs</span>
+        </div>
+        <div class="status $tone" aria-hidden="true">$icon</div>
+        <h1>$title</h1>
+        $body
+    </main>
+</body>
+</html>

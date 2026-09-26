@@ -1,0 +1,25 @@
+-- Migration 0016: Add a structured stop_price (trigger) column to trades.
+--
+-- The stop TRIGGER price was never persisted in any structured field. It
+-- existed only inside free-text `reasoning`, so no agent could verify its own
+-- protective coverage. Worse, `price` on a STOP_LOSS row holds the related
+-- lot's ENTRY price, which reads as a plausible-but-wrong stop level.
+--
+-- Observed consequence over eight live cycles: the Strategy Agent asserted the
+-- same single resting stop was at $702.50, then $704.00, then $702.00, then
+-- "~$704", then $702.50 — five values for one order — and finally conceded it
+-- could not see the trigger price at all. The STOPS instruction "verify the
+-- stop actually rests" was unsatisfiable by construction.
+--
+-- Note the column is only half the fix: `stop_price` was also never passed
+-- from the record_trade tool payload into TradeProposal, so it was None on
+-- every write. That plumbing is repaired in agents/tools.py and db/journal.py
+-- as part of the same change set. Adding the column alone would have left it
+-- permanently NULL.
+--
+-- No backfill is possible or attempted. Historical stop levels exist only as
+-- prose inside `reasoning`, and parsing a price out of free text is exactly
+-- the guesswork this column exists to eliminate. Legacy rows keep NULL, which
+-- correctly reads as "unknown", not as a fabricated level.
+
+ALTER TABLE trades ADD COLUMN stop_price REAL;
