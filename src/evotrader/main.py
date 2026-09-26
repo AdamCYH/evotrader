@@ -339,7 +339,12 @@ async def start(
     logger.info("=" * 60)
     logger.info("Ticker:     %s", config.settings.asset.primary_ticker)
     logger.info("MCP roles: %s", dict(config.settings.mcp.roles))
-    logger.info("Dry Run:    %s", config.settings.dry_run.enabled)
+    logger.info(
+        "Mode:       %s",
+        "practice — orders go to the practice account"
+        if config.settings.dry_run.enabled
+        else "LIVE — orders go to your broker account",
+    )
     logger.info("Evolution Cron: %s", config.settings.schedule.evolution_cron)
     logger.info("Data Dir:   %s", config.data_dir)
     import os
