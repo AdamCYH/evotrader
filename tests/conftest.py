@@ -7,7 +7,7 @@ import importlib.util
 import io
 import itertools
 import shutil
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -47,6 +47,20 @@ def _isolate_process_wide_asset_state():
     yield
     reset_asset_context()
     bind_extended_hours_tickers(None)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _signin_folder_is_temporary(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Keep every test away from the real broker sign-in in ~/.evotrader.
+
+    Building the broker connection creates the sign-in folder and logs to it.
+    With the real one, a test run wrote into the user's home folder, and a
+    test could have read their real token.
+    """
+    folder = tmp_path_factory.mktemp("signin")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(paths.SIGNIN_DIR_ENV, str(folder))
+        yield folder
 
 
 # ---------------------------------------------------------------------------

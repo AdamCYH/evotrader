@@ -28,6 +28,8 @@ import httpx
 from mcp.client.auth.oauth2 import OAuthClientProvider, TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
+from evotrader import paths
+
 logger = logging.getLogger(__name__)
 
 # ─── Module-level Future for cross-component callback resolution ────────
@@ -153,7 +155,7 @@ class FileTokenStorage(TokenStorage):
         )
 
         # ── Forensic: write to a file that survives restarts ─────
-        forensic_log = Path.home() / ".evotrader" / "oauth_forensic.log"
+        forensic_log = paths.signin_dir() / "oauth_forensic.log"
 
         import atexit
 
@@ -166,6 +168,7 @@ class FileTokenStorage(TokenStorage):
             exists = token_path.exists()
             dir_exists = cache_path.exists()
             dir_contents = [p.name for p in cache_path.iterdir()] if dir_exists else []
+            forensic_log.parent.mkdir(parents=True, exist_ok=True)
             with open(forensic_log, "a") as f:
                 f.write(
                     f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] ATEXIT: "
@@ -578,7 +581,7 @@ async def wait_for_callback(port: int, timeout: float = 300.0) -> tuple[str, str
     print("\n" + "=" * 70)
     print("✨  AUTHORIZATION SUCCESSFUL!")
     print("======================================================================")
-    print("• Cached credentials to ~/.evotrader/oauth/")
+    print(f"• Cached credentials to {paths.signin_dir() / 'oauth'}/")
     print("• Initializing connection to Robinhood MCP...")
     print("=" * 70 + "\n")
 
@@ -592,7 +595,7 @@ _active_providers: weakref.WeakSet[OAuthClientProvider] = weakref.WeakSet()
 def clear_oauth_cache(cache_dir: Path | None = None) -> None:
     """Clear cached OAuth tokens from disk and reset in-memory provider state.
 
-    Wipes the on-disk ``~/.evotrader/oauth/`` cache (or the specified ``cache_dir``)
+    Wipes the on-disk ``oauth/`` cache in :func:`paths.signin_dir` (or the specified ``cache_dir``)
     **and** invalidates every live ``OAuthClientProvider`` so the next HTTP request triggers a
     full OAuth re-authentication flow instead of reusing stale in-memory tokens.
     """
@@ -618,7 +621,7 @@ def clear_oauth_cache(cache_dir: Path | None = None) -> None:
             )
             oauth_dir = None
         else:
-            oauth_dir = Path.home() / ".evotrader" / "oauth"
+            oauth_dir = paths.signin_dir() / "oauth"
 
     if oauth_dir and oauth_dir.exists():
         # Log what we're about to delete
@@ -659,7 +662,7 @@ def create_oauth_httpx_factory(
     redirect handlers, linking the server's protocol validation flow to httpx.
     """
     if cache_dir is None:
-        cache_dir = Path.home() / ".evotrader" / "oauth" / hashlib_url(server_url)
+        cache_dir = paths.signin_dir() / "oauth" / hashlib_url(server_url)
 
     storage = FileTokenStorage(cache_dir)
 

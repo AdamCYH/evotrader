@@ -1,4 +1,4 @@
-"""Where the app finds its project folder and its data folder.
+"""Where the app finds its project folder, its data folder and the broker sign-in.
 
 Code and data live apart. The code can be public; the data folder is each
 user's own: settings, agent instructions, algorithm versions, the trade journal,
@@ -37,3 +37,19 @@ def data_dir(root: Path | None = None) -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return (root or project_root()) / "data"
+
+
+SIGNIN_DIR_ENV = "EVOTRADER_SIGNIN_DIR"
+
+
+def signin_dir() -> Path:
+    """Where the broker sign-in is kept: ``EVOTRADER_SIGNIN_DIR`` when set, else ``~/.evotrader``.
+
+    Outside the data folder on purpose: the sign-in belongs to the person at
+    this computer, not to a data folder that may be copied, shared or kept in a
+    repository.
+    """
+    configured = os.environ.get(SIGNIN_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.home() / ".evotrader"
