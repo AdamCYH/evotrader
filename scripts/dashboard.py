@@ -189,7 +189,7 @@ def _system_overview(config: AppConfig) -> None:
 
     # Dry run status
     dry_run = config.settings.dry_run.enabled
-    model = config.settings.model.default or "unknown"
+    model = config.settings.active_model.default or "unknown"
     ticker = config.settings.asset.primary_ticker
     _kv(
         "Mode",
@@ -525,8 +525,13 @@ async def _audit_summary(db_path: Path) -> None:
 
 def _footer(config: AppConfig) -> None:
     """Print the dashboard footer."""
-    db_hint = config.db_path.relative_to(config.project_root)
-    print(f"  {_C.DIM}Data: {db_hint} │ Refresh: uv run python scripts/dashboard.py{_C.RESET}")
+    # The data folder may live outside the project (EVOTRADER_DATA_DIR).
+    db_hint = (
+        config.db_path.relative_to(config.project_root)
+        if config.db_path.is_relative_to(config.project_root)
+        else config.db_path
+    )
+    print(f"  {_C.DIM}Data: {db_hint} │ Refresh: ./run.sh cli-dashboard{_C.RESET}")
     print()
 
 
