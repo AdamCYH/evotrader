@@ -31,22 +31,41 @@ class McpQuoteBase(BaseModel):
         return self.last_trade_price or 0.0
 
 
+# Beyond this gap between the best buy and sell offers, as a share of their
+# midpoint, the book is closed or stale and the midpoint is no price at all.
+# In regular hours a liquid stock's offers are cents apart.
+MAX_MIDPOINT_SPREAD = 0.01
+
+
 class McpEquityQuote(McpQuoteBase):
     """Equity quote mapping for get_equity_quotes."""
 
+    # The latest pre-market / after-hours / overnight trade. Robinhood's MCP
+    # server names it last_non_reg_trade_price; the older name is still read.
+    last_non_reg_trade_price: float | None = Field(default=None)
     last_extended_hours_trade_price: float | None = Field(default=None)
 
     @property
     def ext(self) -> float:
-        return self.last_extended_hours_trade_price or 0.0
+        return self.last_non_reg_trade_price or self.last_extended_hours_trade_price or 0.0
 
     def resolve_live_price(self) -> float:
-        """Returns the most accurate live price, prioritizing mid-price for 24-hour accuracy."""
-        if self.ask > 0 and self.bid > 0:
-            return (self.ask + self.bid) / 2.0
+        """The best estimate of the price right now.
+
+        The midpoint of the best offers while the book is live; otherwise the
+        latest trade, the extended-hours one if there is one. With the market
+        closed the book can hold stale offers far apart: MSTR on 2026-09-26 had
+        a $158 bid and a $185 ask, and their midpoint, $171.50, was shown as the
+        price (and given to the agents) while it last traded at $158.92.
+        """
+        mid = (self.ask + self.bid) / 2.0 if self.ask > 0 and self.bid > 0 else 0.0
+        if mid and (self.ask - self.bid) / mid <= MAX_MIDPOINT_SPREAD:
+            return mid
         if self.ext > 0:
             return self.ext
-        return self.reg
+        if self.reg > 0:
+            return self.reg
+        return mid  # never traded: a wide book is still better than nothing
 
 
 class McpOptionQuote(McpQuoteBase):

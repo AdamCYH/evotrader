@@ -104,3 +104,39 @@ def test_position_parsing_option():
     assert pos.option_type == "call"
     assert pos.strike == 500.0
     assert pos.expiration == "2026-12-31"
+
+
+# Found 2026-09-26: with the market closed, the console showed MSTR at $171.50
+# while Robinhood showed $158.92. The quote held stale offers far apart ($158
+# bid, $185 ask) and the price was their midpoint; the extended-hours trade was
+# missed because Robinhood's field is now last_non_reg_trade_price.
+
+
+def test_a_closed_book_is_not_averaged():
+    quote = McpEquityQuote(
+        last_trade_price=158.61,
+        last_non_reg_trade_price=158.92,
+        bid_price=158.0,
+        ask_price=185.0,
+    )
+    assert quote.resolve_live_price() == 158.92
+
+
+def test_without_an_extended_hours_trade_the_close_is_used():
+    quote = McpEquityQuote(last_trade_price=158.61, bid_price=158.0, ask_price=185.0)
+    assert quote.resolve_live_price() == 158.61
+
+
+def test_a_live_book_is_still_averaged():
+    quote = McpEquityQuote(
+        last_trade_price=158.61,
+        last_non_reg_trade_price=158.92,
+        bid_price=158.90,
+        ask_price=158.94,
+    )
+    assert abs(quote.resolve_live_price() - 158.92) < 1e-9
+
+
+def test_a_stock_that_never_traded_falls_back_to_the_book():
+    quote = McpEquityQuote(bid_price=10.0, ask_price=12.0)
+    assert quote.resolve_live_price() == 11.0
