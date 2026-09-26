@@ -1259,6 +1259,21 @@ def run() -> None:
         # resolves the same folder.
         os.environ[paths.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
 
+    # A data folder that was never set up has no settings, no instructions and no
+    # algorithm: the app would run on built-in defaults with instruction-less
+    # agents. Setup seeds the folder from starter_data/ and asks for the keys.
+    from evotrader import paths as _paths
+
+    data_folder = _paths.data_dir()
+    if not (data_folder / "settings.yaml").is_file():
+        print(
+            f"No settings in {data_folder} yet.\n"
+            "Run ./run.sh setup first: it creates your data folder from the starter "
+            "data and asks for your AI provider and keys (about a minute).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Safety validation: cannot run live trading with a mocked/simulated clock
     if args.mode == "live" and args.mock_time:
         parser.error(

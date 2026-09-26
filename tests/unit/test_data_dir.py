@@ -63,6 +63,29 @@ def test_the_command_line_flag_sets_it_for_everything(tmp_path, monkeypatch) -> 
         seen["data_dir"] = paths.data_dir()
 
     monkeypatch.setattr(main, "start", fake_start)
+    (tmp_path / "flag").mkdir()
+    (tmp_path / "flag" / "settings.yaml").write_text("{}\n")  # a set-up data folder
     monkeypatch.setattr(sys, "argv", ["evotrader", "--data-dir", str(tmp_path / "flag")])
     main.run()
     assert seen["data_dir"] == (tmp_path / "flag").resolve()
+
+
+def test_starting_before_setup_stops_with_directions(tmp_path, monkeypatch, capsys) -> None:
+    """Found 2026-09-26: with no data folder the app fell back to built-in
+    defaults and empty instruction folders, so the agents ran with no
+    instructions. It now stops and says to run setup, which seeds the folder
+    from starter_data/ and asks for the keys."""
+    monkeypatch.setenv(paths.DATA_DIR_ENV, "restored-after-the-test")
+    monkeypatch.delenv(paths.DATA_DIR_ENV)
+    started = []
+
+    async def fake_start(**_kwargs) -> None:
+        started.append(True)
+
+    monkeypatch.setattr(main, "start", fake_start)
+    monkeypatch.setattr(sys, "argv", ["evotrader", "--data-dir", str(tmp_path / "empty")])
+    with pytest.raises(SystemExit) as stopped:
+        main.run()
+    assert stopped.value.code == 1
+    assert not started, "the app must not start on an empty data folder"
+    assert "./run.sh setup" in capsys.readouterr().err
