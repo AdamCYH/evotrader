@@ -7,7 +7,7 @@ How the test suite is organised and how to run it. The rules for writing tests
 
 ```bash
 uv run pytest -q                      # everything
-node --test tests/js                  # only the console's JavaScript tests
+node --test tests/js/*.test.mjs                  # only the console's JavaScript tests
 uv run pytest tests/unit/test_server.py                          # one file
 uv run pytest tests/unit/test_server.py -k "trigger_evolution"   # tests matching a name
 uv run pytest --cov=src/evotrader   # with a coverage report

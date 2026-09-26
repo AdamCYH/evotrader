@@ -53,7 +53,7 @@ that this one setting moves everything.
 uv run ruff check src tests            # lint
 uv run ruff format --check src tests   # formatting (run without --check to fix)
 uv run pytest -q                       # Python tests
-node --test tests/js                   # JavaScript tests for the console
+node --test tests/js/*.test.mjs                   # JavaScript tests for the console
 ```
 
 `uv run pytest -q` also runs the JavaScript tests through

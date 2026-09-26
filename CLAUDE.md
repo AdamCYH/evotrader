@@ -16,7 +16,7 @@ settings, instructions, algorithm versions, journal and keys live in a separate
 ```bash
 uv sync --all-extras                   # install
 uv run pytest -q                       # tests (also runs the JS tests if node exists)
-node --test tests/js                   # console JavaScript tests
+node --test tests/js/*.test.mjs                   # console JavaScript tests
 uv run ruff check src tests            # lint
 uv run ruff format src tests           # format
 ./run.sh --mode sim                    # console in practice mode, http://127.0.0.1:8080
