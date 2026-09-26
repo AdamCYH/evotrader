@@ -209,10 +209,10 @@ class TestOneAppPerFolder:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
             other.write("4242\n")
             other.flush()
-            assert main._hold(folder) == 4242
+            assert paths.hold(folder) == 4242
         finally:
             other.close()
-        assert main._hold(folder) is None, "free again once the other one has gone"
+        assert paths.hold(folder) is None, "free again once the other one has gone"
 
     def test_the_app_says_so_and_does_not_start(self, started, monkeypatch, capsys, tmp_path):
         fcntl = pytest.importorskip("fcntl")

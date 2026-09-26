@@ -1,14 +1,46 @@
+"""Inspect an MCP server's tools: list them, show one's input, or call a read-only one.
+
+    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py list
+    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py schema get_equity_quotes
+    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py call get_equity_quotes '{"symbols": ["SPY"]}'
+    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py dump
+
+``dump`` writes every tool's full schema to ``<data folder>/mcp_tool_schemas.json``,
+to compare with the tool definitions in ``src/evotrader/mcp/robinhood.py``.
+
+Two things it refuses, both learned the hard way:
+
+* Tools that place, change or cancel orders. Orders go through the app, where
+  the constitution, the risk gate and the approval step check them; a direct
+  call here would skip all three, on a real account.
+* Running while EvoTrader runs. Both would use the one saved broker sign-in,
+  and two programs refreshing it can invalidate it (the app then asks you to
+  sign in again).
+"""
+
 import argparse
 import asyncio
 import json
 import sys
 
+from evotrader import paths
 from evotrader.agents.factory import create_mcp_toolsets
+from evotrader.callbacks.risk_gate import _GATED_TOOLS, is_unchecked_order_tool
 from evotrader.config import AppConfig
 
 
+def changes_orders(tool: str) -> bool:
+    """True for a tool that places, changes or cancels an order."""
+    name = tool.lower()
+    return (
+        tool in _GATED_TOOLS
+        or is_unchecked_order_tool(tool)
+        or ("order" in name and name.startswith(("cancel", "replace", "modify", "place", "submit")))
+    )
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="MCP Debugger for AI Agents")
+    parser = argparse.ArgumentParser(description="Inspect an MCP server's tools")
     parser.add_argument(
         "--provider",
         type=str,
@@ -26,11 +58,29 @@ async def main():
     schema_parser.add_argument("tool", type=str, help="The name of the tool")
 
     # Call tool
-    call_parser = subparsers.add_parser("call", help="Call a specific tool")
+    call_parser = subparsers.add_parser("call", help="Call a read-only tool")
     call_parser.add_argument("tool", type=str, help="The name of the tool to call")
     call_parser.add_argument("args", type=str, help="JSON string representing the arguments")
 
+    # Dump every schema
+    subparsers.add_parser(
+        "dump", help="Write every tool's full schema to <data folder>/mcp_tool_schemas.json"
+    )
+
     args = parser.parse_args()
+
+    if args.command == "call" and changes_orders(args.tool):
+        sys.exit(
+            f"'{args.tool}' places, changes or cancels orders: never from this script. "
+            "Orders go through the app, where the risk checks and your approval apply."
+        )
+    holder = paths.hold(paths.signin_dir())
+    if holder is not None:
+        who = f" (process {holder})" if holder > 0 else ""
+        sys.exit(
+            f"EvoTrader is running{who} and uses the broker sign-in. Stop it first: two "
+            "programs refreshing one sign-in can invalidate it."
+        )
 
     config = AppConfig()
     mcp_toolsets = create_mcp_toolsets(config)
@@ -72,6 +122,15 @@ async def main():
         print(f"Description: {tool.description}")
         print("Input Schema:")
         print(json.dumps(tool.inputSchema, indent=2))
+
+    elif args.command == "dump":
+        out = paths.data_dir() / "mcp_tool_schemas.json"
+        schemas = [
+            {"name": t.name, "description": t.description, "input_schema": t.inputSchema}
+            for t in sorted(tools.tools, key=lambda t: t.name)
+        ]
+        out.write_text(json.dumps(schemas, indent=2, default=str), encoding="utf-8")
+        print(f"Wrote {len(schemas)} tool schemas to {out}")
 
     elif args.command == "call":
         tool = next((t for t in tools.tools if t.name == args.tool), None)

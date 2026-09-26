@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import sys
 import time
@@ -1343,39 +1342,6 @@ def _drop_alarming_noise(record: logging.LogRecord) -> bool:
     return not message.startswith("Failed to configure mTLS")
 
 
-_held_locks: dict[Path, Any] = {}
-
-
-def _hold(folder: Path) -> int | None:
-    """Take ``folder`` for this process; the other EvoTrader's process id if one has it.
-
-    The lock lives in ``folder/.evotrader.lock`` and goes when the process ends,
-    however it ends. None: taken (or locks unsupported, as on Windows).
-    """
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows
-        return None
-    folder = folder.resolve()
-    if folder in _held_locks:
-        return None
-    folder.mkdir(parents=True, exist_ok=True)
-    handle = open(folder / ".evotrader.lock", "a+", encoding="utf-8")  # noqa: SIM115
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.seek(0)
-        holder = handle.read().strip()
-        handle.close()
-        return int(holder) if holder.isdigit() else -1
-    handle.seek(0)
-    handle.truncate()
-    handle.write(f"{os.getpid()}\n")
-    handle.flush()
-    _held_locks[folder] = handle  # held open for the life of the process
-    return None
-
-
 def _console_port() -> int:
     """The console's port: EVOTRADER_PORT, else 8080."""
     import os
@@ -1561,7 +1527,7 @@ def run() -> None:
         (data_folder, "this data folder"),
         (_paths.signin_dir(), "the Robinhood sign-in"),
     ):
-        holder = _hold(folder)
+        holder = _paths.hold(folder)
         if holder is not None:
             who = f" (process {holder})" if holder > 0 else ""
             print(

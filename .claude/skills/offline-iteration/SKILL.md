@@ -175,7 +175,7 @@ reported success and changed nothing.
 
 ## What has already been searched
 
-Do not re-run these. Details in `skills/signal-validation/SKILL.md`.
+Do not re-run these. Details in the signal-validation skill (`.claude/skills/signal-validation/SKILL.md`).
 
 | Searched | Result |
 |---|---|

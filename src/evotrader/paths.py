@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import IO
 
 DATA_DIR_ENV = "EVOTRADER_DATA_DIR"
 
@@ -77,3 +78,39 @@ def run_command(args: str = "") -> str:
     if folder != root / "data":
         command += f' --data-dir "{folder}"'
     return command
+
+
+_held: dict[Path, IO[str]] = {}
+
+
+def hold(folder: Path) -> int | None:
+    """Take ``folder`` for this process; the process id of another that has it.
+
+    One EvoTrader per data folder and per broker sign-in: two would both trade
+    the same account, and two refreshing one sign-in can invalidate it. The
+    lock lives in ``folder/.evotrader.lock`` and goes when the process ends,
+    however it ends. None: taken (or locks unsupported, as on Windows); -1:
+    held by a process that left no id.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    folder = folder.resolve()
+    if folder in _held:
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    handle = open(folder / ".evotrader.lock", "a+", encoding="utf-8")  # noqa: SIM115
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        holder = handle.read().strip()
+        handle.close()
+        return int(holder) if holder.isdigit() else -1
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    _held[folder] = handle  # held open for the life of the process
+    return None

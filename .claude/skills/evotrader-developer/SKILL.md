@@ -8,25 +8,24 @@ description: Developer guide for the EvoTrader codebase — how the agents, inst
 For coding agents and people changing the code. It does not repeat what is
 written elsewhere; read these first:
 
-- [CLAUDE.md](../CLAUDE.md) — the rules for a coding session: no live trades,
+- [CLAUDE.md](../../../CLAUDE.md) — the rules for a coding session: no live trades,
   test first, the data folder, proposal `Status` fields, account data.
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — setup, the checks every change must
+- [CONTRIBUTING.md](../../../CONTRIBUTING.md) — setup, the checks every change must
   pass, how instruction and algorithm versions work.
-- [docs/architecture.md](../docs/architecture.md) — the parts, one trading
+- [docs/architecture.md](../../../docs/architecture.md) — the parts, one trading
   cycle step by step, the self-evolve loop, and
-  [where to find things](../docs/architecture.md#where-to-find-things).
+  [where to find things](../../../docs/architecture.md#where-to-find-things).
 
-## Skills in this folder
+## The other skills (next to this one, in `.claude/skills/`)
 
 Read the matching skill before starting a task it covers.
 
 | Skill | Use it to |
 |---|---|
-| [fresh-start](fresh-start/SKILL.md) | Reset a data folder for a new user or broker account. It deletes journals, memory and the broker sign-in, so run it only when asked. |
-| [mcp-debugger](mcp-debugger/SKILL.md) | List an MCP server's tools, show a tool's input schema, or call a tool directly. Read-only tools only: never call an order tool. |
-| [offline-iteration](offline-iteration/SKILL.md) | Tune agent instructions or algorithm parameters with scenario tests and backtests, without false positives and without trading. |
-| [self-evolve](self-evolve/SKILL.md) | Implement an evolution proposal or code review from the data folder's `evolution/`, test first. Linked into `.claude/skills/` for Claude Code. |
-| [signal-validation](signal-validation/SKILL.md) | Check that a signal, instruction or strategy change really works. **Read it before promoting any algorithm version or instruction change.** |
+| [mcp-debugger](../mcp-debugger/SKILL.md) | List an MCP server's tools, show a tool's input schema, call a read-only tool, or dump every schema. It refuses order tools, and refuses to run while the app is running. |
+| [offline-iteration](../offline-iteration/SKILL.md) | Tune agent instructions or algorithm parameters with scenario tests and backtests, without false positives and without trading. |
+| [self-evolve](../self-evolve/SKILL.md) | Implement an evolution proposal or code review from the data folder's `evolution/`, test first. |
+| [signal-validation](../signal-validation/SKILL.md) | Check that a signal, instruction or strategy change really works. **Read it before promoting any algorithm version or instruction change.** |
 
 ---
 
@@ -73,7 +72,7 @@ is gone).
   console's **Evolve** button, never inside a trading cycle.
 - The strategy and evolution agents can run on a Claude Code runtime instead
   of the API (`agent_runtime` in settings; see
-  [docs/claude_code_evolution.md](../docs/claude_code_evolution.md)). A hosted
+  [docs/claude_code_evolution.md](../../../docs/claude_code_evolution.md)). A hosted
   strategy agent is wired into the orchestrator as a **tool**
   (`SessionSharingAgentTool`), never as a sub-agent — see the safety rules.
 
@@ -164,9 +163,8 @@ session.
   toolset's session: account and order calls go to the simulated broker, a
   short list of read-only market-data tools passes through to Robinhood, and
   anything else is refused.
-- `scripts/discover_mcp_tools.py` writes the broker's tool schemas to
-  `<data folder>/mcp_tool_schemas.json`; the mcp-debugger skill inspects them
-  interactively.
+- The mcp-debugger skill inspects the broker's tools, and its `dump` command
+  writes every schema to `<data folder>/mcp_tool_schemas.json`.
 
 ### Dependency injection
 
@@ -292,8 +290,8 @@ tool.
 
 ## Testing patterns
 
-Commands and rules are in [CONTRIBUTING.md](../CONTRIBUTING.md) and
-[tests/README.md](../tests/README.md). Patterns that recur:
+Commands and rules are in [CONTRIBUTING.md](../../../CONTRIBUTING.md) and
+[tests/README.md](../../../tests/README.md). Patterns that recur:
 
 - `pytest` with `pytest-asyncio` in auto mode, so most tests are plain
   `async def`.

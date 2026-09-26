@@ -19,6 +19,18 @@ Fixes from trying the first public version the way a newcomer would.
 - **An option the app doesn't know stops it** with an error. It used to be
   ignored, so a typo such as `--mock_time` ran in the mode the settings say.
 
+### Skills
+
+- All skills now live in `.claude/skills/`, where Claude Code finds them; the
+  `skills/` folder and its duplicate of `self-evolve` are gone.
+- `fresh-start` is removed: it deleted journals, memory and the broker
+  sign-in. To start over, point the app at a new data folder
+  (`./run.sh setup --data-dir PATH`).
+- The MCP debugger refuses tools that place, change or cancel orders (they go
+  through the app's risk checks and approval), and refuses to run while the app
+  runs (they would share the broker sign-in). `scripts/discover_mcp_tools.py`
+  is now its `dump` command; two stale helper scripts are removed.
+
 ### Fixed
 
 - Ctrl+C stops the app within seconds, even with a console tab open; it used

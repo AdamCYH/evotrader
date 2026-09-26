@@ -30,7 +30,7 @@ uv run python -m evotrader.scenarios.runner           # instruction scenarios
 1. **No live trades from a coding session.** Never run `./run.sh --mode live`
    or `./run.sh offline` against a live configuration, never set `mode: live`,
    and never call a broker order tool (place, review or cancel an order —
-   including through `skills/mcp-debugger` or a one-off script). Test with unit
+   including through the mcp-debugger skill or a one-off script). Test with unit
    tests and practice cycles only, unless the user explicitly asks otherwise.
 2. **Verify on a practice cycle before live.** A change that touches the order
    path — agent order tools, the risk gate (`callbacks/`), the executor,
@@ -93,17 +93,22 @@ uv run python -m evotrader.scenarios.runner           # instruction scenarios
 
 ## Skills
 
-- **`self-evolve`** (`.claude/skills/self-evolve/SKILL.md`, a link to
-  `skills/self-evolve/SKILL.md`): implement an evolution proposal or code review
+All in `.claude/skills/<name>/SKILL.md`, where Claude Code finds them. In them,
+`data/...` means the data folder, wherever `EVOTRADER_DATA_DIR` puts it.
+
+- **`evotrader-developer`**: how the code fits together, the safety rules it
+  enforces, how to debug, test and extend it.
+- **`self-evolve`**: implement an evolution proposal or code review
   from the data folder's `evolution/` — read the note and the code it cites,
   test first, verify the algorithm still loads, report the backtest delta with
   its noise band, and record follow-ups in `evolution/notes/carry_forward.md`.
-- **`signal-validation`** (`skills/signal-validation/`): the checks to run
+- **`signal-validation`**: the checks to run
   before believing that a signal, instruction or strategy change works.
-- **`offline-iteration`** (`skills/offline-iteration/`): tune instructions or
+- **`offline-iteration`**: tune instructions or
   parameters with scenario tests and backtests, without false positives.
-- **`mcp-debugger`** (`skills/mcp-debugger/`): list and inspect MCP tools and
-  their schemas. Read-only use only — see rule 1.
-- **`fresh-start`** (`skills/fresh-start/`): reset a data folder for a new
-  user. It deletes journals, memory and the broker sign-in; run it only when
-  the user asks.
+- **`mcp-debugger`**: list and inspect MCP tools and their schemas, and call
+  read-only ones. It refuses order tools (rule 1) and refuses to run while the
+  app runs (they would share the broker sign-in).
+
+To start over with a clean slate, point the app at a new data folder
+(`./run.sh setup --data-dir PATH`) rather than emptying the old one.

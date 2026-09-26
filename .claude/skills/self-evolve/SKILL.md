@@ -14,6 +14,9 @@ EvoTrader Evolution Agent. The Evolution Agent produces three types of notes:
 | **Code Reviews** | `data/evolution/reviews/` | Bug fixes, anti-patterns, infrastructure improvements |
 | **Carry-Forward Notes** | `data/evolution/notes/carry_forward.md` | Cross-cycle continuity items the previous evolve agent deferred |
 
+Paths below that start `data/` mean your data folder: `data/` in the project,
+or wherever `EVOTRADER_DATA_DIR` points.
+
 Both follow the same core workflow: read the note → understand the change →
 modify code → test → verify algorithms still work.
 

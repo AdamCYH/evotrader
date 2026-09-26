@@ -72,7 +72,7 @@ class RobinhoodMcpProvider(McpProvider):
         """Read-only market data, portfolio, and order monitoring tools.
 
         Verified against the live Robinhood MCP server (52 tools total).
-        Last synced: 2026-07-29 via scripts/discover_mcp_tools.py
+        Last synced: 2026-07-29 via scripts/discover_mcp_tools.py (now the mcp-debugger skill's `dump`)
         """
         return [
             # Portfolio & account
