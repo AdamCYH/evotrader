@@ -4,22 +4,33 @@
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# Print as it happens. Through a pipe (offline mode tees its log) Python would
+# otherwise hold printed lines back, among them the broker sign-in link.
+export PYTHONUNBUFFERED=1
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # A data folder you name is relative to where you are, not to this folder:
 # make it absolute before moving here.
 CALLER_DIR="$(pwd)"
+export EVOTRADER_CALLER_DIR="$CALLER_DIR"  # for advice that names run.sh
 absolute() { case "$1" in /*|"~"*) printf '%s' "$1" ;; *) printf '%s/%s' "$CALLER_DIR" "$1" ;; esac; }
 if [ -n "${EVOTRADER_DATA_DIR:-}" ]; then
     EVOTRADER_DATA_DIR="$(absolute "$EVOTRADER_DATA_DIR")"
     export EVOTRADER_DATA_DIR
 fi
 ARGS=()
+n=0
 prev=""
 for arg in "$@"; do
-    if [ "$prev" = "--data-dir" ]; then arg="$(absolute "$arg")"; fi
+    if [ "$prev" = "--data-dir" ]; then
+        arg="$(absolute "$arg")"
+    elif [ "$n" -gt 0 ] && [ "${arg#-}" = "$arg" ]; then
+        case "${1:-}" in -i|--init|init) arg="$(absolute "$arg")" ;; esac  # init FOLDER
+    fi
     case "$arg" in --data-dir=*) arg="--data-dir=$(absolute "${arg#--data-dir=}")" ;; esac
     ARGS+=("$arg")
+    n=$((n + 1))
     prev="$arg"
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
@@ -152,6 +163,11 @@ case "$COMMAND" in
             case "$arg" in --data-dir=*) DATA_FOLDER="${arg#--data-dir=}" ;; esac
             prev="$arg"
         done
+        if [ ! -f "$DATA_FOLDER/settings.yaml" ]; then
+            # Not set up yet: the app says so; make no log folder there first.
+            $RUN_CMD -m evotrader "$@"
+            exit $?
+        fi
         LOG_DIR="$DATA_FOLDER/logs"
         mkdir -p "$LOG_DIR"
         echo ""

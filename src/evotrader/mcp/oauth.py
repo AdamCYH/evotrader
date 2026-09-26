@@ -125,7 +125,14 @@ def resolve_pending_callback(code: str, state: str | None) -> bool | str:
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Write a file only its owner can read."""
+    """Write a file only its owner can read, recreating its folder if it was removed.
+
+    The console's "Refresh Broker Token" deletes the whole sign-in folder while
+    the app keeps running; without this, the next sign-in could not be saved
+    and had to be repeated on every start.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -550,7 +557,7 @@ async def wait_for_callback(port: int, timeout: float = 300.0) -> tuple[str, str
 
         logger.info("⏳  Waiting for OAuth callback (port %d or web dashboard)...", port)
         print(f"⏳  Waiting for authorization callback on port {port} or via web dashboard...")
-        print("=" * 70 + "\n")
+        print("=" * 70 + "\n", flush=True)
 
         # Start the local callback server as a background task (best-effort)
         server_task = asyncio.create_task(_run_local_callback_server(port, _pending_callback))
@@ -560,7 +567,7 @@ async def wait_for_callback(port: int, timeout: float = 300.0) -> tuple[str, str
             code, state = await asyncio.wait_for(_pending_callback, timeout=timeout)
             succeeded = bool(code)
         except TimeoutError:
-            print("\n❌  Authorization timed out (5 minute limit reached).\n")
+            print("\n❌  Authorization timed out (5 minute limit reached).\n", flush=True)
             raise TimeoutError("Authorization timed out. Please try again.") from None
         finally:
             _pending_callback = None
@@ -591,7 +598,7 @@ async def wait_for_callback(port: int, timeout: float = 300.0) -> tuple[str, str
     print("======================================================================")
     print(f"• Cached credentials to {paths.signin_dir() / 'oauth'}/")
     print("• Initializing connection to Robinhood MCP...")
-    print("=" * 70 + "\n")
+    print("=" * 70 + "\n", flush=True)
 
     dismiss_oauth_prompt("oauth_complete")
     return code, state
@@ -611,12 +618,10 @@ def clear_oauth_cache(cache_dir: Path | None = None) -> None:
     import sys
     import traceback
 
-    # Forensic: log the call stack so we can trace unexpected clears.
-    caller_stack = "".join(traceback.format_stack()[-5:-1])
-    logger.warning(
-        "🔑  clear_oauth_cache() CALLED — stack trace:\n%s",
-        caller_stack,
-    )
+    # Asked for from the console (its only caller); the stack is for tracing
+    # any unexpected clear.
+    logger.info("🔑  Clearing the saved broker sign-in; the next broker call asks again.")
+    logger.debug("clear_oauth_cache() called from:\n%s", "".join(traceback.format_stack()[-5:-1]))
 
     if cache_dir is not None:
         oauth_dir = cache_dir
@@ -635,8 +640,8 @@ def clear_oauth_cache(cache_dir: Path | None = None) -> None:
         # Log what we're about to delete
         try:
             contents = list(oauth_dir.rglob("*"))
-            logger.warning(
-                "🔑  Deleting oauth dir with %d files: %s",
+            logger.debug(
+                "Deleting oauth dir with %d files: %s",
                 len(contents),
                 [str(p.relative_to(oauth_dir)) for p in contents],
             )
@@ -689,7 +694,7 @@ def create_oauth_httpx_factory(
         print("1. Authorize EvoTrader via the web dashboard or navigate to:")
         print(f"   {url}")
         print("2. Log in to your Robinhood account and approve the request.")
-        print("-" * 70)
+        print("-" * 70, flush=True)  # the link must show even through a pipe
         logger.info("OAuth authorization required — broadcasting to web UI.")
 
         # Broadcast to connected web clients via SSE (lazy import to avoid circular deps)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import sys
 import time
@@ -335,6 +336,7 @@ async def start(
     logging.getLogger("google.adk").setLevel(logging.INFO)
     for name in (
         "uvicorn.error",
+        "mcp.client.auth.oauth2",
         "google_adk.google.adk.tools.mcp_tool.mcp_session_manager",
         "google_adk.google.adk.tools.mcp_tool.session_context",
     ):
@@ -357,25 +359,29 @@ async def start(
 
     mock_time = os.environ.get("EVOTRADER_MOCK_TIME")
     if mock_time:
+        # Unreadable, it was ignored with an error logged every few seconds.
+        _moment(mock_time, "EVOTRADER_MOCK_TIME")
         logger.info("Mock Time:  %s (SIMULATION ACTIVE)", mock_time)
     logger.info("=" * 60)
 
     # Say up front what will not work, instead of at the first trading cycle.
     from evotrader.onboarding import missing_keys
+    from evotrader.paths import run_command
 
     for provider, agents in missing_keys(config.settings).items():
         logger.warning(
-            "No %s key (%s): %s will fail. Run ./run.sh setup, or add the key to %s.",
+            "No %s key (%s): %s will fail. Run %s, or add the key to %s.",
             provider.label,
             " or ".join((provider.env_var, *provider.other_env_vars)),
             ", ".join(agents),
+            run_command("setup"),
             config.data_dir / ".env",
         )
     if dashboard and not os.environ.get("DASHBOARD_PASSWORD"):
         logger.warning(
             "No console password (DASHBOARD_PASSWORD): anything that can reach the console,"
-            " even a web page open in your browser, can send it commands. Run ./run.sh setup"
-            " to set one."
+            " even a web page open in your browser, can send it commands. Run %s to set one.",
+            run_command("setup"),
         )
 
     # ── Initialise database ─────────────────────────────────────
@@ -413,6 +419,10 @@ async def start(
         def _signal_handler(sig):
             nonlocal stop_requests
             stop_requests += 1
+            if stop_requests >= 3:  # the clean stop is stuck: go now
+                sys.stderr.write("\nStopping at once.\n")
+                sys.stderr.flush()
+                os._exit(130)
             # The console stops through uvicorn, which closes browser connections
             # and runs the app's own shutdown. Cancelling the task instead skips
             # that shutdown, and a database left open keeps the process alive.
@@ -423,7 +433,10 @@ async def start(
                 end_event_streams()
                 console_server.should_exit = True
                 return
-            logger.info("Received signal %s — initiating clean shutdown...", sig)
+            logger.info(
+                "Received signal %s — initiating clean shutdown (Ctrl+C again stops at once)...",
+                sig,
+            )
             if main_task is not None:
                 main_task.cancel()
             else:
@@ -1187,12 +1200,19 @@ async def start(
 
             port = _console_port()
             host = console_host()
-            if not _port_is_free(host, port):
+            # Listening on every address still leaves 127.0.0.1 (the address it
+            # prints) to another program that holds it.
+            if not _port_is_free(host, port) or (
+                host in ("0.0.0.0", "::") and not _port_is_free("127.0.0.1", port)
+            ):
+                from evotrader.paths import run_command
+
                 logger.error(
-                    "Port %d is already in use: is EvoTrader already running? To use another"
-                    " port: EVOTRADER_PORT=%d ./run.sh",
+                    "Port %d is already in use by another program. To use another port:"
+                    " EVOTRADER_PORT=%d %s",
                     port,
                     port + 1,
+                    run_command(),
                 )
                 raise SystemExit(1)
             server = uvicorn.Server(
@@ -1243,8 +1263,12 @@ async def start(
             logger.info("Closing MCP toolsets...")
             for name, toolset_list in mcp_toolsets.items():
                 for toolset in toolset_list:
+                    # A connection still waiting on the broker sign-in would hold
+                    # the close for as long as the sign-in window (five minutes).
                     try:
-                        await toolset.close()
+                        await asyncio.wait_for(toolset.close(), timeout=5)
+                    except TimeoutError:
+                        logger.info("The %s connection did not close within 5s; leaving it.", name)
                     except Exception as e:
                         logger.warning("Error closing MCP toolset '%s': %s", name, e)
         if "evolution_db" in locals() and evolution_db and evolution_db is not db:
@@ -1280,12 +1304,16 @@ def _drop_alarming_noise(record: logging.LogRecord) -> bool:
 
     * A request still waiting when the app stops (typically on the broker
       sign-in) is cut off; the web server logs each as an error with a
-      traceback, though nothing went wrong.
+      traceback, though nothing went wrong. The same for its own shutdown when
+      a second Ctrl+C cuts that short.
     * ADK tries to set up Google Cloud mTLS for every broker connection and
       warns that "default credentials were not found": EvoTrader does not use
       it, and it reads like a problem with the user's keys.
     * ADK warns "Error on session runner task: " with nothing after it when a
-      broker session is cancelled (a real error names itself).
+      broker session is cancelled (a real error names itself), or with only
+      "unhandled errors in a TaskGroup", a wrapper that names nothing.
+    * The MCP client logs a traceback when the broker sign-in times out; the
+      sign-in code has already said so in one line.
 
     The web server's own "Cancel N running task(s)" line stays, as information
     rather than an error: it is the expected end of a stop.
@@ -1293,12 +1321,59 @@ def _drop_alarming_noise(record: logging.LogRecord) -> bool:
     if record.exc_info and isinstance(record.exc_info[1], asyncio.CancelledError):
         return False
     message = record.getMessage()
+    # The web framework reports a shutdown cut short by a second Ctrl+C as a
+    # message that is itself a traceback ending in CancelledError.
+    if message.startswith("Traceback (most recent call last)") and message.rstrip().endswith(
+        "CancelledError"
+    ):
+        return False
     if message.startswith("Cancel ") and message.endswith("timeout graceful shutdown exceeded"):
         record.levelno, record.levelname = logging.INFO, "INFO"
         return True
-    if message == "Error on session runner task: ":
+    if message == "Error on session runner task: " or message.startswith(
+        "Error on session runner task: unhandled errors in a TaskGroup"
+    ):
+        return False
+    if (
+        message == "OAuth flow error"
+        and record.exc_info
+        and str(record.exc_info[1]).startswith("Authorization timed out")
+    ):
         return False
     return not message.startswith("Failed to configure mTLS")
+
+
+_held_locks: dict[Path, Any] = {}
+
+
+def _hold(folder: Path) -> int | None:
+    """Take ``folder`` for this process; the other EvoTrader's process id if one has it.
+
+    The lock lives in ``folder/.evotrader.lock`` and goes when the process ends,
+    however it ends. None: taken (or locks unsupported, as on Windows).
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    folder = folder.resolve()
+    if folder in _held_locks:
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    handle = open(folder / ".evotrader.lock", "a+", encoding="utf-8")  # noqa: SIM115
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        holder = handle.read().strip()
+        handle.close()
+        return int(holder) if holder.isdigit() else -1
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    _held_locks[folder] = handle  # held open for the life of the process
+    return None
 
 
 def _console_port() -> int:
@@ -1329,16 +1404,80 @@ def _port_is_free(host: str, port: int) -> bool:
     return True
 
 
+def _likely_meant(parser: Any, unknown: list[str]) -> str:
+    """A hint for mistyped options: " (did you mean --mock-time?)", or ""."""
+    import difflib
+
+    known = [name for action in parser._actions for name in action.option_strings]
+    modes = {"--sim": "--mode sim", "--practice": "--mode sim", "--paper": "--mode sim"}
+    modes["--live"] = "--mode live"
+    for i, token in enumerate(unknown):
+        name = token.split("=", 1)[0]
+        after = unknown[i + 1] if i + 1 < len(unknown) else ""
+        if name == "--sim" and after.replace(".", "", 1).isdigit():
+            return f" (did you mean --sim-deposit {after}?)"
+        if name in modes:
+            return f" (did you mean {modes[name]}?)"
+        close = difflib.get_close_matches(name.replace("_", "-"), known, n=1, cutoff=0.75)
+        if close:
+            return f" (did you mean {close[0]}?)"
+    return ""
+
+
+def _settings_problem(data_folder: Path) -> str | None:
+    """Why the settings or the constitution can't be used, or None when they can."""
+    import yaml
+    from pydantic import ValidationError
+
+    from evotrader.config import _load_constitution, _load_settings
+
+    for name, load in (
+        ("constitution.yaml", _load_constitution),
+        ("settings.yaml", _load_settings),
+    ):
+        try:
+            load(data_folder)
+        except (yaml.YAMLError, ValidationError) as error:
+            return (
+                f"{data_folder / name} can't be used:\n{error}\n\n"
+                "Fix it and start again. (YAML: indentation and quotes matter.)"
+            )
+    return None
+
+
+def _moment(text: str, name: str = "--mock-time") -> str:
+    """A date and time the app can read (ISO 8601), else a plain error."""
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        message = (
+            f"{name}: not a date and time: {text!r}. Use ISO format, for example"
+            " 2026-06-17T10:00:00-04:00 (New York time if you leave the offset out)."
+        )
+        if name.startswith("--"):
+            import argparse
+
+            raise argparse.ArgumentTypeError(message) from None
+        raise SystemExit(message) from None
+    return text
+
+
 def _play_money(text: str) -> float:
-    """A ``--sim-deposit`` amount: more than zero, "$" and "," allowed."""
+    """A ``--sim-deposit`` amount: $1 to the most setup allows; "$" and "," allowed."""
     import argparse
+    import math
+
+    from evotrader.onboarding import MAX_PRACTICE_CASH
 
     try:
         amount = float(text.replace("$", "").replace(",", ""))
     except ValueError:
         raise argparse.ArgumentTypeError(f"not an amount of dollars: {text!r}") from None
-    if not amount > 0:
-        raise argparse.ArgumentTypeError("the amount must be more than zero")
+    # "inf" and "1e400" parse as floats: an infinite balance broke the console.
+    if not (math.isfinite(amount) and 1 <= amount <= MAX_PRACTICE_CASH):
+        raise argparse.ArgumentTypeError(
+            f"the amount must be between $1 and ${MAX_PRACTICE_CASH:,.0f}"
+        )
     return amount
 
 
@@ -1360,6 +1499,7 @@ def run() -> None:
     parser.add_argument(
         "--mock-time",
         nargs="?",
+        type=_moment,
         const="2026-06-17T10:00:00-04:00",
         help="Simulate a custom system time (ISO format). If passed without value, defaults to Wednesday 10:00 AM ET.",
     )
@@ -1383,10 +1523,7 @@ def run() -> None:
     # ignored, so the app ran in whatever mode the settings say — possibly live.
     args, unknown = parser.parse_known_args()
     if unknown:
-        meant = {"--sim": "--mode sim", "--practice": "--mode sim", "--paper": "--mode sim"}
-        meant["--live"] = "--mode live"
-        hint = next((f" (did you mean {meant[u]}?)" for u in unknown if u in meant), "")
-        parser.error(f"unrecognized arguments: {' '.join(unknown)}{hint}")
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}{_likely_meant(parser, unknown)}")
 
     if args.data_dir:
         from pathlib import Path
@@ -1404,16 +1541,35 @@ def run() -> None:
 
     data_folder = _paths.data_dir()
     if not (data_folder / "settings.yaml").is_file():
-        setup = "./run.sh setup"
-        if data_folder != _paths.project_root() / "data":
-            setup += f' --data-dir "{data_folder}"'
         print(
             f"No settings in {data_folder} yet.\n"
-            f"Run {setup} first: it creates your data folder from the starter "
-            "data and asks for your AI provider and keys (about a minute).",
+            f"Run {_paths.run_command('setup')} first: it creates your data folder from "
+            "the starter data and asks for your AI provider and keys (about a minute).",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # A settings file that can't be read: say which and where, not a traceback.
+    problem = _settings_problem(data_folder)
+    if problem:
+        print(problem, file=sys.stderr)
+        sys.exit(1)
+
+    # One EvoTrader per data folder and per broker sign-in. Two on one folder
+    # would both trade the account; two refreshing one sign-in can invalidate it.
+    for folder, what in (
+        (data_folder, "this data folder"),
+        (_paths.signin_dir(), "the Robinhood sign-in"),
+    ):
+        holder = _hold(folder)
+        if holder is not None:
+            who = f" (process {holder})" if holder > 0 else ""
+            print(
+                f"EvoTrader is already running on {what}{who}: {folder}\n"
+                "Stop that one first (Ctrl+C in its terminal).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Safety validation: cannot run live trading with a mocked/simulated clock
     if args.mode == "live" and args.mock_time:

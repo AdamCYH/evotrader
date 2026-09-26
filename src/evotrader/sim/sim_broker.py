@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -200,8 +201,8 @@ class SimBroker:
 
     async def deposit(self, amount: float) -> dict[str, Any]:
         """Deposit simulated cash into the brokerage account."""
-        if amount <= 0:
-            raise ValueError("Deposit amount must be positive")
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError("Deposit amount must be a positive, finite number")
 
         # The balance is read inside the write turn. Read before it, two deposits
         # made at the same moment both started from the same balance, and the

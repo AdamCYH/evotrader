@@ -39,6 +39,10 @@ def started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "settings.yaml").write_text("{}\n")
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "data"))
+    # run() writes --mock-time into the environment; registering it here makes
+    # teardown remove it, or every later test would run on a fake clock.
+    monkeypatch.setenv("EVOTRADER_MOCK_TIME", "set-by-the-test")
+    monkeypatch.delenv("EVOTRADER_MOCK_TIME")
     return calls
 
 
@@ -51,11 +55,16 @@ def run_with(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
     ("typo", "said"),
     [
         (["--sim"], "unrecognized arguments: --sim (did you mean --mode sim?)"),
-        (["--mock_time"], "unrecognized arguments: --mock_time"),
+        (["--mock_time"], "unrecognized arguments: --mock_time (did you mean --mock-time?)"),
+        (["--data_dir=x"], "(did you mean --data-dir?)"),
+        (["--dashbord"], "(did you mean --dashboard?)"),
         (["--mode", "paper"], "invalid choice: 'paper'"),
         # Abbreviations are off: "--sim 5000" read as "--sim-deposit 5000"
         # would have deposited play money.
-        (["--sim", "5000"], "unrecognized arguments: --sim 5000"),
+        (
+            ["--sim", "5000"],
+            "unrecognized arguments: --sim 5000 (did you mean --sim-deposit 5000?)",
+        ),
     ],
 )
 def test_an_unknown_option_stops_it(typo, said, started, monkeypatch, capsys) -> None:
@@ -109,6 +118,29 @@ def test_noise_that_only_alarms_is_dropped_or_calmed() -> None:
     assert keep(_record("Exception in ASGI application\n", ValueError("real")))
     cancel = _record("Cancel 4 running task(s), timeout graceful shutdown exceeded")
     assert keep(cancel) and cancel.levelname == "INFO"
+    # A sign-in that timed out: the sign-in code has said so already.
+    assert not keep(_record("Error on session runner task: unhandled errors in a TaskGroup (1)"))
+    assert not keep(
+        _record("OAuth flow error", TimeoutError("Authorization timed out. Please try again."))
+    )
+    assert keep(_record("OAuth flow error", ValueError("invalid_grant"))), "a real one stays"
+    cut_short = "Traceback (most recent call last):\n  ...\nasyncio.exceptions.CancelledError\n"
+    assert not keep(_record(cut_short))
+    assert keep(_record("Traceback (most recent call last):\n  ...\nKeyError: 'x'\n"))
+
+
+def test_a_broker_error_names_its_cause_in_one_line() -> None:
+    """Found 2026-09-26: a sign-in that timed out printed ~100 lines of traceback."""
+    from evotrader.db.reconciliation import root_cause
+
+    try:
+        try:
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [TimeoutError("timed out")])
+        except ExceptionGroup as group:
+            raise ConnectionError("Failed to create MCP session") from group
+    except ConnectionError as outer:
+        cause = root_cause(outer)
+    assert isinstance(cause, TimeoutError) and str(cause) == "timed out"
 
 
 def test_run_sh_finds_a_relative_data_folder_where_you_are(tmp_path: Path) -> None:
@@ -128,3 +160,68 @@ def test_run_sh_finds_a_relative_data_folder_where_you_are(tmp_path: Path) -> No
         assert not wrong_place.exists(), "made inside the project instead"
     finally:
         shutil.rmtree(wrong_place, ignore_errors=True)
+
+
+@pytest.mark.parametrize("amount", ["inf", "1e400", "nan", "10000001", "0.5"])
+def test_play_money_must_be_a_sensible_amount(amount, started, monkeypatch, capsys) -> None:
+    """Found 2026-09-26: "inf" was accepted, and an infinite balance broke the console."""
+    with pytest.raises(SystemExit):
+        run_with(monkeypatch, "--sim-deposit", amount)
+    assert not started
+    assert "between $1 and $10,000,000" in capsys.readouterr().err or amount == "nan"
+
+
+def test_a_mock_time_it_cannot_read_stops_it(started, monkeypatch, capsys) -> None:
+    """Found 2026-09-26: "--mock-time garbage" ran, logging an error every few seconds."""
+    with pytest.raises(SystemExit) as stopped:
+        run_with(monkeypatch, "--mock-time", "garbage")
+    assert stopped.value.code == 2 and not started
+    assert "not a date and time: 'garbage'" in capsys.readouterr().err
+    run_with(monkeypatch, "--mock-time", "2026-06-17T10:00:00")  # no offset: New York time
+    assert started
+
+
+def test_the_same_from_the_environment_stops_it() -> None:
+    with pytest.raises(SystemExit, match="EVOTRADER_MOCK_TIME: not a date and time"):
+        main._moment("next tuesday", "EVOTRADER_MOCK_TIME")
+
+
+def test_settings_it_cannot_read_are_named(started, monkeypatch, capsys, tmp_path) -> None:
+    """Found 2026-09-26: a broken settings.yaml printed a traceback of ~70 lines."""
+    (tmp_path / "data" / "settings.yaml").write_text("mode: [live\n")
+    with pytest.raises(SystemExit) as stopped:
+        run_with(monkeypatch)
+    assert stopped.value.code == 1 and not started
+    error = capsys.readouterr().err
+    assert "settings.yaml can't be used" in error and "Traceback" not in error
+
+
+class TestOneAppPerFolder:
+    """Found 2026-09-26: two copies could run on one data folder, both trading
+    the account; the port-in-use advice even led there."""
+
+    def test_a_folder_another_process_holds_is_refused(self, tmp_path) -> None:
+        fcntl = pytest.importorskip("fcntl")
+        folder = tmp_path / "held"
+        folder.mkdir()
+        other = open(folder / ".evotrader.lock", "a+")  # noqa: SIM115 - a second holder
+        try:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            other.write("4242\n")
+            other.flush()
+            assert main._hold(folder) == 4242
+        finally:
+            other.close()
+        assert main._hold(folder) is None, "free again once the other one has gone"
+
+    def test_the_app_says_so_and_does_not_start(self, started, monkeypatch, capsys, tmp_path):
+        fcntl = pytest.importorskip("fcntl")
+        other = open(tmp_path / "data" / ".evotrader.lock", "a+")  # noqa: SIM115
+        try:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(SystemExit) as stopped:
+                run_with(monkeypatch)
+        finally:
+            other.close()
+        assert stopped.value.code == 1 and not started
+        assert "already running on this data folder" in capsys.readouterr().err

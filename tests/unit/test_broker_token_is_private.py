@@ -76,3 +76,19 @@ async def test_no_part_of_the_token_is_printed_or_logged(
         for start in range(len(secret) - 8):
             assert secret[start : start + 8] not in shown, "a piece of the token was shown"
     assert printed.out == "", "nothing printed to the terminal"
+
+
+async def test_a_removed_folder_is_made_again(tmp_path: Path) -> None:
+    """Found 2026-09-26: the console's "Refresh Broker Token" deletes the sign-in
+    folder while the app runs; the next sign-in then could not be saved ("No
+    such file or directory") and had to be repeated on every start."""
+    import shutil
+
+    storage = FileTokenStorage(tmp_path / "oauth" / "server")
+    shutil.rmtree(tmp_path / "oauth")
+    await storage.set_client_info(
+        OAuthClientInformationFull(client_id="client-1", redirect_uris=["http://localhost/cb"])
+    )
+    await storage.set_tokens(token())
+    assert (await storage.get_tokens()).access_token == ACCESS
+    assert mode(storage.cache_dir) == 0o700

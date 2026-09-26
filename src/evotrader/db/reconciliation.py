@@ -24,6 +24,22 @@ from evotrader.utils import select_agentic_account
 logger = logging.getLogger(__name__)
 
 
+def root_cause(exc: BaseException) -> BaseException:
+    """The innermost error, through exception groups and "raised from" chains."""
+    seen: set[int] = set()
+    while id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+            exc = exc.exceptions[0]
+        elif exc.__cause__ is not None:
+            exc = exc.__cause__
+        elif exc.__context__ is not None and not exc.__suppress_context__:
+            exc = exc.__context__
+        else:
+            break
+    return exc
+
+
 class ReconciliationService:
     """Synchronises Trade Journal positions with live Robinhood holdings."""
 
@@ -113,7 +129,11 @@ class ReconciliationService:
             return unified
 
         except Exception as e:
-            logger.error("Failed to load broker positions: %s", e, exc_info=True)
+            # One line with the cause: the traceback through the broker client's
+            # task groups ran to about 100 lines for a sign-in that timed out.
+            cause = root_cause(e)
+            logger.error("Failed to load broker positions: %s", str(cause) or type(cause).__name__)
+            logger.debug("Failed to load broker positions", exc_info=True)
             return []
 
     async def get_current_stock_price(self, ticker: str) -> float | None:

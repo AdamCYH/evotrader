@@ -18,6 +18,7 @@ logs/
 
 # Caches and generated files
 cache/
+.evotrader.lock
 trading/
 backtest/cache/
 backtest/reports/
