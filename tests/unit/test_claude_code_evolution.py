@@ -841,9 +841,16 @@ class TestClaudeCliResolution:
         assert ok
         assert str(fake) in msg
 
-    def test_candidate_list_covers_nvm_and_common_installs(self) -> None:
+    def test_candidate_list_covers_nvm_and_common_installs(self, tmp_path, monkeypatch) -> None:
+        """nvm installs are only listed when nvm exists, so give the test its own.
+
+        Relying on the machine's real home folder passed on a developer's laptop
+        with nvm and failed on a clean CI runner without it.
+        """
         from evotrader.agents.cli.claude_code import _candidate_cli_paths
 
+        (tmp_path / ".nvm" / "versions" / "node" / "v20.0.0" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
         joined = " ".join(str(p) for p in _candidate_cli_paths())
         for expected in (".nvm", ".claude", ".local", "homebrew", "/usr/local"):
             assert expected in joined, f"{expected} not covered"
