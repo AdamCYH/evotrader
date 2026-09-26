@@ -16,6 +16,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import urllib.parse
 import weakref
 from collections.abc import Callable
@@ -123,6 +124,14 @@ def resolve_pending_callback(code: str, state: str | None) -> bool | str:
     return True
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write a file only its owner can read."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    path.chmod(0o600)  # os.open keeps the mode of a file that already existed
+
+
 class FileTokenStorage(TokenStorage):
     """File-based token and client registration storage.
 
@@ -143,6 +152,13 @@ class FileTokenStorage(TokenStorage):
         # Persisted expiry — separate from the token file so we don't
         # alter the standard OAuthToken schema that the SDK expects.
         self._expiry_file = self.cache_dir / "expiry.json"
+
+        # The token can place orders on the account: only its owner may read
+        # it. Files saved before this rule get tightened here too.
+        self.cache_dir.chmod(0o700)
+        for saved in (self.token_file, self.client_file, self._expiry_file):
+            if saved.exists():
+                saved.chmod(0o600)
 
         # Forensic log: snapshot file state at construction time
         token_exists = self.token_file.exists()
@@ -231,30 +247,30 @@ class FileTokenStorage(TokenStorage):
         t.start()
 
     async def get_tokens(self) -> OAuthToken | None:
-        print(f"\n🔍 get_tokens called — checking {self.token_file}")
-        print(f"   token_file exists: {self.token_file.exists()}")
-        print(f"   cache_dir exists: {self.cache_dir.exists()}")
-        if self.cache_dir.exists():
-            print(f"   cache_dir contents: {list(self.cache_dir.iterdir())}")
+        logger.debug(
+            "get_tokens: %s exists=%s, folder contents=%s",
+            self.token_file,
+            self.token_file.exists(),
+            [p.name for p in self.cache_dir.iterdir()] if self.cache_dir.exists() else "<gone>",
+        )
         try:
             if self.token_file.exists():
                 raw = self.token_file.read_text(encoding="utf-8")
                 data = json.loads(raw)
                 tokens = OAuthToken.model_validate(data)
-                has_access = bool(tokens.access_token)
-                has_refresh = bool(tokens.refresh_token)
-                print(
-                    f"   ✅ Loaded tokens: access={has_access}, refresh={has_refresh}, expires_in={tokens.expires_in}"
+                logger.debug(
+                    "Loaded tokens: access=%s, refresh=%s, expires_in=%s",
+                    bool(tokens.access_token),
+                    bool(tokens.refresh_token),
+                    tokens.expires_in,
                 )
                 logger.info(
                     "🔄  Loaded cached Robinhood OAuth credentials (reusing active session)."
                 )
                 return tokens
-            else:
-                print("   ❌ Token file does not exist — will require fresh auth")
+            logger.debug("No token file — the broker will ask for a fresh sign-in")
         except Exception as e:
             logger.warning("Failed to load cached OAuth tokens: %s", e)
-            print(f"   ❌ Exception loading tokens: {e}")
         return None
 
     def get_persisted_expiry(self) -> float | None:
@@ -270,29 +286,26 @@ class FileTokenStorage(TokenStorage):
     async def set_tokens(self, tokens: OAuthToken) -> None:
         import traceback
 
-        print(f"\n{'=' * 60}")
-        print(f"🔐 set_tokens CALLED — writing to {self.token_file}")
-        print(f"   access_token: {tokens.access_token[:20]}...")
-        print(f"   refresh_token: {'yes' if tokens.refresh_token else 'no'}")
-        print(f"   expires_in: {tokens.expires_in}")
-        print("   Call stack:")
-        for line in traceback.format_stack()[-5:-1]:
-            print(f"   {line.strip()}")
-        print(f"{'=' * 60}\n")
+        # Never any part of the token itself: this can end up in shared logs.
+        logger.debug(
+            "set_tokens → %s (refresh token: %s, expires_in: %s), called from:\n%s",
+            self.token_file,
+            "yes" if tokens.refresh_token else "no",
+            tokens.expires_in,
+            "".join(traceback.format_stack()[-5:-1]),
+        )
 
         try:
             data = tokens.model_dump(mode="json")
-            self.token_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _write_private(self.token_file, json.dumps(data, indent=2))
             # Verify the write succeeded
             if not self.token_file.exists():
                 logger.error(
                     "Token file write FAILED — file does not exist after write: %s", self.token_file
                 )
-                print("❌ TOKEN FILE WRITE FAILED")
             else:
                 size = self.token_file.stat().st_size
                 logger.info("✅  Cached OAuth tokens to %s (%d bytes)", self.token_file, size)
-                print(f"✅ TOKEN FILE WRITTEN: {self.token_file} ({size} bytes)")
 
             # Persist the expiry timestamp alongside the token so we can
             # restore token_expiry_time on next startup.
@@ -301,14 +314,9 @@ class FileTokenStorage(TokenStorage):
             expiry_at = None
             if tokens.expires_in is not None:
                 expiry_at = time.time() + tokens.expires_in
-            self._expiry_file.write_text(
-                json.dumps({"expiry_at": expiry_at}, indent=2),
-                encoding="utf-8",
-            )
-            print(f"✅ EXPIRY FILE WRITTEN: {self._expiry_file}")
+            _write_private(self._expiry_file, json.dumps({"expiry_at": expiry_at}, indent=2))
         except Exception as e:
             logger.error("Failed to cache OAuth tokens: %s", e, exc_info=True)
-            print(f"❌ EXCEPTION in set_tokens: {e}")
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         try:
@@ -322,7 +330,7 @@ class FileTokenStorage(TokenStorage):
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         try:
             data = client_info.model_dump(mode="json")
-            self.client_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _write_private(self.client_file, json.dumps(data, indent=2))
             logger.debug("Successfully cached OAuth client info to %s", self.client_file)
         except Exception as e:
             logger.error("Failed to cache OAuth client info: %s", e)

@@ -89,6 +89,7 @@ def test_ctrl_c_stops_the_app_with_a_console_tab_open(tmp_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        proc.stdout.close()
 
     assert "shut down cleanly" in output
     assert "Traceback" not in output
