@@ -43,6 +43,16 @@ pending_oauth: dict | None = None  # Tracks pending OAuth state for replay on re
 _OAUTH_PROMPT_TTL_S = 300.0
 
 
+def broker_signin_pending() -> bool:
+    """A broker sign-in prompt is up and still current, so broker calls would wait on it."""
+    import time as _time
+
+    if not isinstance(pending_oauth, dict):
+        return pending_oauth is not None
+    issued = pending_oauth.get("issued_at", 0.0)
+    return not issued or _time.time() - issued <= _OAUTH_PROMPT_TTL_S
+
+
 async def check_interactive_approval(args: dict[str, Any]) -> dict[str, Any] | None:
     """If the dashboard is running, suspend the agent and wait for user approval."""
     global _active_app
@@ -593,6 +603,11 @@ def create_app(
             broker_cash = cached_data["cash"]
             broker_bp = cached_data["buying_power"]
             broker_positions = cached_data["positions"]
+        elif broker_signin_pending():
+            # The broker can't answer until the sign-in is done; asking would
+            # hold this request (and every later one) until the sign-in times out.
+            broker_total = broker_cash = broker_bp = 0.0
+            broker_positions = []
         else:
             from evotrader.models.config import TradingMode
 

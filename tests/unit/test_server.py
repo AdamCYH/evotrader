@@ -253,6 +253,51 @@ def test_portfolio_endpoint(client):
     assert data["local"]["db_path"] == expected_db_path
 
 
+async def test_the_portfolio_does_not_wait_on_a_pending_broker_sign_in(
+    mock_app_dependencies, monkeypatch
+):
+    """Found 2026-09-26: while the Robinhood sign-in was pending, each portfolio
+    request waited on it — up to five minutes — so requests piled up in the
+    console and held a stop open. It now answers from local data at once."""
+    import asyncio
+    import time
+
+    import httpx
+
+    from evotrader.web import server
+
+    db, journal, metrics, mcp_toolset, config, runner_fn, memory = mock_app_dependencies
+    signed_in = asyncio.Event()
+
+    class BrokerWaitingForSignIn:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def get_broker_positions(self):
+            await signed_in.wait()  # never, in this test
+
+    monkeypatch.setattr(server, "ReconciliationService", BrokerWaitingForSignIn)
+    monkeypatch.setattr(server, "pending_oauth", {"url": "https://x", "issued_at": time.time()})
+    app = create_app(
+        db=db,
+        journal=journal,
+        metrics=metrics,
+        mcp_toolset=mcp_toolset,
+        config=config,
+        runner_fn=runner_fn,
+        memory=memory,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://console"
+    ) as console:
+        resp = await asyncio.wait_for(
+            console.get("/api/portfolio", headers={"Authorization": "Bearer test_password"}),
+            timeout=5,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["broker"]["positions"] == []
+
+
 def test_get_evolution_runs_endpoint(client):
     tc, _, _ = client
 
