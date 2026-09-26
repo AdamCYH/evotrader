@@ -123,8 +123,11 @@ def out_of_sample_split(
     A strategy selected on backtest performance typically shows a strong first
     half and nothing afterwards. That is the signature of fitting noise.
     """
-    df = pd.DataFrame({"pnl": list(pnl), "date": pd.to_datetime(list(dates))})
+    # Compare in UTC: trade times may be naive or zone-aware, and so may the
+    # split, and pandas refuses to compare the two kinds.
+    df = pd.DataFrame({"pnl": list(pnl), "date": pd.to_datetime(list(dates), utc=True)})
     cut = pd.Timestamp(split)
+    cut = cut.tz_localize("UTC") if cut.tzinfo is None else cut.tz_convert("UTC")
     ins, oos = df[df["date"] < cut]["pnl"], df[df["date"] >= cut]["pnl"]
     if len(ins) < 20 or len(oos) < 20:
         return ValidationResult(
@@ -197,12 +200,13 @@ def period_stability(
     total = by_year.sum()
     top_share = float(by_year.max() / total) if total > 0 else float("inf")
     passed = bool(frac >= min_positive_fraction and top_share < 0.5)
-    detail = (
-        f"{int((by_year > 0).sum())}/{len(by_year)} years positive; "
-        f"best year is {top_share:.0%} of total P&L"
-    )
-    if top_share >= 0.5:
-        detail += " — result depends on a single year"
+    detail = f"{int((by_year > 0).sum())}/{len(by_year)} years positive; "
+    if total <= 0:
+        detail += "the strategy lost money overall"
+    else:
+        detail += f"best year is {top_share:.0%} of total P&L"
+        if top_share >= 0.5:
+            detail += " — result depends on a single year"
     return ValidationResult("period stability", passed, detail, frac)
 
 
@@ -354,8 +358,13 @@ def validate(
     strategy_returns: pd.Series | None = None,
     benchmark_returns: pd.Series | None = None,
     universe: Sequence[str] | None = None,
+    log_failures: bool = True,
 ) -> ValidationReport:
-    """Run every applicable check and return a single verdict."""
+    """Run every applicable check and return a single verdict.
+
+    ``log_failures=False`` is for callers that add checks of their own and log
+    the final count themselves, so the log and the report agree.
+    """
     report = ValidationReport(strategy=strategy)
     clustered = clustered_tstat(pnl, dates)
     report.checks.append(clustered)
@@ -370,7 +379,7 @@ def validate(
     if universe is not None:
         report.checks.append(survivorship_warning(universe))
 
-    if not report.passed:
+    if log_failures and not report.passed:
         logger.warning(
             "Strategy '%s' failed %d validation check(s): %s",
             strategy,

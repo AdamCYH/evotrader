@@ -137,7 +137,9 @@ instructions/strategy/
 
 The rule-based part of the system is code plus versioned parameters:
 
-- **Strategy code** lives in `src/evotrader/algorithms/strategies/`. Each
+- **Strategy code** lives in `src/evotrader/algorithms/strategies/`, or in
+  a module of your own that the manifest names (the
+  [backtest](.agents/skills/backtest/SKILL.md) skill shows how). Each
   strategy extends `TradingAlgorithm` (`algorithms/base.py`), is stateless,
   does no I/O, returns a vote between −1 and +1, and marks itself not
   applicable when it has nothing to say (the composite then shares its weight
@@ -154,12 +156,16 @@ The rule-based part of the system is code plus versioned parameters:
   exactly (an "identity" default), and its real value goes into a new
   version's `config.yaml`. Old versions then keep behaving as they did.
 - **Backtests are smoke tests, not scorecards.**
-  `uv run python -m evotrader.backtest.runner --compare vA,vB` replays the
-  algorithm alone on past prices and catches a broken engine, a silenced
-  strategy or a flipped sign. It leaves out the agents, the news and real
-  fills, so don't choose a parameter because it moved the backtest number;
-  read the report's participation table and the
-  [signal-validation](.agents/skills/signal-validation/SKILL.md) skill first.
+  `uv run python -m evotrader.backtest.runner --compare vA,vB --validate`
+  replays the algorithm alone on past prices and catches a broken engine, a
+  silenced strategy or a flipped sign. `--validate` adds the checks that say
+  whether a result could be luck: a placebo (the signal shifted so it predicts
+  nothing), a positive control (a signal that cheats, to prove the harness can
+  see an edge) and the statistical tests; exit code 3 means nothing survived.
+  The backtest leaves out the agents, the news and real fills, so don't choose
+  a parameter because it moved the backtest number; read the participation
+  table and the [backtest](.agents/skills/backtest/SKILL.md) and
+  [signal-validation](.agents/skills/signal-validation/SKILL.md) skills first.
 
 ## Evolution proposals and reviews
 

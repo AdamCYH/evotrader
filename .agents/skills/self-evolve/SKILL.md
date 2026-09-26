@@ -728,8 +728,9 @@ print('Algorithm verification: PASS')
 "
 # 5. Regression backtest — a SMOKE TEST, not a scorecard (see "Backtests Verify — Live Data Calibrates").
 #    Compare the previously active version against the new one on the standard run and
-#    report the delta together with the placebo band (sd 1.86pp / MDE 3.72pp on MSTR 1h 2y).
-uv run python -m evotrader.backtest.runner --compare <previous_version>,<new_version> --period 2y --interval 1h
+#    report the delta together with the placebo band that --validate prints for this run
+#    ("smallest return this run can tell apart from luck"). Exit code 3 is expected and fine here.
+uv run python -m evotrader.backtest.runner --compare <previous_version>,<new_version> --period 2y --interval 1h --validate
 ```
 
 - [ ] All existing tests pass

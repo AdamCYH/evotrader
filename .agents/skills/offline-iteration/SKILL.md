@@ -59,7 +59,8 @@ measurement produces with no signal at all. On a 2-year QQQ backtest its sd is
 **1.86%** and its range is **8.77 pp** — wider than any parameter sweep yet run
 here, which means a sweep cannot tell you anything. Pair it with a positive
 control (perfect foresight returns +51.83%) so a null result cannot be confused
-with broken plumbing. `validation.placebo_test` and `circular_shift_indices`.
+with broken plumbing. `runner --validate` runs both; the pieces are
+`validation.placebo_test` and `circular_shift_indices`.
 
 ## Before you start: can this be measured at all?
 
@@ -78,9 +79,11 @@ live system.
 ```
 1. State the hypothesis and what would falsify it. Write it down first.
 2. Change ONE thing — an instruction section, or one parameter family.
-3. Backtest:  python -m evotrader.backtest.runner --version V --walk-forward 6
+3. Backtest:  python -m evotrader.backtest.runner --version V --walk-forward 6 \
+                 --validate --variants-tested N     # N = every variant tried so far
 4. Scenario-test with fresh subagents (rule 1).
-5. Validate:  validate(...) from evotrader.backtest.validation
+5. Validate:  the backtest's Validation table (exit 3 = nothing survived);
+              validate(...) from evotrader.backtest.validation for other series
 6. Record the result — including failures. A failed hypothesis is data.
 7. If it survives, price the implementation before believing it.
 ```

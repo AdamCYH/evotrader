@@ -19,6 +19,27 @@ Fixes from trying the first public version the way a newcomer would.
 - **An option the app doesn't know stops it** with an error. It used to be
   ignored, so a typo such as `--mock_time` ran in the mode the settings say.
 
+### Backtesting
+
+- **`--validate`** judges a backtest instead of just scoring it: the
+  statistical checks in `backtest/validation.py`, a placebo (the version's own
+  signal shifted in time so it predicts nothing, replayed 40 times) and a
+  positive control (a signal that cheats by reading the next bar, which must
+  win, or the harness cannot see an edge on that data). The report gains a
+  Validation table and a verdict; exit code 3 means the run worked and nothing
+  survived. `--variants-tested N` raises the bar for the number of things tried.
+- **`--daily-csv`** joins `--intraday-csv`: with both, a backtest needs no
+  network and works for any instrument you have bars for.
+- **A strategy can live outside the package**: name its module in the
+  manifest and put it on `PYTHONPATH`. The new `backtest` skill walks an agent
+  through testing an idea end to end.
+- **The loader warns when a strategy has a weight but no entry in
+  `composite.regime_weights`.** With regime weighting on, such a strategy
+  counted as 0 in every regime: it ran and looked active, but never moved a
+  trade.
+- The out-of-sample check no longer fails when trade times and the split date
+  differ in having a time zone (it raised an error on a run with no trades).
+
 ### Skills
 
 - All skills now live in `.agents/skills/`, the shared folder of the Agent

@@ -163,6 +163,26 @@ class CompositeStrategy(TradingAlgorithm):
             else:
                 self._regime_weights_map[r_type] = self._weights.copy()
 
+        # With regime weighting on, the per-regime table replaces the flat
+        # weights and a strategy missing from it counts as zero. A strategy
+        # added with only a flat weight then runs, looks active in a backtest's
+        # participation table, and never moves a trade. Listing it at 0 is a
+        # deliberate choice (record, don't vote) and stays quiet.
+        if regime_adaptive and regime_weights:
+            unlisted = sorted(
+                name
+                for name in self._strategies
+                if weights.get(name, 0.0) > 0
+                and not any(name in w_dict for w_dict in regime_weights.values())
+            )
+            if unlisted:
+                logger.warning(
+                    "%s has a weight but no entry in composite.regime_weights, so it "
+                    "counts as 0 in every regime and never votes. Add it to each "
+                    "regime's weights (0 to record it without voting).",
+                    ", ".join(unlisted),
+                )
+
     @property
     def name(self) -> str:
         return "composite"

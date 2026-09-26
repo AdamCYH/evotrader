@@ -22,6 +22,7 @@ Read the matching skill before starting a task it covers.
 
 | Skill | Use it to |
 |---|---|
+| [backtest](../backtest/SKILL.md) | Backtest a strategy idea, version, parameter change or instrument with `--validate`, and read the verdict before the return. |
 | [mcp-debugger](../mcp-debugger/SKILL.md) | List an MCP server's tools, show a tool's input schema, call a read-only tool, or dump every schema. It refuses order tools, and refuses to run while the app is running. |
 | [offline-iteration](../offline-iteration/SKILL.md) | Tune agent instructions or algorithm parameters with scenario tests and backtests, without false positives and without trading. |
 | [self-evolve](../self-evolve/SKILL.md) | Implement an evolution proposal or code review from the data folder's `evolution/`, test first. |
@@ -350,6 +351,10 @@ Commands and rules are in [CONTRIBUTING.md](../../../CONTRIBUTING.md) and
 
 ### Add a trading strategy
 
+To try a strategy without changing this package, write it in your own module
+and name that module in the manifest; the backtest skill shows how. The steps
+below are for adding one to the project.
+
 1. Create `src/evotrader/algorithms/strategies/<name>.py` with a class that
    extends `TradingAlgorithm` (`algorithms/base.py`): `name`, `version`, and
    `compute_signal(snapshot) -> AlgoSignal` with a value in [−1, +1]; override
@@ -367,13 +372,15 @@ Commands and rules are in [CONTRIBUTING.md](../../../CONTRIBUTING.md) and
    `starter_data/algorithms/strategy_manifest.yaml` too if new users should get
    it.
 4. Give it weight in a new algorithm version's `config.yaml`
-   (`composite.<name>_weight` and `composite.regime_weights.<regime>.<name>`),
-   or start it at weight 0 to record how often it fires before it counts. The
+   (`composite.<name>_weight` **and** `composite.regime_weights.<regime>.<name>`
+   in every regime: with regime weighting on, a strategy missing from that
+   table counts as 0, and the loader warns), or start it at weight 0 to record
+   how often it fires before it counts. The
    code defaults live in `composite.py` → `_get_default_regime_weights_map()`
    and in `StrategyLoader.build_composite()`.
 5. Add unit tests (valid snapshot, missing indicators, parameter round-trip),
-   then run a backtest as a smoke test and a practice cycle, following the
-   signal-validation skill.
+   then run a backtest with `--validate` as a smoke test and a practice cycle,
+   following the backtest and signal-validation skills.
 
 ### Add an MCP provider
 

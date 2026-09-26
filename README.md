@@ -314,7 +314,7 @@ are between you and your broker.
 | `./run.sh setup` | Answer the setup questions again (`--data-dir PATH` for another data folder) |
 | `./run.sh --init` | Create any missing data-folder files from the starter data; never overwrites |
 | `./run.sh --help` | All options |
-| `uv run python -m evotrader.backtest.runner` | Replay the algorithm alone on past prices, with no AI calls (`--help` for options) |
+| `uv run python -m evotrader.backtest.runner --validate` | Replay the algorithm alone on past prices, with no AI calls, and check whether the result could be luck. Yahoo Finance data or your own CSV files (`--help` for options; the [backtest skill](.agents/skills/backtest/SKILL.md) walks through testing an idea) |
 | `uv run python scripts/db_query.py --tables --sim` | Look inside the practice databases (drop `--sim` for live) |
 
 ## Documentation

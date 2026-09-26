@@ -269,5 +269,5 @@ Two real outputs of this loop, anonymised, are in [examples/](examples/).
 | Backtests (algorithm only, no AI) | `src/evotrader/backtest/` |
 | Scenario tests for agent instructions | `src/evotrader/scenarios/` |
 | Starter data copied into a new data folder | `starter_data/` |
-| Skills for coding agents | `.agents/skills/` (developer guide, self-evolve, signal validation, offline iteration, MCP debugger) |
+| Skills for coding agents | `.agents/skills/` (developer guide, self-evolve, backtest, signal validation, offline iteration, MCP debugger) |
 | Tests | `tests/unit/`, `tests/js/` |

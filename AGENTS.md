@@ -22,7 +22,7 @@ uv run ruff check src tests            # lint
 uv run ruff format src tests           # format
 ./run.sh --mode sim                    # console in practice mode, http://127.0.0.1:8080
 ./run.sh --mode sim --mock-time        # practice mode at a fixed weekday morning
-uv run python -m evotrader.backtest.runner --help     # algorithm-only backtest
+uv run python -m evotrader.backtest.runner --validate # algorithm-only backtest, judged (--help)
 uv run python -m evotrader.scenarios.runner           # instruction scenarios
 ```
 
@@ -105,6 +105,9 @@ links to it for Claude Code. In them,
   from the data folder's `evolution/` — read the note and the code it cites,
   test first, verify the algorithm still loads, report the backtest delta with
   its noise band, and record follow-ups in `evolution/notes/carry_forward.md`.
+- **`backtest`**: test a strategy idea, version, parameter change or
+  instrument on past prices with `--validate`; write a strategy outside the
+  package; read the verdict before the return.
 - **`signal-validation`**: the checks to run
   before believing that a signal, instruction or strategy change works.
 - **`offline-iteration`**: tune instructions or

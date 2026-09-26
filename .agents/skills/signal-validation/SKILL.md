@@ -24,6 +24,17 @@ Run these before any deeper analysis. Most claims die here.
 | Count how many **variants were tried** | Reporting the best of 153 pairs |
 | Check the **universe for survivorship** | Buy-the-dip on tickers that still exist |
 
+For an algorithm version, the backtester runs all of these for you, plus the
+placebo and positive control below:
+
+```bash
+uv run python -m evotrader.backtest.runner --compare vA,vB --validate --variants-tested N
+```
+
+Exit code 3 means it ran and nothing survived. The backtest skill
+(`.agents/skills/backtest/SKILL.md`) covers running it and reading the report.
+For your own P&L series, call the checks directly:
+
 ```python
 from evotrader.backtest.validation import validate
 
@@ -45,13 +56,18 @@ disqualifying, not as a starting point for debate.
 Before asking "is this result significant?", ask "could this measurement have
 produced it with no signal at all?"
 
-```python
-from evotrader.backtest.validation import (
-    placebo_test, circular_shift_indices, minimum_detectable_effect)
+`runner --validate` builds this for every version it runs (`--placebos N`,
+default 40) and prints the smallest return the run can tell apart from luck.
+By hand, for a signal series of your own:
 
-offsets = circular_shift_indices(len(signals), n_shifts=60, seed=0)
-placebos = [run_backtest(rotate(signals, off)) for off in offsets]
-print(placebo_test(real_return_pct, placebos))
+```python
+from evotrader.backtest.checks import check_version, replay, shift
+from evotrader.backtest.runner import RiskParams, simulate_version
+
+risk = RiskParams()
+metrics, signals, engine = simulate_version("v002_my_idea", snapshots, risk=risk)
+verdict = check_version("v002_my_idea", snapshots, signals, engine, risk, n_placebos=60)
+print(verdict.report)          # placebo, positive control and every other check
 ```
 
 A **circular shift** preserves the signal's marginal distribution and full
@@ -74,7 +90,9 @@ Every result reachable by tuning fits inside the noise floor.
 
 **Always pair this with a positive control.** A cheating signal (sign of the
 realised forward move) returns **+51.83%** through the identical engine, so the
-null is a fact about the signal, not a broken harness. Without that control,
+null is a fact about the signal, not a broken harness. `--validate` runs it
+first and says so when it fails (for example, on an instrument priced above the
+per-trade allocation without `--fractional`, even the cheat makes 0%). Without that control,
 "everything is noise" and "my plumbing is broken" look identical.
 
 Block-mixing truth with a shifted copy of itself traces the sensitivity curve:

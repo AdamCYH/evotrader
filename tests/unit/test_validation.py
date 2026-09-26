@@ -110,6 +110,18 @@ class TestPeriodStability:
         assert not res.passed
         assert "single year" in res.detail
 
+    def test_losing_overall_is_named_not_shown_as_infinity(self) -> None:
+        """A strategy that lost money overall has no 'share of total profit' to report."""
+        pnl, dates = [], []
+        for year in range(2020, 2024):
+            for _ in range(30):
+                pnl.append(-0.01)
+                dates.append(datetime(year, 6, 1))
+        res = period_stability(pnl, dates)
+        assert not res.passed
+        assert "inf" not in res.detail
+        assert "lost money overall" in res.detail
+
     def test_broadly_positive_years_pass(self) -> None:
         rng = np.random.default_rng(4)
         pnl, dates = [], []

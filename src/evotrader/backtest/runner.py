@@ -15,11 +15,18 @@ import yaml
 
 from evotrader import paths
 from evotrader.algorithms.loader import StrategyLoader
+from evotrader.backtest.checks import (
+    DEFAULT_PLACEBOS,
+    BacktestVerdict,
+    check_version,
+    format_verdict_markdown,
+)
 from evotrader.backtest.data import HistoricalDataFetcher
 from evotrader.backtest.engine import BacktestEngine
 from evotrader.backtest.metrics import calculate_tear_sheet
 from evotrader.backtest.snapshot_builder import SnapshotBuilder
 from evotrader.models.market import MarketSnapshot
+from evotrader.models.signals import AlgoSignal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("backtest")
@@ -80,6 +87,16 @@ class RiskParams:
         )
 
 
+def risk_for(
+    version: str, overrides: dict[str, Any], algorithms_dir: Path | None = None
+) -> RiskParams:
+    """The risk settings a run of ``version`` uses: its config's ``backtest:`` block plus flags."""
+    algorithms_dir = algorithms_dir or paths.data_dir() / "algorithms"
+    config_file = algorithms_dir / version / "config.yaml"
+    params = yaml.safe_load(config_file.read_text()) or {} if config_file.is_file() else {}
+    return RiskParams.from_sources(params.get("backtest", {}), overrides)
+
+
 def build_snapshots(df_intraday: Any, df_daily: Any, ticker: str) -> list[MarketSnapshot]:
     """Materialize the snapshot stream once so many runs can share it."""
     builder = SnapshotBuilder(df_intraday=df_intraday, df_daily=df_daily, ticker=ticker)
@@ -119,6 +136,32 @@ def run_single_backtest(
     ticker: str = "",
 ) -> dict[str, Any]:
     """Execute a backtest for a specific algorithm version."""
+    metrics, _, _ = simulate_version(
+        version,
+        snapshots,
+        risk=risk,
+        manifest_path=manifest_path,
+        algorithms_dir=algorithms_dir,
+        overrides=overrides,
+        ticker=ticker,
+    )
+    return metrics
+
+
+def simulate_version(
+    version: str,
+    snapshots: list[MarketSnapshot],
+    risk: RiskParams | None = None,
+    manifest_path: Path | None = None,
+    algorithms_dir: Path | None = None,
+    overrides: dict[str, Any] | None = None,
+    ticker: str = "",
+) -> tuple[dict[str, Any], list[AlgoSignal], BacktestEngine]:
+    """Run a version and also return the signal it emitted on each bar and the engine.
+
+    The per-bar signals let :mod:`evotrader.backtest.checks` replay the same
+    signal against shifted prices without recomputing it.
+    """
     algorithms_dir = algorithms_dir or paths.data_dir() / "algorithms"
     manifest_path = manifest_path or algorithms_dir / "strategy_manifest.yaml"
     config_file = algorithms_dir / version / "config.yaml"
@@ -144,21 +187,33 @@ def run_single_backtest(
     emitted: Counter[str] = Counter()
     seen: Counter[str] = Counter()
     reasons: dict[str, Counter[str]] = {}
+    signals: list[AlgoSignal] = []
 
-    for snapshot in snapshots:
-        detailed = composite.compute_detailed_signal(snapshot)
-        for sub in detailed.signals:
-            if sub.metadata.get("role") == "multiplier":
-                continue
-            seen[sub.name] += 1
-            if not sub.metadata.get("applicable", True):
-                abstained[sub.name] += 1
-                reasons.setdefault(sub.name, Counter())[
-                    str(sub.metadata.get("reason", "unspecified"))
-                ] += 1
-            elif abs(sub.value) >= 1e-3:
-                emitted[sub.name] += 1
-        engine.step(snapshot, composite.compute_signal(snapshot))
+    # The composite warns on every bar where most sub-strategies abstain. That
+    # matters in a live cycle; in a backtest it is thousands of lines, and the
+    # participation table below reports the same thing once.
+    composite_log = logging.getLogger("evotrader.algorithms.composite")
+    previous_level = composite_log.level
+    composite_log.setLevel(logging.ERROR)
+    try:
+        for snapshot in snapshots:
+            detailed = composite.compute_detailed_signal(snapshot)
+            for sub in detailed.signals:
+                if sub.metadata.get("role") == "multiplier":
+                    continue
+                seen[sub.name] += 1
+                if not sub.metadata.get("applicable", True):
+                    abstained[sub.name] += 1
+                    reasons.setdefault(sub.name, Counter())[
+                        str(sub.metadata.get("reason", "unspecified"))
+                    ] += 1
+                elif abs(sub.value) >= 1e-3:
+                    emitted[sub.name] += 1
+            signal = composite.compute_signal(snapshot)
+            signals.append(signal)
+            engine.step(snapshot, signal)
+    finally:
+        composite_log.setLevel(previous_level)
 
     total = len(snapshots)
     participation = {
@@ -204,7 +259,7 @@ def run_single_backtest(
     if snapshots:
         metrics["window_start"] = snapshots[0].timestamp.isoformat()
         metrics["window_end"] = snapshots[-1].timestamp.isoformat()
-    return metrics
+    return metrics, signals, engine
 
 
 def walk_forward(
@@ -519,6 +574,15 @@ def main() -> None:
         default=None,
         help="External intraday OHLCV CSV (overrides yfinance)",
     )
+    parser.add_argument(
+        "--daily-csv",
+        type=str,
+        default=None,
+        help=(
+            "External daily OHLCV CSV (overrides yfinance). With --intraday-csv too, "
+            "the run needs no network and works for any instrument you have bars for."
+        ),
+    )
     parser.add_argument("--refresh", action="store_true", help="Force fresh data download")
     parser.add_argument(
         "--walk-forward",
@@ -526,6 +590,45 @@ def main() -> None:
         default=0,
         metavar="N",
         help="Split the window into N sequential folds",
+    )
+
+    check_group = parser.add_argument_group(
+        "validation",
+        "Judge whether a result is evidence of an edge or could be luck. Exit code 3 "
+        "means the run worked but no version survived every check.",
+    )
+    check_group.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "Run the statistical checks, a placebo (the signal shifted so it predicts "
+            "nothing) and a positive control (a signal that cheats) on each version"
+        ),
+    )
+    check_group.add_argument(
+        "--variants-tested",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "How many versions or parameter sets you have tried in total, including "
+            "earlier runs. Raises the bar for each one. With --compare, at least the "
+            "number compared."
+        ),
+    )
+    check_group.add_argument(
+        "--placebos",
+        type=int,
+        default=DEFAULT_PLACEBOS,
+        metavar="N",
+        help=f"Placebo replays per version (default {DEFAULT_PLACEBOS}; 20 or more)",
+    )
+    check_group.add_argument(
+        "--validate-split",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Date that splits in-sample from out-of-sample (default: middle of the window)",
     )
 
     risk_group = parser.add_argument_group("risk / execution overrides")
@@ -640,11 +743,41 @@ def main() -> None:
         df_intraday = fetcher.fetch_intraday(
             ticker, period=args.period, interval=args.interval, force_refresh=args.refresh
         )
-    df_daily = fetcher.fetch_daily(ticker, period="5y", force_refresh=args.refresh)
+    if args.daily_csv:
+        logger.info("Loading daily bars from %s", args.daily_csv)
+        df_daily = fetcher.load_csv(args.daily_csv)
+    else:
+        df_daily = fetcher.fetch_daily(ticker, period="5y", force_refresh=args.refresh)
 
     logger.info("Building snapshots for %s...", ticker)
     snapshots = build_snapshots(df_intraday, df_daily, ticker=ticker)
     logger.info("Built %d snapshots.", len(snapshots))
+
+    split = None
+    if args.validate_split:
+        split = datetime.fromisoformat(args.validate_split).replace(tzinfo=UTC)
+    verdicts: list[BacktestVerdict] = []
+
+    def run_and_check(v: str, n_variants: int) -> dict[str, Any]:
+        """Backtest ``v``; with --validate, also judge it and keep the verdict."""
+        risk = risk_for(v, overrides)
+        metrics, signals, engine = simulate_version(v, snapshots, risk=risk, ticker=ticker)
+        if args.validate:
+            logger.info("Validating %s (%d placebo replays)...", v, args.placebos)
+            verdicts.append(
+                check_version(
+                    v,
+                    snapshots,
+                    signals,
+                    engine,
+                    risk,
+                    ticker=ticker,
+                    n_variants_tested=n_variants,
+                    n_placebos=args.placebos,
+                    split=split,
+                )
+            )
+        return metrics
 
     if args.compare:
         if args.compare.strip() == "all":
@@ -660,9 +793,7 @@ def main() -> None:
         failures: list[tuple[str, str]] = []
         for v in versions:
             try:
-                results.append(
-                    run_single_backtest(v, snapshots, overrides=overrides, ticker=ticker)
-                )
+                results.append(run_and_check(v, max(args.variants_tested, len(versions))))
             except Exception as e:  # a broken archived config must not kill sweep
                 logger.error("Version '%s' failed to run: %s", v, e)
                 failures.append((v, f"{type(e).__name__}: {e}"))
@@ -681,14 +812,17 @@ def main() -> None:
         body = f"# Algorithm Comparison Benchmark\n\n{table_md}\n"
         if failures:
             body += "\n## Failed to run\n\n" + "".join(f"- `{v}`: {why}\n" for v, why in failures)
+        for verdict in verdicts:
+            section = format_verdict_markdown(verdict)
+            print(section + "\n")
+            body += "\n" + section + "\n"
         comp_path = reports_dir / f"comparison_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.md"
         comp_path.write_text(body)
         logger.info("Saved comparison benchmark to %s", comp_path)
 
     elif args.walk_forward:
         v = args.version
-        params = yaml.safe_load((data / "algorithms" / v / "config.yaml").read_text()) or {}
-        risk = RiskParams.from_sources(params.get("backtest", {}), overrides)
+        risk = risk_for(v, overrides)
         folds = walk_forward(v, snapshots, args.walk_forward, risk)
         table_md = format_walk_forward_table(folds)
         print("\n" + "=" * 80)
@@ -697,20 +831,33 @@ def main() -> None:
         print(table_md)
         print("=" * 80 + "\n")
         wf_path = reports_dir / f"walkforward_{v}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.md"
-        wf_path.write_text(f"# Walk-Forward: {v}\n\n{table_md}\n")
+        body = f"# Walk-Forward: {v}\n\n{table_md}\n"
+        if args.validate:
+            run_and_check(v, args.variants_tested)
+            section = format_verdict_markdown(verdicts[-1])
+            print(section + "\n")
+            body += "\n" + section + "\n"
+        wf_path.write_text(body)
         logger.info("Saved walk-forward report to %s", wf_path)
 
     else:
         v = args.version
         logger.info("Running backtest for single version: %s", v)
-        metrics = run_single_backtest(v, snapshots, overrides=overrides, ticker=ticker)
+        metrics = run_and_check(v, args.variants_tested)
         report_md = format_report_markdown(metrics, period=args.period, interval=args.interval)
+        if verdicts:
+            report_md += "\n\n---\n\n" + format_verdict_markdown(verdicts[-1]) + "\n"
 
         print("\n" + report_md)
 
         out_path = reports_dir / f"report_{v}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.md"
         out_path.write_text(report_md)
         logger.info("Saved backtest report to %s", out_path)
+
+    if args.validate and not any(v.passed for v in verdicts):
+        # Distinct from a crash (1) and a usage error (2): the run worked, and
+        # its answer is that nothing here is evidence of an edge.
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
