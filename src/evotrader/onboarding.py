@@ -46,6 +46,7 @@ class Provider:
     light: str  # mechanical tool calling: the executor
     note: str = ""
     key_prefix: str = ""  # what a valid key starts with, for a friendly warning
+    other_env_vars: tuple[str, ...] = ()  # other names the same key works under
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -59,6 +60,7 @@ PROVIDERS: dict[str, Provider] = {
         light="gemini-3.1-flash-lite",
         note="recommended: lowest cost, and the system is developed and tested on it",
         key_prefix="AIza",
+        other_env_vars=("GOOGLE_API_KEY",),  # the name Google's own guides use
     ),
     "anthropic": Provider(
         key="anthropic",
@@ -390,6 +392,16 @@ class Setup:
         options = [(p.label, p.note) for p in PROVIDERS.values()]
         return PROVIDERS[keys[self.choose(question, options, keys.index(default) + 1) - 1]]
 
+    def key_names(self, provider: Provider) -> list[str]:
+        """Names to save the provider's key under: each one already in use, else the usual one.
+
+        A Gemini key works as GEMINI_API_KEY or GOOGLE_API_KEY. Replacing only
+        one of two saved names would leave the old key under the other, and a
+        library that prefers that name would keep using it.
+        """
+        names = (provider.env_var, *provider.other_env_vars)
+        return [name for name in names if name in self.saved] or [provider.env_var]
+
     def provider_key(self, provider: Provider) -> str | None:
         self.say(f"\n{provider.label} API key — get one at {provider.key_url}")
 
@@ -398,7 +410,8 @@ class Setup:
                 return f"{provider.label} keys usually start with “{provider.key_prefix}”. Saved anyway."
             return ""
 
-        return self.secret(provider.env_var, f"{provider.label} key", required=True, check=check)
+        name = self.key_names(provider)[0]
+        return self.secret(name, f"{provider.label} key", required=True, check=check)
 
     def console_password(self) -> str | None:
         self.say(
@@ -495,7 +508,7 @@ class Setup:
         provider = self.pick_provider("\nWhich AI provider should the agents use?")
         plan = Plan(how=f"easy mode, {provider.label}", models=models_for(provider))
         if key := self.provider_key(provider):
-            plan.env[provider.env_var] = key
+            plan.env.update(dict.fromkeys(self.key_names(provider), key))
         if provider.key == "anthropic":
             plan.use_subscription = self.subscription(settings_text)
         return plan
@@ -524,7 +537,7 @@ class Setup:
                 needed.setdefault(provider.key, provider)
         for provider in needed.values():
             if key := self.provider_key(provider):
-                plan.env[provider.env_var] = key
+                plan.env.update(dict.fromkeys(self.key_names(provider), key))
         plan.use_subscription = self.subscription(settings_text)
         port = self.ask(f"\nConsole port [{self.saved.get(PORT, DEFAULT_PORT)}]: ").strip()
         if port:

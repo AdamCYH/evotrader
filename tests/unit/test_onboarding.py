@@ -169,6 +169,24 @@ class TestSecrets:
         assert env["DASHBOARD_PASSWORD"] == PASSWORD
         assert env["ALPHA_VANTAGE_API_KEY"] == "AVKEY123"
 
+    def test_a_gemini_key_saved_as_google_api_key_counts_as_saved(self, data) -> None:
+        # Found 2026-09-26: Google's own guides name it GOOGLE_API_KEY and the app
+        # accepts it, but setup asked for the key again as if none were saved.
+        (data / ".env").write_text(f"GOOGLE_API_KEY={KEY}\n")
+        _, script = run(data, answers=["1", "1", "", "", "y"], secrets=["", PASSWORD, PASSWORD, ""])
+        assert any("Google Gemini key (saved" in shown for shown in script.shown)
+        env = dotenv_values(data / ".env")
+        assert env["GOOGLE_API_KEY"] == KEY
+        assert "GEMINI_API_KEY" not in env, "no second copy under the other name"
+
+    def test_a_new_gemini_key_replaces_every_saved_copy(self, data) -> None:
+        # With both names saved, updating one left the old key under the other,
+        # and Google's library prefers GOOGLE_API_KEY: the new key was ignored.
+        (data / ".env").write_text("GOOGLE_API_KEY=old-key\nGEMINI_API_KEY=old-key\n")
+        run(data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""])
+        env = dotenv_values(data / ".env")
+        assert env["GOOGLE_API_KEY"] == env["GEMINI_API_KEY"] == KEY
+
     def test_a_short_or_mistyped_password_is_asked_again(self, data) -> None:
         _, script = run(
             data,

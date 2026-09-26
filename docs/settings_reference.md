@@ -383,7 +383,7 @@ where that `.env` is.
 
 | Variable | Purpose |
 |---|---|
-| `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | AI provider keys; you need the ones your `model:` choices use |
+| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | AI provider keys; you need the ones your `model:` choices use |
 | `ALPHA_VANTAGE_API_KEY` | Optional market-data key; comma-separate several to rotate them |
 | `DASHBOARD_PASSWORD` | Console password. Empty means no login at all — see [SECURITY.md](../SECURITY.md) |
 | `EVOTRADER_PORT` | Console port (default 8080) |
