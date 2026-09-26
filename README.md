@@ -10,7 +10,7 @@ traders did, checks which of their signals
 turned out to be right, and writes proposals to improve the strategy and the
 code. You decide what gets built; changes land with tests; the loop runs again.
 
-Created by Adam Chiu · ImmersiaLabs
+Created by Adam Chiu · ImmersiaLabs · [See what it looks like](#what-it-looks-like)
 
 > [!CAUTION]
 > **Disclaimer — read this first.** EvoTrader is experimental software. It is
@@ -33,25 +33,6 @@ Created by Adam Chiu · ImmersiaLabs
 > a trading service and it does not provide trading advice.
 
 ---
-
-## What it looks like
-
-The web console. In these screenshots, account figures, trades and the agents'
-reasoning are blurred; the layout is the real one.
-
-<p align="center">
-  <img src="docs/images/console-run-history.png" width="100%"
-       alt="Run history: an evolution report in the timeline of the agents' thoughts and decisions">
-</p>
-<p align="center">
-  <img src="docs/images/console-dashboard.png" width="33%"
-       alt="Dashboard: account, positions, market signals, runs, the evolution engine and the trade journal">
-  <img src="docs/images/console-memory.png" width="64%"
-       alt="Memory and notes: the agents' notes and their memory of past trades">
-</p>
-
-*Top: an evolution report in the run history. Bottom: the dashboard, and the
-agents' memory of notes and past trades.*
 
 ## The idea
 
@@ -339,6 +320,25 @@ are between you and your broker.
 | `./run.sh --help` | All options |
 | `uv run python -m evotrader.backtest.runner --validate` | Replay the algorithm alone on past prices, with no AI calls, and check whether the result could be luck. Yahoo Finance data or your own CSV files (`--help` for options; the [backtest skill](.agents/skills/backtest/SKILL.md) walks through testing an idea) |
 | `uv run python scripts/db_query.py --tables --sim` | Look inside the practice databases (drop `--sim` for live) |
+
+## What it looks like
+
+The web console. In these screenshots, account figures, trades and the agents'
+reasoning are blurred; the layout is the real one.
+
+<p align="center">
+  <img src="docs/images/console-run-history.png" width="100%"
+       alt="Run history: an evolution report in the timeline of the agents' thoughts and decisions">
+</p>
+<p align="center">
+  <img src="docs/images/console-dashboard.png" width="33%"
+       alt="Dashboard: account, positions, market signals, runs, the evolution engine and the trade journal">
+  <img src="docs/images/console-memory.png" width="64%"
+       alt="Memory and notes: the agents' notes and their memory of past trades">
+</p>
+
+*Top: an evolution report in the run history. Bottom: the dashboard, and the
+agents' memory of notes and past trades.*
 
 ## Documentation
 
