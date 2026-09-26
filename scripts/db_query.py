@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -129,10 +130,17 @@ def main() -> None:
     # Formatting
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
     parser.add_argument(
+        "--data-dir", help="Data folder to read (default: EVOTRADER_DATA_DIR, else ./data)"
+    )
+    parser.add_argument(
         "-l", "--limit", type=int, default=20, help="Row limit for shortcuts (default: 20)"
     )
 
     args = parser.parse_args()
+    if args.data_dir:
+        from evotrader import paths
+
+        os.environ[paths.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
 
     # If neither sim nor live specified, default to sim
     if not args.sim and not args.live:
@@ -140,8 +148,7 @@ def main() -> None:
 
     db_file = get_db_path(args)
     if not db_file.is_file():
-        print(f"Error: Database file does not exist at {db_file}")
-        return
+        sys.exit(f"Error: Database file does not exist at {db_file}")
 
     print(f"Connecting to database: {db_file}\n")
     conn = sqlite3.connect(db_file)

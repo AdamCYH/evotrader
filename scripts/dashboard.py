@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -574,7 +575,18 @@ def main() -> None:
         default=10,
         help="Number of recent trades to show (default: 10)",
     )
+    parser.add_argument(
+        "--data-dir", help="Data folder to read (default: EVOTRADER_DATA_DIR, else ./data)"
+    )
     args = parser.parse_args()
+
+    from evotrader import paths
+
+    if args.data_dir:
+        os.environ[paths.DATA_DIR_ENV] = str(Path(args.data_dir).expanduser().resolve())
+    # Before setup there is nothing to show, and reading would create folders.
+    if not (paths.data_dir() / "settings.yaml").is_file():
+        sys.exit(f"No settings in {paths.data_dir()} yet. Run {paths.run_command('setup')} first.")
 
     try:
         asyncio.run(_run(args.days, args.trades))

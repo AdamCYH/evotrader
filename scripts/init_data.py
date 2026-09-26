@@ -163,7 +163,10 @@ def init_data(target: Path) -> int:
     print()
     print("  Paper trading (mode: sim) is the default. Review the risk limits in")
     print("  constitution.yaml before trading real money.")
-    print("  To choose AI models and save your keys: ./run.sh setup")
+    setup = "./run.sh setup"
+    if target != PROJECT_ROOT / "data":
+        setup += f' --data-dir "{target}"'
+    print(f"  To choose AI models and save your keys: {setup}")
     print("═" * 60)
     print()
     return 0

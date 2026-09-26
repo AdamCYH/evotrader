@@ -57,7 +57,10 @@ node --test tests/js/*.test.mjs                   # JavaScript tests for the con
 ```
 
 `uv run pytest -q` also runs the JavaScript tests through
-`tests/unit/test_signal_display_js.py` when Node is installed. Continuous
+`tests/unit/test_signal_display_js.py` when Node is installed. The first run
+downloads the small language model the memory tests use (about 170 MB, cached
+in `~/.cache/chroma`); otherwise the tests need no network and never touch your
+real data folder or broker sign-in. Continuous
 integration runs all four on every pull request. Type checking with mypy is
 configured but not yet enforced; fixing a module so it passes
 `uv run mypy src/evotrader/<module>.py` is a welcome contribution.

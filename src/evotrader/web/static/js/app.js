@@ -194,9 +194,15 @@ async function checkAuth() {
         return;
     }
 
-    // Proactively check if the backend has password authentication enabled
+    // Proactively check if the backend has password authentication enabled.
+    // Ask the login endpoint, not the portfolio: the portfolio calls the
+    // broker, which can wait minutes on a pending sign-in.
     try {
-        const response = await fetch("/api/portfolio");
+        const response = await fetch("/api/auth/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: "" }),
+        });
         if (response.status === 401) {
             // Password protection is active, show the prompt
             if (loginModal) loginModal.classList.remove("hidden");

@@ -86,7 +86,7 @@ Two real outputs of the loop, anonymised, are in [docs/examples/](docs/examples/
 | A Robinhood account with **agentic trading** enabled | Robinhood's feature that lets an AI agent trade through its official MCP server. (MCP, the Model Context Protocol, is a standard way for AI agents to call outside tools.) **Needed even for practice mode**, because prices, price history and option data come from Robinhood. You sign in on Robinhood's own page; the app never sees your password. No account yet? The backtester (`uv run python -m evotrader.backtest.runner`) replays the algorithm on past prices with no accounts at all. |
 | An Alpha Vantage key *(optional)* | Richer news and sentiment data for the news agent ([free key](https://www.alphavantage.co/support/#api-key), 25 requests a day). The news agent also has free Yahoo Finance tools that come with the project. |
 | Node.js 18+ *(optional)* | Only for the JavaScript tests and for Claude Code. |
-| About 2 GB of disk space | Python, the dependencies, and a small language model the agents' memory uses (about 80 MB, downloaded the first time the app starts). |
+| About 2 GB of disk space | Python, the dependencies, and a small language model the agents' memory uses (about 170 MB on disk, downloaded the first time the app starts). |
 
 The web console loads a few libraries from public CDNs (Chart.js, KaTeX,
 marked, Font Awesome) and fonts from Google Fonts, so your browser needs

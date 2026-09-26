@@ -577,6 +577,12 @@ def main() -> None:
     args = parser.parse_args()
 
     data = paths.data_dir()
+    # It replays the algorithm version in your data folder, so it needs one.
+    if not (data / "settings.yaml").is_file():
+        raise SystemExit(
+            f"No data folder at {data} yet. Make one from the starter data (no keys or"
+            f" accounts needed): {paths.run_command('init')}"
+        )
     reports_dir = data / "backtest" / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -599,12 +605,10 @@ def main() -> None:
 
     # Resolve active version if not specified
     if not args.version and not args.compare:
+        # The same answer and default as AlgorithmRegistry.get_active_version.
         active_yaml = data / "algorithms" / "active.yaml"
-        if active_yaml.is_file():
-            active_data = yaml.safe_load(active_yaml.read_text()) or {}
-            args.version = active_data.get("active_version", "v023_staleness_annihilation_fix")
-        else:
-            args.version = "v023_staleness_annihilation_fix"
+        active_data = yaml.safe_load(active_yaml.read_text()) or {} if active_yaml.is_file() else {}
+        args.version = str(active_data.get("active_version", "v001_initial"))
 
     # Resolve the symbol: explicit flag wins, else the configured primary ticker.
     ticker = args.ticker

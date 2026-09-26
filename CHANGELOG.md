@@ -41,6 +41,25 @@ Fixes from trying the first public version the way a newcomer would.
 - A console port already in use gets a clear message; `--sim-deposit` checks
   the amount; `./run.sh cli-dashboard` works again; the console's sign-in window
   can be closed; start-up and shutdown print far less noise.
+- Only one EvoTrader runs on a data folder, and on a broker sign-in: a second
+  copy stops with a message instead of trading the same account.
+- A second Ctrl+C no longer hangs while a broker sign-in is pending, and a
+  third stops the app at once.
+- `./run.sh offline` shows the Robinhood sign-in link (it was held back in a
+  buffer, so a first sign-in from offline mode was impossible).
+- After **Refresh Broker Token** in the console, the next sign-in is saved
+  again; it failed until a restart. A sign-in that times out prints one line,
+  not a hundred.
+- Without a console password, the console no longer waits minutes on
+  "CONNECTING", and its portfolio doesn't wait on a pending sign-in.
+- Setup keeps practice mode's own models (`model: sim`) unless you say
+  otherwise, says truthfully which agents stay on a Claude subscription and
+  offers to move them, uses a key already exported in your shell, and doesn't
+  treat a hand-made `.env` as a detailed setup.
+- Unreadable `settings.yaml` or `--mock-time` values, and mistyped options, get
+  a plain message with a suggestion instead of a traceback. The backtester
+  replays your data folder's algorithm version (it named a private one), and
+  advice from setup, the app and the tools names your data folder.
 
 ## 0.2.0 — first public release (unreleased)
 
@@ -86,7 +105,7 @@ EvoTrader for this release. If you ran a private copy: the package is now
   `mcp-debugger` and `fresh-start`.
 - **Web console.** Dashboard, trade approval, the reasoning of every cycle,
   token usage, review of proposals and versions, and your notes to the agents.
-- **Your own data folder**, separate from the code (`GOLD_DIGGER_DATA_DIR` or
+- **Your own data folder**, separate from the code (`EVOTRADER_DATA_DIR` or
   `--data-dir`), created from `starter_data/` by the first-run setup
   (`scripts/setup.sh`, `./run.sh setup`).
 - **Offline tools.** An algorithm-only backtester and a scenario harness for
@@ -94,9 +113,3 @@ EvoTrader for this release. If you ran a private copy: the package is now
 - **Cost controls.** Prompt caching for Anthropic models, trimming of oversized
   data-provider responses, and per-agent model choice.
 - Apache License 2.0, continuous integration, and contributor documentation.
-
-### Project name
-
-The project will be renamed. The new name, and what an existing user needs to
-change (environment variables, the data folder, the sign-in cache), will be
-recorded here.
