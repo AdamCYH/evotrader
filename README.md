@@ -20,6 +20,15 @@ Created by Adam Chiu · ImmersiaLabs
 > [Apache License 2.0](LICENSE)). You run it on **your own** broker account,
 > signed in with **your own** login, and you alone are responsible for every
 > order it places and for following your broker's terms of service.
+>
+> **What this is, and is not.** EvoTrader is a research project — and, frankly,
+> a hobby and something of a social experiment in letting AI agents run and
+> revise their own process. Its hypothesis is that a self-evolving agent can
+> calibrate a trading algorithm's parameters and propose new strategies as
+> market conditions change. **That hypothesis is unproven.** The project makes
+> no claim that the system is, or will be, profitable, and it publishes no
+> trading results: whatever it does on your account is yours alone. It is not
+> a trading service and it does not provide trading advice.
 
 ---
 
