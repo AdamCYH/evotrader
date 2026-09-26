@@ -238,7 +238,7 @@ self-evolve      ->  implement: failing test, fix, full tests, practice cycle
   diff against the current one) and *Proposals* (apply or reject a proposal or
   code review). The console owns the `Status` of each proposal and review.
 - **Implementation.** A person, or Claude Code with the `self-evolve` skill
-  (`.claude/skills/self-evolve/SKILL.md`), builds the approved change: read the note
+  (`.agents/skills/self-evolve/SKILL.md`), builds the approved change: read the note
   and the code it cites, write a failing test that reproduces the problem, fix
   it, run the whole test suite, check the algorithm still loads, and run a
   practice cycle before it touches real money. A before-and-after backtest is a
@@ -269,5 +269,5 @@ Two real outputs of this loop, anonymised, are in [examples/](examples/).
 | Backtests (algorithm only, no AI) | `src/evotrader/backtest/` |
 | Scenario tests for agent instructions | `src/evotrader/scenarios/` |
 | Starter data copied into a new data folder | `starter_data/` |
-| Skills for coding agents | `.claude/skills/` (developer guide, self-evolve, signal validation, offline iteration, MCP debugger) |
+| Skills for coding agents | `.agents/skills/` (developer guide, self-evolve, signal validation, offline iteration, MCP debugger) |
 | Tests | `tests/unit/`, `tests/js/` |

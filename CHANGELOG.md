@@ -21,8 +21,12 @@ Fixes from trying the first public version the way a newcomer would.
 
 ### Skills
 
-- All skills now live in `.claude/skills/`, where Claude Code finds them; the
-  `skills/` folder and its duplicate of `self-evolve` are gone.
+- All skills now live in `.agents/skills/`, the shared folder of the Agent
+  Skills standard (GitHub Copilot, Cursor, OpenCode and others read it), with
+  `.claude/skills` a link to it for Claude Code; the `skills/` folder and its
+  duplicate of `self-evolve` are gone.
+- The instructions for coding agents are in `AGENTS.md`, the cross-tool
+  standard; `CLAUDE.md` imports it for Claude Code.
 - `fresh-start` is removed: it deleted journals, memory and the broker
   sign-in. To start over, point the app at a new data folder
   (`./run.sh setup --data-dir PATH`).

@@ -1,9 +1,9 @@
 """Inspect an MCP server's tools: list them, show one's input, or call a read-only one.
 
-    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py list
-    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py schema get_equity_quotes
-    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py call get_equity_quotes '{"symbols": ["SPY"]}'
-    uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py dump
+    uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py list
+    uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py schema get_equity_quotes
+    uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py call get_equity_quotes '{"symbols": ["SPY"]}'
+    uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py dump
 
 ``dump`` writes every tool's full schema to ``<data folder>/mcp_tool_schemas.json``,
 to compare with the tool definitions in ``src/evotrader/mcp/robinhood.py``.

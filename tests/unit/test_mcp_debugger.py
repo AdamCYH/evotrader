@@ -20,7 +20,7 @@ from evotrader import paths
 
 
 def debugger() -> ModuleType:
-    path = paths.project_root() / ".claude/skills/mcp-debugger/scripts/mcp_debugger.py"
+    path = paths.project_root() / ".agents/skills/mcp-debugger/scripts/mcp_debugger.py"
     spec = importlib.util.spec_from_file_location("mcp_debugger", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

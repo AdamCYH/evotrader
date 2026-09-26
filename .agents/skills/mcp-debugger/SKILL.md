@@ -16,10 +16,10 @@ two programs refreshing one broker sign-in can invalidate it). `--provider`
 picks the provider group from the settings (default `trading`; also `research`).
 
 ```bash
-uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py list
-uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py schema get_option_chains
-uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py call get_equity_quotes '{"symbols": ["SPY"]}'
-uv run python .claude/skills/mcp-debugger/scripts/mcp_debugger.py dump
+uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py list
+uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py schema get_option_chains
+uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py call get_equity_quotes '{"symbols": ["SPY"]}'
+uv run python .agents/skills/mcp-debugger/scripts/mcp_debugger.py dump
 ```
 
 - `list`: every tool the server offers.

@@ -8,7 +8,7 @@ description: Developer guide for the EvoTrader codebase — how the agents, inst
 For coding agents and people changing the code. It does not repeat what is
 written elsewhere; read these first:
 
-- [CLAUDE.md](../../../CLAUDE.md) — the rules for a coding session: no live trades,
+- [AGENTS.md](../../../AGENTS.md) — the rules for a coding session: no live trades,
   test first, the data folder, proposal `Status` fields, account data.
 - [CONTRIBUTING.md](../../../CONTRIBUTING.md) — setup, the checks every change must
   pass, how instruction and algorithm versions work.
@@ -16,7 +16,7 @@ written elsewhere; read these first:
   cycle step by step, the self-evolve loop, and
   [where to find things](../../../docs/architecture.md#where-to-find-things).
 
-## The other skills (next to this one, in `.claude/skills/`)
+## The other skills (next to this one, in `.agents/skills/`)
 
 Read the matching skill before starting a task it covers.
 

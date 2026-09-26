@@ -130,7 +130,7 @@ instructions/strategy/
   scenario harness: `uv run python -m evotrader.scenarios.runner` lists the
   scenarios, `--scenario NAME --render` prints the exact prompt, and
   `--check FILE` scores a saved response. The
-  [offline-iteration](.claude/skills/offline-iteration/SKILL.md) skill describes the
+  [offline-iteration](.agents/skills/offline-iteration/SKILL.md) skill describes the
   discipline that keeps such a search honest.
 
 ## How algorithm versions work
@@ -159,14 +159,14 @@ The rule-based part of the system is code plus versioned parameters:
   strategy or a flipped sign. It leaves out the agents, the news and real
   fills, so don't choose a parameter because it moved the backtest number;
   read the report's participation table and the
-  [signal-validation](.claude/skills/signal-validation/SKILL.md) skill first.
+  [signal-validation](.agents/skills/signal-validation/SKILL.md) skill first.
 
 ## Evolution proposals and reviews
 
 The evolution agent writes strategy proposals to `evolution/proposals/` and
 code reviews to `evolution/reviews/` in the data folder
 ([examples](docs/examples/)). Implementing one follows the
-[self-evolve](.claude/skills/self-evolve/SKILL.md) skill. **Never edit the `Status`
+[self-evolve](.agents/skills/self-evolve/SKILL.md) skill. **Never edit the `Status`
 field of a proposal or review by hand**: the console owns it and keeps the
 database in step. Mark it applied or rejected in the console instead.
 
@@ -180,4 +180,4 @@ database in step. Mark it applied or rejected in the console instead.
   [Apache License 2.0](LICENSE) (section 5 of the license).
 
 Contributors who use Claude Code will find the project conventions in
-[CLAUDE.md](CLAUDE.md).
+[AGENTS.md](AGENTS.md).
