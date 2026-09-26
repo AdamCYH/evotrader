@@ -375,8 +375,22 @@ async def start(
         main_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
         registered_signals = []
+        console_server = None  # the web console, once it is serving
+        stop_requests = 0
 
         def _signal_handler(sig):
+            nonlocal stop_requests
+            stop_requests += 1
+            # The console stops through uvicorn, which closes browser connections
+            # and runs the app's own shutdown. Cancelling the task instead skips
+            # that shutdown, and a database left open keeps the process alive.
+            if console_server is not None and stop_requests == 1:
+                logger.info("Received signal %s — stopping (press Ctrl+C again to force)...", sig)
+                from evotrader.web.server import end_event_streams
+
+                end_event_streams()
+                console_server.should_exit = True
+                return
             logger.info("Received signal %s — initiating clean shutdown...", sig)
             if main_task is not None:
                 main_task.cancel()
@@ -1136,6 +1150,7 @@ async def start(
                 runner_fn=run_cycle_task,
                 memory=memory,
                 evolution_service=evolution_service,
+                evolution_db=evolution_db,
             )
 
             port = int(os.environ.get("EVOTRADER_PORT", "8080"))
@@ -1145,6 +1160,9 @@ async def start(
                     host=console_host(),
                     port=port,
                     log_level="warning",
+                    # An open console tab keeps its live event stream open; without
+                    # a limit, stopping would wait for every tab to be closed.
+                    timeout_graceful_shutdown=5,
                 )
             )
             # Patch uvicorn's signal capturing so it doesn't overwrite our loop signal handlers
@@ -1159,6 +1177,7 @@ async def start(
             from evotrader.mcp.oauth import set_return_url
 
             set_return_url(f"http://127.0.0.1:{port}/")
+            console_server = server
             await server.serve()
         else:
             await run_cycle_task()

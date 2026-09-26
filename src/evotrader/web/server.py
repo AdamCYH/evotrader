@@ -116,6 +116,12 @@ def broadcast_sse_event(event_type: str, data: Any) -> None:
         q.put_nowait(payload)
 
 
+def end_event_streams() -> None:
+    """End every open live event stream, so a stopping server need not wait for browser tabs."""
+    for q in active_listeners:
+        q.put_nowait(None)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # FastAPI App Construction
 # ═══════════════════════════════════════════════════════════════════════
@@ -204,6 +210,7 @@ def create_app(
     runner_fn: Any,  # Function to run the orchestrator cycle
     memory: Any,  # Configured SemanticMemory instance
     evolution_service: Any = None,
+    evolution_db: Any = None,  # The caller's open connection to the live DB, if any
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     global _active_app
@@ -390,8 +397,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Initialize the evolution DB asynchronously
-        if getattr(app.state, "evolution_db", None) and app.state.evolution_db is not app.state.db:
+        # Open the evolution DB if the console opened it itself
+        if app.state.owns_evolution_db:
             await app.state.evolution_db.initialize()
 
         # Synchronize ChromaDB trade experiences with confirmed journal records
@@ -412,7 +419,7 @@ def create_app(
                 pass
             logger.info("⏰  Background scheduler loop stopped.")
 
-        if getattr(app.state, "evolution_db", None) and app.state.evolution_db is not app.state.db:
+        if app.state.owns_evolution_db:
             await app.state.evolution_db.close()
 
     app = FastAPI(title="EvoTrader Console", lifespan=lifespan)
@@ -455,12 +462,18 @@ def create_app(
 
     app.state.thought_logger = ThoughtLogger(db)
 
-    # Ensure evolution state is always shared by pointing to the live DB
+    # Ensure evolution state is always shared by pointing to the live DB. Reuse
+    # the caller's connection when there is one: writes take turns per
+    # connection, so a second connection to the same file would bypass that.
     evolution_db_path = config.data_dir / "db" / "evotrader.db"
-    if evolution_db_path == db._db_path:
+    app.state.owns_evolution_db = False
+    if evolution_db is not None:
+        app.state.evolution_db = evolution_db
+    elif evolution_db_path == db._db_path:
         app.state.evolution_db = db
     else:
         app.state.evolution_db = Database(evolution_db_path)
+        app.state.owns_evolution_db = True
 
     app.state.evolution_store = EvolutionLogStore(app.state.evolution_db)
     app.state.telemetry_reader = TelemetryReader(Path(config.db_dir) / "telemetry.db")
@@ -2645,6 +2658,8 @@ def create_app(
             try:
                 while True:
                     event = await q.get()
+                    if event is None:  # the server is stopping
+                        return
                     yield f"data: {event}\n\n"
             except asyncio.CancelledError:
                 pass
