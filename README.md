@@ -34,6 +34,25 @@ Created by Adam Chiu · ImmersiaLabs
 
 ---
 
+## What it looks like
+
+The web console. In these screenshots, account figures, trades and the agents'
+reasoning are blurred; the layout is the real one.
+
+<p align="center">
+  <img src="docs/images/console-run-history.png" width="100%"
+       alt="Run history: an evolution report in the timeline of the agents' thoughts and decisions">
+</p>
+<p align="center">
+  <img src="docs/images/console-dashboard.png" width="33%"
+       alt="Dashboard: account, positions, market signals, runs, the evolution engine and the trade journal">
+  <img src="docs/images/console-memory.png" width="64%"
+       alt="Memory and notes: the agents' notes and their memory of past trades">
+</p>
+
+*Top: an evolution report in the run history. Bottom: the dashboard, and the
+agents' memory of notes and past trades.*
+
 ## The idea
 
 - **An AI that improves its own trading.** EvoTrader's bet is that AI agents
