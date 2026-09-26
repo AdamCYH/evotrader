@@ -98,6 +98,22 @@
     border-color: var(--border-color);
 }
 
+/* An algorithm version's name can be long ("composite_v030_session_relative_…")
+   and has no spaces to wrap at: cut it short; the full name is in its tooltip. */
+.badge-algo {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.badge-algo #badge-version {
+    display: inline-block;
+    max-width: min(30ch, 45vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+}
+
 /* Permitted instruments. The agent may hold more than one symbol — a primary
    plus a bearish vehicle today, potentially more later — so this badge grows
    with configuration rather than being a fixed slot. It must WRAP: the header

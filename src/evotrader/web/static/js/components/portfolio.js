@@ -55,7 +55,10 @@ export function renderPortfolio(data, elements) {
     // Cache the PRIMARY only — display fallbacks elsewhere mean "the instrument
     // we trade", not "any symbol we are allowed to touch".
     setDisplayTicker(data.local.ticker);
-    if (badgeVersion) badgeVersion.textContent = data.local.algo_version;
+    if (badgeVersion) {
+        badgeVersion.textContent = data.local.algo_version;
+        badgeVersion.title = data.local.algo_version; // the badge cuts a long name short
+    }
 
     if (badgeMode && badgeModeText) {
         if (data.local.dry_run) {
