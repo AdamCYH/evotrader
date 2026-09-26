@@ -379,7 +379,9 @@ environment variables, not settings — see below.
 
 Set in `.env` (the data folder's `.env` overrides one in the project folder),
 except `EVOTRADER_DATA_DIR`, which must be set in your shell because it says
-where that `.env` is.
+where that `.env` is. A variable already set in your shell wins over both files
+(the app says so when the values differ), so `EVOTRADER_PORT=8081 ./run.sh`
+works for one run. An empty value (`KEY=`) means not set.
 
 | Variable | Purpose |
 |---|---|

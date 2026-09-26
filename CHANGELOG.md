@@ -4,6 +4,42 @@ Notable changes to EvoTrader are recorded here, newest first. While the
 version starts with 0, any release may change behaviour, settings or the data
 folder layout; each entry says what you need to do.
 
+## Unreleased
+
+Fixes from trying the first public version the way a newcomer would.
+
+### Changed — check these if you set things up by hand
+
+- **Your shell now wins over `.env` files.** A variable already set in the
+  environment beats the same variable in a `.env` (the data folder's `.env`
+  still beats the project's), and an empty value (`KEY=`) means "not set".
+  Before, the data folder's `.env` won, so `EVOTRADER_PORT=8081 ./run.sh` was
+  ignored when the file named a port, and an empty `EVOTRADER_MOCK_TIME=`
+  cancelled `--mock-time`. The app warns when the two differ.
+- **An option the app doesn't know stops it** with an error. It used to be
+  ignored, so a typo such as `--mock_time` ran in the mode the settings say.
+
+### Fixed
+
+- Ctrl+C stops the app within seconds, even with a console tab open; it used
+  to hang until killed.
+- `./run.sh setup --data-dir PATH` sets up that folder (it set up `./data`),
+  and a relative folder is found where you typed it, not inside the project.
+- Quitting setup takes away the data folder it had just made, so the app no
+  longer starts from a half-made folder with no password and no key. The app
+  now also warns at start-up when the console password or an AI key is missing.
+- Running setup again starts from your current choices (easy or detailed, the
+  provider, each agent's model, the port): pressing Enter throughout changes
+  nothing.
+- Setup recognises a Gemini key saved as `GOOGLE_API_KEY`, queries model names
+  such as `gpt-5` that lack a provider in front, and asks for at least $1 of
+  play money.
+- The Robinhood sign-in files are readable only by you, and no part of the
+  token is printed any more. The tests never touch your real `~/.evotrader`.
+- A console port already in use gets a clear message; `--sim-deposit` checks
+  the amount; `./run.sh cli-dashboard` works again; the console's sign-in window
+  can be closed; start-up and shutdown print far less noise.
+
 ## 0.2.0 — first public release (unreleased)
 
 The first public version. Development before this happened in a private

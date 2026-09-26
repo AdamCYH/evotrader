@@ -83,9 +83,10 @@ Two real outputs of the loop, anonymised, are in [docs/examples/](docs/examples/
 | macOS or Linux | The scripts are bash. On Windows, use WSL (not tested). |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | Installs Python 3.12+ and every dependency for you. |
 | An AI provider key | **Google Gemini** is the default: the cheapest, and what the system is developed and tested on ([get a key](https://aistudio.google.com/app/apikey)). **Anthropic Claude** is supported, including running the strategy and evolution agents on a Claude subscription through Claude Code ([how](docs/claude_code_evolution.md)). **OpenAI** models can be selected but are **experimental**: little tested. |
-| A Robinhood account with **agentic trading** enabled | Robinhood's feature that lets an AI agent trade through its official MCP server. (MCP, the Model Context Protocol, is a standard way for AI agents to call outside tools.) **Needed even for practice mode**, because prices, price history and option data come from Robinhood. You sign in on Robinhood's own page; the app never sees your password. |
+| A Robinhood account with **agentic trading** enabled | Robinhood's feature that lets an AI agent trade through its official MCP server. (MCP, the Model Context Protocol, is a standard way for AI agents to call outside tools.) **Needed even for practice mode**, because prices, price history and option data come from Robinhood. You sign in on Robinhood's own page; the app never sees your password. No account yet? The backtester (`uv run python -m evotrader.backtest.runner`) replays the algorithm on past prices with no accounts at all. |
 | An Alpha Vantage key *(optional)* | Richer news and sentiment data for the news agent ([free key](https://www.alphavantage.co/support/#api-key), 25 requests a day). The news agent also has free Yahoo Finance tools that come with the project. |
 | Node.js 18+ *(optional)* | Only for the JavaScript tests and for Claude Code. |
+| About 2 GB of disk space | Python, the dependencies, and a small language model the agents' memory uses (about 80 MB, downloaded the first time the app starts). |
 
 The web console loads a few libraries from public CDNs (Chart.js, KaTeX,
 marked, Font Awesome) and fonts from Google Fonts, so your browser needs
@@ -114,7 +115,9 @@ Then start it:
 ./run.sh
 ```
 
-and open **http://127.0.0.1:8080**. The console asks for the password you set.
+and open the address it prints, **http://127.0.0.1:8080** unless you chose
+another port. The console asks for the password you set. Port already in use?
+`EVOTRADER_PORT=8081 ./run.sh`. Stop it with Ctrl+C.
 
 **First start.** The first time the app needs Robinhood, the console asks you
 to sign in and links to Robinhood's own sign-in page (the terminal prints the
@@ -292,13 +295,14 @@ are between you and your broker.
 
 | Command | What it does |
 |---|---|
-| `./run.sh` | Start the web console at http://127.0.0.1:8080, in the mode set in `settings.yaml` |
+| `./run.sh` | Start the web console at http://127.0.0.1:8080, in the mode set in `settings.yaml`. Ctrl+C stops it |
+| `EVOTRADER_PORT=8081 ./run.sh` | Use another port for the console (or set it in your data folder's `.env`) |
 | `./run.sh --mode sim` or `--mode live` | Override the mode for this run |
 | `./run.sh --data-dir PATH` | Use another data folder for this run |
 | `./run.sh --mock-time [TIME]` | Pretend the clock says `TIME` (ISO format; default: a Wednesday at 10:00 ET) to try a cycle outside market hours. Forces practice mode; prices still come from Robinhood |
 | `./run.sh --sim-deposit USD` | Add play money to the practice account, then exit |
 | `./run.sh offline` | Run one cycle without the console, then exit (for cron). Logs to `<data folder>/logs/cycle.log`. **No approval gate** |
-| `./run.sh setup` | Answer the setup questions again |
+| `./run.sh setup` | Answer the setup questions again (`--data-dir PATH` for another data folder) |
 | `./run.sh --init` | Create any missing data-folder files from the starter data; never overwrites |
 | `./run.sh --help` | All options |
 | `uv run python -m evotrader.backtest.runner` | Replay the algorithm alone on past prices, with no AI calls (`--help` for options) |

@@ -94,6 +94,9 @@ def test_ctrl_c_stops_the_app_with_a_console_tab_open(tmp_path: Path) -> None:
     assert "shut down cleanly" in output
     assert "Traceback" not in output
     assert "ERROR" not in output
+    # Started with no key and no password, it says so up front (2026-09-26).
+    assert "No console password" in output
+    assert "No Google Gemini key" in output
 
 
 def _app(tmp_path: Path, **extra) -> object:

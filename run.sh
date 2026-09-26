@@ -5,6 +5,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# A data folder you name is relative to where you are, not to this folder:
+# make it absolute before moving here.
+CALLER_DIR="$(pwd)"
+absolute() { case "$1" in /*|"~"*) printf '%s' "$1" ;; *) printf '%s/%s' "$CALLER_DIR" "$1" ;; esac; }
+if [ -n "${EVOTRADER_DATA_DIR:-}" ]; then
+    EVOTRADER_DATA_DIR="$(absolute "$EVOTRADER_DATA_DIR")"
+    export EVOTRADER_DATA_DIR
+fi
+ARGS=()
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "--data-dir" ]; then arg="$(absolute "$arg")"; fi
+    case "$arg" in --data-dir=*) arg="--data-dir=$(absolute "${arg#--data-dir=}")" ;; esac
+    ARGS+=("$arg")
+    prev="$arg"
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
 cd "$SCRIPT_DIR"
 
 # Determine execution environment
@@ -24,54 +43,50 @@ fi
 # Help message
 show_help() {
     cat << 'EOF'
-EvoTrader CLI Tool
+EvoTrader
 
 Usage:
-  ./run.sh [command/flag] [arguments]
+  ./run.sh [command] [options]
 
-Commands/Flags:
-  (default)            Launch the premium interactive Web Console displaying real-time
-                       performance, live logs, indicator charts, position alignment,
-                       and manual trade approval gates.
-                       Accepts:
-                         --mode {live,sim}
-                                      Select execution mode. 'sim' does paper trading
-                                      and routes database to evotrader_sim.db.
-                                      'live' routes to evotrader.db and places orders.
-                                      (Default: falls back to mode in settings.yaml)
-                         --mock-time [ISO]
-                                      Simulate a custom system time. If passed without
-                                      value, defaults to Wednesday 10:00 AM ET.
-                                      (Forces sim mode for safety)
-                         --sim-deposit USD
-                                      Deposit simulated funds (USD) into the sim account
-                                      and exit.
-                       Example: ./run.sh --mock-time
+Commands:
+  (none)             Start the web console. It prints its address (by default
+                     http://127.0.0.1:8080). Options:
+                       --mode live|sim     trade for real, or practice with play
+                                           money (sim). Default: settings.yaml.
+                       --mock-time [ISO]   pretend it is this time (default: a
+                                           Wednesday, 10:00 New York); always practice.
+                       --sim-deposit USD   add play money to the practice account,
+                                           then exit.
+                       --data-dir FOLDER   use this data folder (settings, keys,
+                                           journal) instead of ./data.
+                     Example: ./run.sh --mode sim
 
-  offline, --offline, --cron
-                       Run a single one-off offline trading cycle and exit. Useful for cron jobs.
-                       Logs output to <data folder>/logs/cycle.log.
-                       Accepts:
-                         --mode {live,sim}
-                         --mock-time [ISO] (forces sim mode)
-                       Example: ./run.sh offline --mock-time
+  setup              Answer a few questions (AI provider, keys, console
+                     password) and save them. Safe to run again. Accepts --data-dir.
 
-  cli-dashboard        Launch the legacy static terminal dashboard.
-                       Example: ./run.sh cli-dashboard
+  offline            Run one trading cycle without the console, then exit (for
+                     cron). Logs to <data folder>/logs/cycle.log.
+                     Accepts --mode, --mock-time and --data-dir.
+                     Example: ./run.sh offline --mock-time
 
-  setup                Answer a few questions (AI provider, keys, console password)
-                       and save them to your data folder. Safe to run again.
-                       Example: ./run.sh setup
+  cli-dashboard      A summary of the journal, in the terminal.
 
-  -i, --init, init     Initialise the data directory structure, default config files,
-                       and seed algorithms. Safe to run multiple times.
-                       Example: ./run.sh --init
+  init               Create the data folder from the starter data without asking
+                     anything (setup does this for you). Accepts --data-dir.
 
-  -h, --help, help     Show this help documentation.
+  help               Show this help.
 
-Safety Rules:
-  1. Live trading mode is strictly blocked when faking the clock (--mode live + --mock-time).
-  2. Setting mock time (--mock-time) always forces simulation mode ('sim').
+Settings from the environment (or put them in <data folder>/.env):
+  EVOTRADER_PORT=8081       the console's port (default 8080)
+  EVOTRADER_HOST=0.0.0.0    reach the console from other devices (needs a password)
+  EVOTRADER_DATA_DIR=FOLDER the data folder, like --data-dir
+  Example: EVOTRADER_PORT=8081 ./run.sh
+  All of them: docs/settings_reference.md
+
+Safety rules:
+  1. --mock-time never trades for real: it forces practice mode, and
+     --mode live with --mock-time is refused.
+  2. An option it doesn't know stops it, so a typo can't start the wrong mode.
 EOF
 }
 
@@ -104,7 +119,7 @@ if [ $# -gt 0 ]; then
             shift
             ;;
         *)
-            # Keep web-dashboard as default, let Python parse other flags (e.g. --sim)
+            # The console is the default; the app checks the options itself.
             COMMAND="web-dashboard"
             ;;
     esac
@@ -113,8 +128,7 @@ fi
 # Execute corresponding command
 case "$COMMAND" in
     web-dashboard)
-        echo "🌐 Launching Premium Web Dashboard..."
-        echo "   Open your browser at http://127.0.0.1:8080"
+        # The app prints the console's address once it knows the port.
         $RUN_CMD -m evotrader --dashboard "$@"
         ;;
     cli-dashboard)

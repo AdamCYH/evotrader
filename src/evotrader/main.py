@@ -333,6 +333,12 @@ async def start(
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
     logging.getLogger("google.adk").setLevel(logging.INFO)
+    for name in (
+        "uvicorn.error",
+        "google_adk.google.adk.tools.mcp_tool.mcp_session_manager",
+        "google_adk.google.adk.tools.mcp_tool.session_context",
+    ):
+        logging.getLogger(name).addFilter(_drop_alarming_noise)
 
     logger.info("=" * 60)
     logger.info("  EvoTrader v0.2.0 — Starting up (ADK + LiteLLM)")
@@ -354,6 +360,24 @@ async def start(
         logger.info("Mock Time:  %s (SIMULATION ACTIVE)", mock_time)
     logger.info("=" * 60)
 
+    # Say up front what will not work, instead of at the first trading cycle.
+    from evotrader.onboarding import missing_keys
+
+    for provider, agents in missing_keys(config.settings).items():
+        logger.warning(
+            "No %s key (%s): %s will fail. Run ./run.sh setup, or add the key to %s.",
+            provider.label,
+            " or ".join((provider.env_var, *provider.other_env_vars)),
+            ", ".join(agents),
+            config.data_dir / ".env",
+        )
+    if dashboard and not os.environ.get("DASHBOARD_PASSWORD"):
+        logger.warning(
+            "No console password (DASHBOARD_PASSWORD): anything that can reach the console,"
+            " even a web page open in your browser, can send it commands. Run ./run.sh setup"
+            " to set one."
+        )
+
     # ── Initialise database ─────────────────────────────────────
     db = Database(config.db_path)
     await db.initialize()
@@ -364,13 +388,16 @@ async def start(
 
         sim_db_path = config.data_dir / "sim" / "db" / "sim_broker.db"
         sim_broker = SimBroker(sim_db_path)
-        await sim_broker.initialize()
-        await sim_broker.deposit(sim_deposit)
-        logger.info(
-            "Successfully deposited $%s to simulated trading account. Exiting.", sim_deposit
-        )
-        await db.close()
-        await sim_broker.close()
+        # Closed whatever happens: an open database keeps the process alive.
+        try:
+            await sim_broker.initialize()
+            await sim_broker.deposit(sim_deposit)
+            logger.info(
+                "Successfully deposited $%s to simulated trading account. Exiting.", sim_deposit
+            )
+        finally:
+            await sim_broker.close()
+            await db.close()
         return
 
     try:
@@ -1158,11 +1185,20 @@ async def start(
                 evolution_db=evolution_db,
             )
 
-            port = int(os.environ.get("EVOTRADER_PORT", "8080"))
+            port = _console_port()
+            host = console_host()
+            if not _port_is_free(host, port):
+                logger.error(
+                    "Port %d is already in use: is EvoTrader already running? To use another"
+                    " port: EVOTRADER_PORT=%d ./run.sh",
+                    port,
+                    port + 1,
+                )
+                raise SystemExit(1)
             server = uvicorn.Server(
                 uvicorn.Config(
                     app=app,
-                    host=console_host(),
+                    host=host,
                     port=port,
                     log_level="warning",
                     # An open console tab keeps its live event stream open; without
@@ -1239,12 +1275,83 @@ def console_host() -> str:
     return host
 
 
+def _drop_alarming_noise(record: logging.LogRecord) -> bool:
+    """Keep a log record unless it alarms without informing.
+
+    * A request still waiting when the app stops (typically on the broker
+      sign-in) is cut off; the web server logs each as an error with a
+      traceback, though nothing went wrong.
+    * ADK tries to set up Google Cloud mTLS for every broker connection and
+      warns that "default credentials were not found": EvoTrader does not use
+      it, and it reads like a problem with the user's keys.
+    * ADK warns "Error on session runner task: " with nothing after it when a
+      broker session is cancelled (a real error names itself).
+
+    The web server's own "Cancel N running task(s)" line stays, as information
+    rather than an error: it is the expected end of a stop.
+    """
+    if record.exc_info and isinstance(record.exc_info[1], asyncio.CancelledError):
+        return False
+    message = record.getMessage()
+    if message.startswith("Cancel ") and message.endswith("timeout graceful shutdown exceeded"):
+        record.levelno, record.levelname = logging.INFO, "INFO"
+        return True
+    if message == "Error on session runner task: ":
+        return False
+    return not message.startswith("Failed to configure mTLS")
+
+
+def _console_port() -> int:
+    """The console's port: EVOTRADER_PORT, else 8080."""
+    import os
+
+    text = os.environ.get("EVOTRADER_PORT", "").strip() or "8080"
+    if not text.isdigit() or not 1 <= int(text) <= 65535:
+        raise SystemExit(f"EVOTRADER_PORT={text!r} is not a port number (1-65535).")
+    return int(text)
+
+
+def _port_is_free(host: str, port: int) -> bool:
+    """Whether the console can listen on ``port``, binding as uvicorn does.
+
+    Checked before starting: uvicorn announces nothing useful when the port is
+    taken, and the console had already been reported as running.
+    """
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _play_money(text: str) -> float:
+    """A ``--sim-deposit`` amount: more than zero, "$" and "," allowed."""
+    import argparse
+
+    try:
+        amount = float(text.replace("$", "").replace(",", ""))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an amount of dollars: {text!r}") from None
+    if not amount > 0:
+        raise argparse.ArgumentTypeError("the amount must be more than zero")
+    return amount
+
+
 def run() -> None:
     """Synchronous wrapper for the async entry point."""
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description="EvoTrader Trading System")
+    # Most people start it through run.sh, so errors name that. No abbreviations:
+    # "--sim" must not quietly mean "--sim-deposit".
+    parser = argparse.ArgumentParser(
+        prog="./run.sh", description="EvoTrader Trading System", allow_abbrev=False
+    )
     parser.add_argument(
         "--mode",
         choices=["live", "sim"],
@@ -1263,7 +1370,7 @@ def run() -> None:
     )
     parser.add_argument(
         "--sim-deposit",
-        type=float,
+        type=_play_money,
         help="Deposit funds into the simulated brokerage account (USD).",
     )
     parser.add_argument(
@@ -1272,7 +1379,14 @@ def run() -> None:
         "Overrides EVOTRADER_DATA_DIR; default: data/ in the project.",
     )
 
-    args, _ = parser.parse_known_args()
+    # Unknown flags stop it: a mistyped one (--mock_time, --sim) used to be
+    # ignored, so the app ran in whatever mode the settings say — possibly live.
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        meant = {"--sim": "--mode sim", "--practice": "--mode sim", "--paper": "--mode sim"}
+        meant["--live"] = "--mode live"
+        hint = next((f" (did you mean {meant[u]}?)" for u in unknown if u in meant), "")
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}{hint}")
 
     if args.data_dir:
         from pathlib import Path
@@ -1290,9 +1404,12 @@ def run() -> None:
 
     data_folder = _paths.data_dir()
     if not (data_folder / "settings.yaml").is_file():
+        setup = "./run.sh setup"
+        if data_folder != _paths.project_root() / "data":
+            setup += f' --data-dir "{data_folder}"'
         print(
             f"No settings in {data_folder} yet.\n"
-            "Run ./run.sh setup first: it creates your data folder from the starter "
+            f"Run {setup} first: it creates your data folder from the starter "
             "data and asks for your AI provider and keys (about a minute).",
             file=sys.stderr,
         )

@@ -2198,6 +2198,16 @@ function showOAuthModal(url) {
     oauthCallbackUrl.value = "";
 }
 
+// Closing only hides it: the sign-in stays open on the server, and the prompt
+// comes back when the console reconnects or the app next needs Robinhood.
+function hideOAuthModal() {
+    if (oauthModal) oauthModal.style.display = "none";
+}
+document.getElementById("oauth-close-btn")?.addEventListener("click", hideOAuthModal);
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && oauthModal && oauthModal.style.display !== "none") hideOAuthModal();
+});
+
 if (oauthSubmitBtn) {
     oauthSubmitBtn.addEventListener("click", async () => {
         const url = oauthCallbackUrl.value.trim();

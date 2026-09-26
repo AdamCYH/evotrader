@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from evotrader import paths
 from evotrader.models.config import Constitution, Settings, TradingMode
@@ -135,19 +135,49 @@ def _find_project_root() -> Path:
     return paths.project_root()
 
 
-def _load_env_files(data_dir: Path, project_root: Path) -> None:
-    """Load .env files, with data/.env taking precedence over project root/.env."""
-    # Load project root .env first (lower precedence)
-    root_env = project_root / ".env"
-    if root_env.is_file():
-        load_dotenv(root_env, override=False)
-        logger.debug("Loaded environment from %s", root_env)
+# Values this process took from .env files. A later load may update them (a
+# file can change while the app runs) without mistaking them for the shell's.
+_from_env_files: dict[str, str] = {}
+_warned_shadowed: set[str] = set()
 
-    # Load data/.env second (higher precedence)
-    data_env = data_dir / ".env"
-    if data_env.is_file():
-        load_dotenv(data_env, override=True)
-        logger.debug("Loaded environment from %s (override)", data_env)
+
+def _load_env_files(data_dir: Path, project_root: Path) -> None:
+    """Load the data folder's .env, then the project's — never over the environment.
+
+    A variable already set in the environment (by your shell, or by a
+    command-line flag such as --mock-time) wins over both files, as with most
+    tools; the data folder's .env wins over the project's. An empty value
+    (``KEY=``, as in .env.example) means "not set".
+
+    Until 2026-09-26 the data folder's .env overrode the environment, so
+    ``EVOTRADER_PORT=8114 ./run.sh`` was silently ignored when the file named a
+    port, and the example file's empty ``EVOTRADER_MOCK_TIME=`` cancelled
+    ``--mock-time``.
+    """
+    import os
+
+    taken: set[str] = set()
+    for env_file in (data_dir / ".env", project_root / ".env"):
+        if not env_file.is_file():
+            continue
+        for key, value in dotenv_values(env_file).items():
+            if not value or key in taken:
+                continue
+            taken.add(key)
+            current = os.environ.get(key)
+            if current and current != _from_env_files.get(key):
+                if current != value and key not in _warned_shadowed:
+                    _warned_shadowed.add(key)
+                    logger.warning(
+                        "%s is set in your environment and, differently, in %s: using the "
+                        "environment's value.",
+                        key,
+                        env_file,
+                    )
+                continue
+            os.environ[key] = value
+            _from_env_files[key] = value
+        logger.debug("Loaded environment from %s", env_file)
 
 
 def _load_yaml(path: Path) -> dict:  # type: ignore[type-arg]

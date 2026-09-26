@@ -1194,12 +1194,20 @@
     <!-- OAuth Modal -->
     <div id="oauth-modal" class="modal-overlay" style="display: none;">
         <div class="glass-card login-card" style="max-width: 600px; text-align: left;">
-            <h2><i class="fa-solid fa-lock text-amber"></i> Authentication Required</h2>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                <h2><i class="fa-solid fa-lock text-amber"></i> Authentication Required</h2>
+                <button id="oauth-close-btn" class="custom-modal-close-btn"
+                    aria-label="Close — sign in later">&times;</button>
+            </div>
             <p style="color: var(--text-secondary); margin-bottom: 20px;">
                 EvoTrader requires authorization via Robinhood. Click the link below to authorize.
                 If you are accessing this remotely, your browser may fail to redirect to localhost after authorization.
                 If that happens, simply copy the full URL from your address bar (which contains the code) and paste it
                 below.
+            </p>
+            <p style="color: var(--text-dim); margin-bottom: 20px; font-size: 0.9em;">
+                You can close this and sign in later. Until then, prices, the account and trading wait
+                for Robinhood, even in practice mode.
             </p>
             <div style="margin-bottom: 20px;">
                 <a id="oauth-link" href="#" target="_blank"
@@ -1217,7 +1225,7 @@
     </div>
 
     <!-- Modular Application Coordinator -->
-    <script type="module" src="js/app.js?v=3"></script>
+    <script type="module" src="js/app.js?v=4"></script>
 </body>
 
 </html>
