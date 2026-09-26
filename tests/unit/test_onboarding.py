@@ -439,3 +439,127 @@ class TestMissingKeys:
         agents = missing[onboarding.PROVIDERS["anthropic"]]
         assert "strategy_agent" not in agents and "evolution_agent" not in agents
         assert "orchestrator" in agents
+
+
+class TestKeyCheck:
+    """Found 2026-09-26: a mistyped key showed only at the first trading cycle,
+    after the Robinhood sign-in. Setup now asks the provider whether it works."""
+
+    def run_checked(self, data, answers, secrets, verdicts):
+        script = Script(answers, secrets)
+        asked: list[tuple[str, str]] = []
+
+        def check(provider, key):
+            asked.append((provider.key, key))
+            return verdicts.pop(0)
+
+        plan = onboarding.Setup(
+            data, script.ask, script.ask_secret, script.say, check_key=check
+        ).run()
+        if plan is not None:
+            onboarding.apply(plan, data)
+        assert not script.answers and not script.secrets and not verdicts
+        return script, asked
+
+    def test_a_refused_key_is_asked_for_again(self, data) -> None:
+        script, asked = self.run_checked(
+            data,
+            answers=["1", "1", "n", "", "", "y"],  # ... "Save it anyway?" no
+            secrets=["AIza-typo", KEY, PASSWORD, PASSWORD, ""],
+            verdicts=[False, True],
+        )
+        assert asked == [("gemini", "AIza-typo"), ("gemini", KEY)]
+        assert any("doesn't accept this key" in line for line in script.shown)
+        assert dotenv_values(data / ".env")["GEMINI_API_KEY"] == KEY
+
+    def test_a_refused_key_can_be_saved_anyway(self, data) -> None:
+        self.run_checked(
+            data,
+            answers=["1", "1", "y", "", "", "y"],
+            secrets=["AIza-mine", PASSWORD, PASSWORD, ""],
+            verdicts=[False],
+        )
+        assert dotenv_values(data / ".env")["GEMINI_API_KEY"] == "AIza-mine"
+
+    def test_no_answer_saves_it_with_a_note(self, data) -> None:
+        script, _ = self.run_checked(
+            data,
+            answers=["1", "1", "", "", "y"],
+            secrets=[KEY, PASSWORD, PASSWORD, ""],
+            verdicts=[None],
+        )
+        assert any("Couldn't check it" in line for line in script.shown)
+        assert dotenv_values(data / ".env")["GEMINI_API_KEY"] == KEY
+
+    def test_a_saved_key_kept_with_enter_is_not_sent_again(self, data) -> None:
+        run(data, answers=["1", "1", "", "", "y"], secrets=[KEY, PASSWORD, PASSWORD, ""])
+        _, asked = self.run_checked(
+            data, answers=["", "", "", "y"], secrets=["", "", ""], verdicts=[]
+        )
+        assert asked == []
+
+
+class _Answer:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+class TestKeyWorks:
+    """The provider's own answer, read without spending anything (a model list)."""
+
+    @pytest.fixture
+    def answer(self, monkeypatch):
+        import urllib.request
+
+        sent: list = []
+
+        def respond_with(outcome):
+            def urlopen(request, timeout):
+                sent.append(request)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return _Answer(outcome)
+
+            monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+            return sent
+
+        return respond_with
+
+    @staticmethod
+    def refusal(code: int, body: str = ""):
+        import io
+        import urllib.error
+
+        return urllib.error.HTTPError("https://x", code, "no", {}, io.BytesIO(body.encode()))
+
+    def test_accepted(self, answer) -> None:
+        sent = answer(200)
+        assert onboarding.key_works(onboarding.PROVIDERS["gemini"], "AIza-good") is True
+        assert "AIza-good" not in sent[0].full_url, "the key travels in a header"
+        assert sent[0].get_header("X-goog-api-key") == "AIza-good"
+
+    @pytest.mark.parametrize("provider", ["anthropic", "openai"])
+    def test_refused(self, answer, provider) -> None:
+        answer(self.refusal(401))
+        assert onboarding.key_works(onboarding.PROVIDERS[provider], "bad") is False
+
+    def test_gemini_says_invalid_with_a_400(self, answer) -> None:
+        answer(self.refusal(400, '{"error": {"details": [{"reason": "API_KEY_INVALID"}]}}'))
+        assert onboarding.key_works(onboarding.PROVIDERS["gemini"], "bad") is False
+
+    @pytest.mark.parametrize("code", [400, 429, 500, 503])
+    def test_anything_else_is_unknown(self, answer, code) -> None:
+        answer(self.refusal(code, "busy"))
+        assert onboarding.key_works(onboarding.PROVIDERS["anthropic"], "k") is None
+
+    def test_no_connection_is_unknown(self, answer) -> None:
+        import urllib.error
+
+        answer(urllib.error.URLError("no route"))
+        assert onboarding.key_works(onboarding.PROVIDERS["openai"], "k") is None

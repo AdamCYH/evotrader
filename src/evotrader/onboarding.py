@@ -153,6 +153,46 @@ def missing_keys(settings: object) -> dict[Provider, list[str]]:
     return missing
 
 
+# A cheap, read-only request per provider (list its models) that fails on a bad key.
+_KEY_CHECKS: dict[str, tuple[str, Callable[[str], dict[str, str]]]] = {
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+        lambda key: {"x-goog-api-key": key},
+    ),
+    "anthropic": (
+        "https://api.anthropic.com/v1/models?limit=1",
+        lambda key: {"x-api-key": key, "anthropic-version": "2023-06-01"},
+    ),
+    "openai": ("https://api.openai.com/v1/models", lambda key: {"Authorization": f"Bearer {key}"}),
+}
+
+
+def key_works(provider: Provider, key: str, timeout: float = 10.0) -> bool | None:
+    """Whether the provider accepts ``key``: True, False, or None when it can't be told.
+
+    Only a clear refusal counts as False. No connection, a timeout, rate
+    limiting or an outage are None, and setup saves the key anyway. The key
+    goes only to its own provider, in a header rather than the address.
+    """
+    import urllib.error
+    import urllib.request
+
+    if provider.key not in _KEY_CHECKS:
+        return None
+    url, headers = _KEY_CHECKS[provider.key]
+    request = urllib.request.Request(url, headers=headers(key))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200 or None
+    except urllib.error.HTTPError as refused:
+        if refused.code in (401, 403):
+            return False
+        body = refused.read(4096).decode("utf-8", "replace")
+        return False if refused.code == 400 and "API_KEY_INVALID" in body else None  # Gemini
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
 # ── Editing settings.yaml ────────────────────────────────────────────
 
 
@@ -396,13 +436,19 @@ class Setup:
     """The questions. ``ask``/``ask_secret``/``say`` are injectable for tests."""
 
     def __init__(
-        self, data_dir: Path, ask: Ask, ask_secret: Ask, say: Callable[[str], None]
+        self,
+        data_dir: Path,
+        ask: Ask,
+        ask_secret: Ask,
+        say: Callable[[str], None],
+        check_key: Callable[[Provider, str], bool | None] | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.ask = ask
         self.ask_secret = ask_secret
         self.say = say
         self.saved = saved_values(data_dir)
+        self.check_key = check_key  # None: new keys are not checked (tests)
 
     @property
     def first_time(self) -> bool:
@@ -472,11 +518,29 @@ class Setup:
 
         def check(key: str) -> str:
             if provider.key_prefix and not key.startswith(provider.key_prefix):
-                return f"{provider.label} keys usually start with “{provider.key_prefix}”. Saved anyway."
+                return f"{provider.label} keys usually start with “{provider.key_prefix}”."
             return ""
 
         name = self.key_names(provider)[0]
-        return self.secret(name, f"{provider.label} key", required=True, check=check)
+        while True:
+            key = self.secret(name, f"{provider.label} key", required=True, check=check)
+            if key is None or self.check_key is None:  # kept the saved key, or no checking
+                return key
+            # A mistyped key otherwise shows only at the first trading cycle,
+            # after the broker sign-in.
+            self.say(f"  Checking the key with {provider.label} …")
+            works = self.check_key(provider, key)
+            if works:
+                self.say("  ✓ It works.")
+                return key
+            if works is None:
+                self.say(
+                    "  Couldn't check it (no connection, or the service is busy). Saved anyway."
+                )
+                return key
+            self.say(f"  ✗ {provider.label} doesn't accept this key. Look for a missing character.")
+            if self.yes("  Save it anyway?", default=False):
+                return key
 
     def console_password(self) -> str | None:
         self.say(
@@ -873,7 +937,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nThe data folder could not be made (see above). Nothing was saved.")
         return 1
     try:
-        plan = Setup(data_dir, ask=input, ask_secret=getpass.getpass, say=print).run()
+        setup = Setup(data_dir, input, getpass.getpass, print, check_key=key_works)
+        plan = setup.run()
         if plan is None:
             undo()
             print("Nothing was saved.")

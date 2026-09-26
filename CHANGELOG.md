@@ -31,6 +31,8 @@ Fixes from trying the first public version the way a newcomer would.
 - Running setup again starts from your current choices (easy or detailed, the
   provider, each agent's model, the port): pressing Enter throughout changes
   nothing.
+- Setup checks a new AI key with its provider (a free, read-only request), so
+  a mistyped key shows during setup instead of at the first trading cycle.
 - Setup recognises a Gemini key saved as `GOOGLE_API_KEY`, queries model names
   such as `gpt-5` that lack a provider in front, and asks for at least $1 of
   play money.
