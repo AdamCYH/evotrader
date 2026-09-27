@@ -51,8 +51,9 @@ def pct_move_in_atr(
     return move_in_atr(move_pct / 100.0 * reference_price, atr)
 
 
-def previous_close(last: float | None, day_change_pct: float | None,
-                   quoted_previous_close: float | None) -> float | None:
+def previous_close(
+    last: float | None, day_change_pct: float | None, quoted_previous_close: float | None
+) -> float | None:
     """The price a day's percent change is measured from.
 
     The quote's own previous close when it has one; otherwise derived from the

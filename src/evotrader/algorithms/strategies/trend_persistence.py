@@ -230,9 +230,7 @@ class TrendPersistenceStrategy(TradingAlgorithm):
                 fallback_threshold=self._counter_day_pct,
                 move_atr=pct_move_in_atr(
                     day_chg,
-                    previous_close(
-                        price, day_chg, getattr(snapshot.quote, "previous_close", None)
-                    ),
+                    previous_close(price, day_chg, getattr(snapshot.quote, "previous_close", None)),
                     ind.atr_14,
                 ),
                 threshold_atr=self._counter_day_atr,

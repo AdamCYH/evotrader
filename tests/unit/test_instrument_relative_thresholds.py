@@ -53,12 +53,15 @@ from tests.unit.test_trend_persistence import _make_daily_candles, _make_snapsho
 
 STARTER_CONFIG = (
     Path(__file__).resolve().parents[2]
-    / "starter_data" / "algorithms" / "v001_initial" / "config.yaml"
+    / "starter_data"
+    / "algorithms"
+    / "v001_initial"
+    / "config.yaml"
 )
 
 # Two instruments at the same price, one calm and one volatile.
-CALM_ATR = 1.05   # 1.05% of a 100 price: an index fund
-WILD_ATR = 6.6    # 6.6%: a volatile single stock
+CALM_ATR = 1.05  # 1.05% of a 100 price: an index fund
+WILD_ATR = 6.6  # 6.6%: a volatile single stock
 PREV = 100.0
 OPEN_ET = datetime(2026, 9, 17, 13, 30, tzinfo=UTC)  # 09:30 ET: no session decay
 
@@ -74,9 +77,16 @@ class TestTheRule:
     def test_a_price_distance_in_atr(self) -> None:
         assert move_in_atr(-3.3, 6.6) == pytest.approx(0.5)
 
-    @pytest.mark.parametrize("args", [(None, 100.0, 1.0), (0.8, None, 1.0),
-                                      (0.8, 0.0, 1.0), (0.8, 100.0, None),
-                                      (0.8, 100.0, 0.0)])
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (None, 100.0, 1.0),
+            (0.8, None, 1.0),
+            (0.8, 0.0, 1.0),
+            (0.8, 100.0, None),
+            (0.8, 100.0, 0.0),
+        ],
+    )
     def test_unmeasurable_is_none_not_zero(self, args) -> None:
         """Zero would read as "no move" and pass or fail a gate on no data."""
         assert pct_move_in_atr(*args) is None
@@ -88,27 +98,38 @@ class TestTheRule:
         assert previous_close(101.0, 1.0, None) == pytest.approx(100.0)
 
     def test_atr_decides_when_configured_and_measurable(self) -> None:
-        chk = check_move(fallback_move=0.8, fallback_threshold=0.7,
-                         move_atr=0.12, threshold_atr=0.65)
+        chk = check_move(
+            fallback_move=0.8, fallback_threshold=0.7, move_atr=0.12, threshold_atr=0.65
+        )
         assert (chk.met, chk.basis) == (False, "atr")
         assert chk.ratio == pytest.approx(0.12 / 0.65)
 
     def test_unset_falls_back_exactly(self) -> None:
-        chk = check_move(fallback_move=-0.8, fallback_threshold=0.7,
-                         move_atr=0.12, threshold_atr=None)
+        chk = check_move(
+            fallback_move=-0.8, fallback_threshold=0.7, move_atr=0.12, threshold_atr=None
+        )
         assert (chk.met, chk.basis) == (True, "fallback")
         assert chk.ratio == 0.8 / 0.7
 
     def test_configured_but_unmeasurable_says_so(self) -> None:
         """A strategy that quietly reverted to the percent rule must be visible."""
-        chk = check_move(fallback_move=0.8, fallback_threshold=0.7,
-                         move_atr=None, threshold_atr=0.65)
+        chk = check_move(
+            fallback_move=0.8, fallback_threshold=0.7, move_atr=None, threshold_atr=0.65
+        )
         assert (chk.met, chk.basis) == (True, "fallback_no_atr")
 
-    @pytest.mark.parametrize("value, ok", [(None, True), (0.65, True),
-                                           (MAX_THRESHOLD_ATR, True), (0, False),
-                                           (-0.5, False), (MAX_THRESHOLD_ATR + 0.1, False),
-                                           ("abc", False)])
+    @pytest.mark.parametrize(
+        "value, ok",
+        [
+            (None, True),
+            (0.65, True),
+            (MAX_THRESHOLD_ATR, True),
+            (0, False),
+            (-0.5, False),
+            (MAX_THRESHOLD_ATR + 0.1, False),
+            ("abc", False),
+        ],
+    )
     def test_validation(self, value, ok) -> None:
         assert (validate_threshold_atr("x_atr", value) == []) is ok
 
@@ -119,16 +140,30 @@ class TestTheRule:
 def _break_snapshot(atr: float, day_chg: float = 0.8) -> MarketSnapshot:
     close = PREV * (1 + day_chg / 100)
     return MarketSnapshot(
-        ticker="T", timestamp=OPEN_ET,
-        quote=Quote(ticker="T", bid=close - 0.01, ask=close + 0.01, last=close,
-                    volume=1e6, timestamp=OPEN_ET, previous_close=PREV),
-        indicators=TechnicalIndicators(
-            bollinger_upper=close - 0.3, bollinger_lower=close - 8.0,
-            bollinger_middle=close - 4.0, atr_14=atr, macd_histogram=0.0,
-            vwap=close - 0.5, vwap_anchor="current_session", ibs=0.9,
+        ticker="T",
+        timestamp=OPEN_ET,
+        quote=Quote(
+            ticker="T",
+            bid=close - 0.01,
+            ask=close + 0.01,
+            last=close,
+            volume=1e6,
+            timestamp=OPEN_ET,
+            previous_close=PREV,
         ),
-        regime=RegimeClassification(regime=MarketRegime.TRENDING_BULL,
-                                    confidence=0.7, reasoning="t"),
+        indicators=TechnicalIndicators(
+            bollinger_upper=close - 0.3,
+            bollinger_lower=close - 8.0,
+            bollinger_middle=close - 4.0,
+            atr_14=atr,
+            macd_histogram=0.0,
+            vwap=close - 0.5,
+            vwap_anchor="current_session",
+            ibs=0.9,
+        ),
+        regime=RegimeClassification(
+            regime=MarketRegime.TRENDING_BULL, confidence=0.7, reasoning="t"
+        ),
         daily_change_pct=day_chg,
     )
 
@@ -157,13 +192,21 @@ class TestRangeBreak:
 def _gap_snapshot(atr: float, gap: float = 0.8) -> MarketSnapshot:
     last = PREV * (1 + gap / 100)
     return MarketSnapshot(
-        ticker="T", timestamp=OPEN_ET,
-        quote=Quote(ticker="T", bid=last - 0.01, ask=last + 0.01, last=last,
-                    volume=1e6, timestamp=OPEN_ET, previous_close=PREV),
+        ticker="T",
+        timestamp=OPEN_ET,
+        quote=Quote(
+            ticker="T",
+            bid=last - 0.01,
+            ask=last + 0.01,
+            last=last,
+            volume=1e6,
+            timestamp=OPEN_ET,
+            previous_close=PREV,
+        ),
         indicators=TechnicalIndicators(atr_14=atr),
-        regime=RegimeClassification(regime=MarketRegime.RANGE_BOUND,
-                                    confidence=0.6, reasoning="t"),
-        daily_change_pct=gap, gap_pct=gap,
+        regime=RegimeClassification(regime=MarketRegime.RANGE_BOUND, confidence=0.6, reasoning="t"),
+        daily_change_pct=gap,
+        gap_pct=gap,
     )
 
 
@@ -183,8 +226,9 @@ class TestGap:
         assert sig.value == max(-1.0, min(1.0, 1.6 / 1.0 * 1.0))  # unfilled
 
     def test_set_ignores_a_noise_sized_gap_on_the_volatile_instrument(self) -> None:
-        s = GapStrategy(min_gap_pct=0.3, gap_fade_threshold=1.0,
-                        min_gap_atr=0.3, gap_fade_threshold_atr=0.95)
+        s = GapStrategy(
+            min_gap_pct=0.3, gap_fade_threshold=1.0, min_gap_atr=0.3, gap_fade_threshold_atr=0.95
+        )
         calm = s.compute_signal(_gap_snapshot(CALM_ATR))
         wild = s.compute_signal(_gap_snapshot(WILD_ATR))
         assert calm.metadata["applicable"] is True
@@ -198,15 +242,16 @@ class TestGap:
 def _grind(day_chg: float) -> MarketSnapshot:
     """A bearish grind that triggers, with ATR 5 on a 660 price (0.76%)."""
     closes = [690, 688, 685, 682, 678, 674, 660]
-    return _make_snapshot(close=660.0, daily_candles=_make_daily_candles(closes),
-                          daily_change_pct=day_chg, atr_14=5.0)
+    return _make_snapshot(
+        close=660.0, daily_candles=_make_daily_candles(closes), daily_change_pct=day_chg, atr_14=5.0
+    )
 
 
 class TestTrendPersistenceCounterDay:
     def test_unset_is_the_old_percent_rule(self) -> None:
         s = TrendPersistenceStrategy(counter_day_pct=1.0)
-        quiet = s.compute_signal(_grind(0.9))   # 0.9% < 1.0%: no guard
-        loud = s.compute_signal(_grind(1.5))    # 1.5% >= 1.0%: guard
+        quiet = s.compute_signal(_grind(0.9))  # 0.9% < 1.0%: no guard
+        loud = s.compute_signal(_grind(1.5))  # 1.5% >= 1.0%: guard
         assert quiet.value < 0 and not quiet.metadata.get("counter_day_applied")
         assert loud.value == pytest.approx(quiet.value * 0.5)
         assert loud.metadata["counter_day_basis"] == "fallback"
@@ -229,16 +274,27 @@ def _post_event(atr: float, stretch_pct: float = 1.6) -> MarketSnapshot:
     vwap = 100.0
     price = vwap * (1 + stretch_pct / 100)
     return MarketSnapshot(
-        ticker="T", timestamp=OPEN_ET,
-        quote=Quote(ticker="T", bid=price - 0.01, ask=price + 0.01, last=price,
-                    volume=1e6, timestamp=OPEN_ET, previous_close=PREV),
+        ticker="T",
+        timestamp=OPEN_ET,
+        quote=Quote(
+            ticker="T",
+            bid=price - 0.01,
+            ask=price + 0.01,
+            last=price,
+            volume=1e6,
+            timestamp=OPEN_ET,
+            previous_close=PREV,
+        ),
         indicators=TechnicalIndicators(
-            atr_14=atr, vwap=vwap, vwap_anchor="current_session",
-            hours_since_event=6.0, atm_iv_30dte=0.30, atm_iv_pre_event=0.50,
+            atr_14=atr,
+            vwap=vwap,
+            vwap_anchor="current_session",
+            hours_since_event=6.0,
+            atm_iv_30dte=0.30,
+            atm_iv_pre_event=0.50,
             event_type="earnings",
         ),
-        regime=RegimeClassification(regime=MarketRegime.RANGE_BOUND,
-                                    confidence=0.6, reasoning="t"),
+        regime=RegimeClassification(regime=MarketRegime.RANGE_BOUND, confidence=0.6, reasoning="t"),
         daily_change_pct=stretch_pct,
     )
 
@@ -249,14 +305,12 @@ class TestEventWindowOverextension:
         sig = s.compute_signal(_post_event(CALM_ATR))
         ov = (101.6 - 100.0) / 100.0
         assert sig.metadata["overextension_basis"] == "fallback"
-        assert sig.value == pytest.approx(
-            max(-1.0, min(1.0, -1.0 * math.tanh(ov / 0.015) * 1.5))
-        )
+        assert sig.value == pytest.approx(max(-1.0, min(1.0, -1.0 * math.tanh(ov / 0.015) * 1.5)))
 
     def test_set_does_not_fire_on_a_small_stretch_on_the_volatile_instrument(self) -> None:
         s = EventWindowTimingStrategy(min_overextension=0.015, min_overextension_atr=1.45)
-        calm = s.compute_signal(_post_event(CALM_ATR))   # 1.52 ATR
-        wild = s.compute_signal(_post_event(WILD_ATR))   # 0.24 ATR
+        calm = s.compute_signal(_post_event(CALM_ATR))  # 1.52 ATR
+        wild = s.compute_signal(_post_event(WILD_ATR))  # 0.24 ATR
         assert calm.metadata["overextension_met"] is True
         assert wild.metadata["overextension_met"] is False
         assert wild.metadata["overextension_basis"] == "atr"

@@ -161,9 +161,7 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
                 return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
 
         # ── Magnitude gate, in the instrument's own units when configured ──
-        ref_close = previous_close(
-            close, day_chg, getattr(snapshot.quote, "previous_close", None)
-        )
+        ref_close = previous_close(close, day_chg, getattr(snapshot.quote, "previous_close", None))
         magnitude = check_move(
             fallback_move=day_chg,
             fallback_threshold=self._min_break_pct,
