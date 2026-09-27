@@ -13,6 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import (
+    check_move,
+    pct_move_in_atr,
+    previous_close,
+    validate_threshold_atr,
+)
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
@@ -29,6 +35,10 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
     def __init__(
         self,
         min_break_pct: float = 1.2,
+        # The same gate in the instrument's own units: the day's move as a
+        # multiple of daily ATR. None (the default) keeps the percent gate, so
+        # a config that does not set it behaves as before. See algorithms/units.
+        min_break_atr: float | None = None,
         # ── Confirmation ─────────────────────────────────────────────
         # A Bollinger-band break is by definition a ONE-DAY event, so its
         # confirmation must be available on the day it happens. The daily
@@ -53,6 +63,7 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
         version: str = "v001",
     ) -> None:
         self._min_break_pct = min_break_pct
+        self._min_break_atr = min_break_atr
         self._vwap_confirm = vwap_confirm
         self._ibs_confirm = ibs_confirm
         self._macd_confirm_floor = macd_confirm_floor
@@ -87,9 +98,14 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
         return (
             f"Range-break continuation: emits directional signal on confirmed "
             f"Bollinger Band breaks with MACD + magnitude confirmation "
-            f"(min_break={self._min_break_pct:.1f}%, "
+            f"(min_break={self._min_break_label()}, "
             f"base_strength={self._base_strength})."
         )
+
+    def _min_break_label(self) -> str:
+        if self._min_break_atr is not None:
+            return f"{self._min_break_atr:g} ATR (fallback {self._min_break_pct:g}%)"
+        return f"{self._min_break_pct:.1f}%"
 
     def compute_signal(self, snapshot: MarketSnapshot) -> AlgoSignal:
         """Compute continuation signal from confirmed intraday band breaks.
@@ -144,6 +160,20 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
                 meta["reason"] = "day_change_unavailable"
                 return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
 
+        # ── Magnitude gate, in the instrument's own units when configured ──
+        ref_close = previous_close(
+            close, day_chg, getattr(snapshot.quote, "previous_close", None)
+        )
+        magnitude = check_move(
+            fallback_move=day_chg,
+            fallback_threshold=self._min_break_pct,
+            move_atr=pct_move_in_atr(day_chg, ref_close, ind.atr_14),
+            threshold_atr=self._min_break_atr,
+        )
+        meta["magnitude_basis"] = magnitude.basis
+        if magnitude.observed_atr is not None:
+            meta["day_chg_atr"] = round(magnitude.observed_atr, 4)
+
         # Always emit diagnostic metadata for auditability — even on non-fire
         meta["day_chg"] = round(day_chg, 4)
         meta["macd_histogram"] = round(ind.macd_histogram, 3)
@@ -196,7 +226,7 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
         if close < ind.bollinger_lower:
             penetration = (ind.bollinger_lower - close) / ind.atr_14
             confirmed, source = _confirms(upside=False)
-            magnitude_confirms = day_chg <= -self._min_break_pct
+            magnitude_confirms = day_chg < 0 and magnitude.met
             meta["confirm_source"] = source
 
             if confirmed and magnitude_confirms:
@@ -208,7 +238,7 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
         elif close > ind.bollinger_upper:
             penetration = (close - ind.bollinger_upper) / ind.atr_14
             confirmed, source = _confirms(upside=True)
-            magnitude_confirms = day_chg >= self._min_break_pct
+            magnitude_confirms = day_chg > 0 and magnitude.met
             meta["confirm_source"] = source
 
             if confirmed and magnitude_confirms:
@@ -244,6 +274,7 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
     def get_parameters(self) -> dict[str, Any]:
         return {
             "min_break_pct": self._min_break_pct,
+            "min_break_atr": self._min_break_atr,
             "vwap_confirm": self._vwap_confirm,
             "ibs_confirm": self._ibs_confirm,
             "macd_confirm_floor": self._macd_confirm_floor,
@@ -254,6 +285,9 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
     def set_parameters(self, params: dict[str, Any]) -> None:
         if "min_break_pct" in params:
             self._min_break_pct = float(params["min_break_pct"])
+        if "min_break_atr" in params:
+            v = params["min_break_atr"]
+            self._min_break_atr = None if v is None else float(v)
         if "macd_confirm_floor" in params:
             self._macd_confirm_floor = float(params["macd_confirm_floor"])
         if "vwap_confirm" in params:
@@ -273,6 +307,8 @@ class RangeBreakContinuationStrategy(TradingAlgorithm):
                 errors.append(
                     f"min_break_pct must be in (0, 10.0] percent (e.g. 1.2 = 1.2%), got {v}"
                 )
+        if "min_break_atr" in params:
+            errors.extend(validate_threshold_atr("min_break_atr", params["min_break_atr"]))
         if "ibs_confirm" in params:
             v = float(params["ibs_confirm"])
             if not (0.0 <= v <= 1.0):

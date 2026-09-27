@@ -105,9 +105,14 @@ modify code → test → verify algorithms still work.
 > ticker silently breaks on the next. For "how big is this move", express it
 > as a multiple of `indicators.atr_14` (pattern:
 > `momentum.divergence_day_change_atr`, 2026-09-23), with the percent kept only
-> as a fallback when ATR is missing. Existing percent thresholds with this
-> defect: `range_break_continuation.min_break_pct`,
-> `trend_persistence.counter_day_pct`, `gap.min_gap_pct`.
+> as a fallback when ATR is missing. Use the shared rule for it,
+> `algorithms/units.py` (`check_move`, `pct_move_in_atr`), rather than an
+> inline copy. The strategies that gated on a percent move all have an ATR
+> form now: `gap.min_gap_atr` and `gap_fade_threshold_atr`,
+> `range_break_continuation.min_break_atr`, `trend_persistence.counter_day_atr`
+> and `event_window_timing.min_overextension_atr`. Each defaults to off, so an
+> algorithm version that does not set it keeps its percent behaviour; to move
+> a version onto ATR units, set it in that version's `config.yaml`.
 >
 > **Say which day a number describes.** A value computed from the daily series
 > is the PRIOR session's during the day (its last bar does not update intraday).

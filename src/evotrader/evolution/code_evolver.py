@@ -55,6 +55,9 @@ _ALLOWED_IMPORTS = frozenset(
         "evotrader.models.market",
         "evotrader.models.signals",
         "evotrader.algorithms.base",
+        # Pure arithmetic: thresholds on a price move in ATR units, shared so
+        # every strategy applies the same rule (see algorithms/units.py).
+        "evotrader.algorithms.units",
         "evotrader.indicators",
         # Read-only session helpers (e.g. market_hours.minutes_since_open), used by
         # the shipped `gap` strategy.

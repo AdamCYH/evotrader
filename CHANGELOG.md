@@ -6,7 +6,23 @@ folder layout; each entry says what you need to do.
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- **Thresholds on the size of a price move can be set in the instrument's own
+  units.** Five thresholds were in percent of price, which silently tunes them
+  to one instrument: 0.7% is two thirds of a normal day on SPY and a tenth of
+  one on a volatile single stock, where the gate then fires on noise. Each now
+  has an optional form in daily ATRs (average true range, the typical size of
+  a day's move): `gap.min_gap_atr` and `gap_fade_threshold_atr`,
+  `range_break_continuation.min_break_atr`, `trend_persistence.counter_day_atr`
+  and `event_window_timing.min_overextension_atr`. All five use one shared rule
+  (`algorithms/units.py`), and each strategy records which basis decided.
+- **The starter algorithm (`v001_initial`) uses the ATR forms**, set to match
+  the old percent values on SPY, so on SPY it behaves as before and on another
+  ticker the thresholds scale with it. **If you run your own algorithm
+  version, nothing changes:** the ATR forms default to off, and a version that
+  does not set them keeps its percent thresholds. To opt in, add them to that
+  version's `config.yaml`.
 
 ## 0.2.0 — first public release — 2026-09-26
 

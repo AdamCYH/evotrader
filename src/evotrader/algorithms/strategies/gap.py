@@ -1,7 +1,7 @@
 """Gap / opening range strategy.
 
 Profits from overnight gaps and opening range breakouts/breakdowns:
-- Gap fade: When SPY gaps up/down significantly, bet on a gap fill
+- Gap fade: When the instrument gaps up/down significantly, bet on a gap fill
   (reversion) during the session.
 - Opening range breakout: When price breaks the first 15-30 min range,
   follow the momentum.
@@ -14,6 +14,12 @@ from __future__ import annotations
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import (
+    check_move,
+    pct_move_in_atr,
+    previous_close,
+    validate_threshold_atr,
+)
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 from evotrader.tools.market_hours import minutes_since_open
@@ -31,12 +37,18 @@ class GapStrategy(TradingAlgorithm):
         min_gap_pct: float = 0.3,
         gap_fade_threshold: float = 1.0,
         decay_minutes: float = 120.0,
+        # Both thresholds in the instrument's own units: the gap as a multiple
+        # of daily ATR. None keeps the percent rule. See algorithms/units.
+        min_gap_atr: float | None = None,
+        gap_fade_threshold_atr: float | None = None,
         version: str = "v001",
         **kwargs: Any,
     ) -> None:
         self._min_gap_pct = min_gap_pct
         self._gap_fade_threshold = gap_fade_threshold
         self._decay_minutes = decay_minutes
+        self._min_gap_atr = min_gap_atr
+        self._gap_fade_threshold_atr = gap_fade_threshold_atr
         self._version = version
 
     @property
@@ -49,8 +61,13 @@ class GapStrategy(TradingAlgorithm):
 
     @property
     def description(self) -> str:
+        fade = (
+            f"{self._gap_fade_threshold_atr:g} ATR (fallback {self._gap_fade_threshold:g}%)"
+            if self._gap_fade_threshold_atr is not None
+            else f"{self._gap_fade_threshold:.1f}%"
+        )
         return (
-            f"Gap analysis with fade threshold {self._gap_fade_threshold:.1f}% "
+            f"Gap analysis with fade threshold {fade} "
             f"and {self._decay_minutes:.0f}-minute decay window."
         )
 
@@ -68,7 +85,28 @@ class GapStrategy(TradingAlgorithm):
         """
         gap_pct = snapshot.gap_pct
 
-        if gap_pct is None or abs(gap_pct) < self._min_gap_pct:
+        # The gap as a multiple of daily ATR, measured from the previous close
+        # (the price the gap percent is measured from). None when unmeasurable,
+        # in which case the percent thresholds decide.
+        gap_atr = None
+        if gap_pct is not None:
+            quote = snapshot.quote
+            ref_close = previous_close(
+                getattr(quote, "last", None),
+                snapshot.daily_change_pct,
+                getattr(quote, "previous_close", None),
+            )
+            gap_atr = pct_move_in_atr(
+                gap_pct, ref_close, getattr(snapshot.indicators, "atr_14", None)
+            )
+            entry = check_move(
+                fallback_move=gap_pct,
+                fallback_threshold=self._min_gap_pct,
+                move_atr=gap_atr,
+                threshold_atr=self._min_gap_atr,
+            )
+
+        if gap_pct is None or not entry.met:
             # No significant gap — mark as not applicable so composite
             # renormalizes weights over the remaining strategies.
             return AlgoSignal(
@@ -79,16 +117,28 @@ class GapStrategy(TradingAlgorithm):
                     "gap_pct": gap_pct or 0.0,
                     "gap_type": "none",
                     "applicable": False,
+                    "gap_basis": entry.basis if gap_pct is not None else None,
+                    "gap_atr": round(gap_atr, 4) if gap_atr is not None else None,
                 },
             )
+
+        fade = check_move(
+            fallback_move=gap_pct,
+            fallback_threshold=self._gap_fade_threshold,
+            move_atr=gap_atr,
+            threshold_atr=self._gap_fade_threshold_atr,
+        )
+        # -gap / threshold, written as sign x ratio so the ratio can come from
+        # whichever basis decided. In the percent basis the two are identical.
+        gap_sign = 1.0 if gap_pct > 0 else -1.0
 
         # Daily change tells us if the gap is filling
         daily_change = snapshot.daily_change_pct or 0.0
 
-        if abs(gap_pct) >= self._gap_fade_threshold:
+        if fade.met:
             # Large gap → fade it (mean reversion play)
             # If gap is up (+), signal is to sell (-); if gap is down (-), buy (+)
-            fade_signal = -gap_pct / self._gap_fade_threshold
+            fade_signal = -gap_sign * fade.ratio
 
             # Scale by the unfilled fraction of the gap (0 when fully filled).
             # fill_progress measures how much of the gap has been retraced:
@@ -102,7 +152,7 @@ class GapStrategy(TradingAlgorithm):
             gap_type = "fade"
         else:
             # Moderate gap → weak directional signal
-            signal_value = -gap_pct / self._gap_fade_threshold * 0.3
+            signal_value = -gap_sign * fade.ratio * 0.3
             signal_value = max(-1.0, min(1.0, signal_value))
             gap_type = "moderate"
 
@@ -126,6 +176,8 @@ class GapStrategy(TradingAlgorithm):
                 "fill_remaining": remaining if gap_type == "fade" else None,
                 "decay_factor": decay_factor,
                 "applicable": True,
+                "gap_basis": fade.basis,
+                "gap_atr": round(gap_atr, 4) if gap_atr is not None else None,
             },
         )
 
@@ -134,6 +186,8 @@ class GapStrategy(TradingAlgorithm):
             "min_gap_pct": self._min_gap_pct,
             "gap_fade_threshold": self._gap_fade_threshold,
             "decay_minutes": self._decay_minutes,
+            "min_gap_atr": self._min_gap_atr,
+            "gap_fade_threshold_atr": self._gap_fade_threshold_atr,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -143,6 +197,10 @@ class GapStrategy(TradingAlgorithm):
             self._gap_fade_threshold = float(params["gap_fade_threshold"])
         if "decay_minutes" in params:
             self._decay_minutes = float(params["decay_minutes"])
+        for key in ("min_gap_atr", "gap_fade_threshold_atr"):
+            if key in params:
+                v = params[key]
+                setattr(self, f"_{key}", None if v is None else float(v))
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -160,4 +218,7 @@ class GapStrategy(TradingAlgorithm):
                 )
         if "decay_minutes" in params and params["decay_minutes"] <= 0:
             errors.append("decay_minutes must be positive")
+        for key in ("min_gap_atr", "gap_fade_threshold_atr"):
+            if key in params:
+                errors.extend(validate_threshold_atr(key, params[key]))
         return errors

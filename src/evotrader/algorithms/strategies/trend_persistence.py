@@ -21,6 +21,12 @@ import math
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import (
+    check_move,
+    pct_move_in_atr,
+    previous_close,
+    validate_threshold_atr,
+)
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
@@ -54,6 +60,9 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         exhaustion_decay: float = 0.5,
         counter_day_pct: float = 1.0,
         counter_day_decay: float = 0.5,
+        # The counter-day size in the instrument's own units (multiples of
+        # daily ATR). None keeps the percent rule. See algorithms/units.
+        counter_day_atr: float | None = None,
         version: str = "v001",
     ) -> None:
         self._lookback_days = lookback_days
@@ -66,6 +75,7 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         self._exhaustion_decay = exhaustion_decay
         self._counter_day_pct = counter_day_pct
         self._counter_day_decay = counter_day_decay
+        self._counter_day_atr = counter_day_atr
         self._version = version
 
     @property
@@ -215,7 +225,20 @@ class TrendPersistenceStrategy(TradingAlgorithm):
 
             # ── 7. COUNTER-DAY GUARD ──────────────────────────────
             day_chg = snapshot.daily_change_pct or 0.0
-            if signal * day_chg < 0 and abs(day_chg) >= self._counter_day_pct:
+            counter = check_move(
+                fallback_move=day_chg,
+                fallback_threshold=self._counter_day_pct,
+                move_atr=pct_move_in_atr(
+                    day_chg,
+                    previous_close(
+                        price, day_chg, getattr(snapshot.quote, "previous_close", None)
+                    ),
+                    ind.atr_14,
+                ),
+                threshold_atr=self._counter_day_atr,
+            )
+            meta["counter_day_basis"] = counter.basis
+            if signal * day_chg < 0 and counter.met:
                 signal *= self._counter_day_decay
                 meta["counter_day_applied"] = True
 
@@ -235,6 +258,7 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             "exhaustion_decay": self._exhaustion_decay,
             "counter_day_pct": self._counter_day_pct,
             "counter_day_decay": self._counter_day_decay,
+            "counter_day_atr": self._counter_day_atr,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -258,6 +282,9 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             self._counter_day_pct = float(params["counter_day_pct"])
         if "counter_day_decay" in params:
             self._counter_day_decay = float(params["counter_day_decay"])
+        if "counter_day_atr" in params:
+            v = params["counter_day_atr"]
+            self._counter_day_atr = None if v is None else float(v)
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -303,4 +330,6 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             v = float(params["counter_day_decay"])
             if v < 0.0 or v > 1.0:
                 errors.append(f"counter_day_decay must be in [0, 1.0], got {v}")
+        if "counter_day_atr" in params:
+            errors.extend(validate_threshold_atr("counter_day_atr", params["counter_day_atr"]))
         return errors

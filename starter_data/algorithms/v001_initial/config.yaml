@@ -2,6 +2,14 @@
 # `composite` block that weights them, per market regime. These are starting
 # values, not a proven edge. The evolution agent proposes changes as new
 # versions; you approve them in the console.
+
+# Thresholds on the SIZE of a price move are in daily ATRs (average true range:
+# the typical size of one day's move), so they mean the same thing whichever
+# ticker you trade. The *_pct values beside them are fallbacks used only when
+# ATR is missing. The ATR values were set to match the old percent values on
+# SPY, the starter ticker (daily ATR ≈ 1.05% of price over 2024-2026): on SPY
+# the two behave the same; on a more volatile stock only the ATR form scales.
+
 momentum:
   ema_short: 9
   ema_long: 21
@@ -29,8 +37,10 @@ mean_reversion:
   ibs_weight: 0.2
   trend_fade_decay: 0.2
 gap:
-  min_gap_pct: 0.3
-  gap_fade_threshold: 1.0
+  min_gap_atr: 0.3               # gap of 0.3 daily ATR; the same scale on any ticker
+  gap_fade_threshold_atr: 0.95   # 0.95 daily ATR
+  min_gap_pct: 0.3               # 0.3% — fallback only, when ATR is missing
+  gap_fade_threshold: 1.0        # 1.0% — fallback only
   decay_minutes: 120
 intraday_vwap_zscore:
   zscore_window: 20
@@ -47,11 +57,13 @@ event_window_timing:
   blackout_hours: 30
   post_event_hours: 48
   min_iv_crush: 0.1
-  min_overextension: 0.015
+  min_overextension_atr: 1.45    # 1.45 daily ATRs from VWAP
+  min_overextension: 0.015       # 1.5% of VWAP (a fraction) — fallback only
   pre_event_dampener: 0.05
   post_event_boost: 1.5
 range_break_continuation:
-  min_break_pct: 0.7
+  min_break_atr: 0.65            # the day's move of 0.65 daily ATR confirms a break
+  min_break_pct: 0.7             # 0.7% — fallback only
   macd_confirm_floor: 0.0
   base_strength: 0.45
   penetration_scale: 0.35
@@ -86,7 +98,8 @@ trend_persistence:
   base_strength: 0.75
   exhaustion_atr: 5.0
   exhaustion_decay: 0.5
-  counter_day_pct: 1.0
+  counter_day_atr: 0.95          # a 0.95-ATR day against the trend halves the signal
+  counter_day_pct: 1.0           # 1.0% — fallback only
   counter_day_decay: 0.5
 vwap_reclaim_continuation:
   lookback_bars: 30

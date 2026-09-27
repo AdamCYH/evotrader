@@ -27,6 +27,7 @@ import math
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import check_move, move_in_atr, validate_threshold_atr
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
@@ -54,6 +55,10 @@ class EventWindowTimingStrategy(TradingAlgorithm):
         min_overextension: float = 0.015,
         pre_event_dampener: float = 0.05,
         post_event_boost: float = 1.5,
+        # The overextension threshold in the instrument's own units: distance
+        # from VWAP as a multiple of daily ATR. None keeps the fraction-of-
+        # price rule (min_overextension). See algorithms/units.
+        min_overextension_atr: float | None = None,
         version: str = "v001",
     ) -> None:
         self._blackout_hours = blackout_hours
@@ -62,6 +67,7 @@ class EventWindowTimingStrategy(TradingAlgorithm):
         self._min_overextension = min_overextension
         self._pre_event_dampener = pre_event_dampener
         self._post_event_boost = post_event_boost
+        self._min_overextension_atr = min_overextension_atr
         self._version = version
 
     @property
@@ -172,16 +178,24 @@ class EventWindowTimingStrategy(TradingAlgorithm):
             price = snapshot.quote.last
             overextension = 0.0
             overextension_met = False
+            stretch = None
             if vwap is not None and vwap > 0:
                 overextension = (price - vwap) / vwap
-                overextension_met = abs(overextension) >= self._min_overextension
+                stretch = check_move(
+                    fallback_move=overextension,
+                    fallback_threshold=self._min_overextension,
+                    move_atr=move_in_atr(price - vwap, getattr(ind, "atr_14", None)),
+                    threshold_atr=self._min_overextension_atr,
+                )
+                overextension_met = stretch.met
 
             if iv_crush_met and overextension_met:
                 # Determine reversion direction:
                 # Price above VWAP → fade down (bearish)
                 # Price below VWAP → fade up (bullish)
                 reversion_direction = -1.0 if overextension > 0 else 1.0
-                magnitude = math.tanh(abs(overextension) / self._min_overextension)
+                # How far past the threshold, in whichever basis decided.
+                magnitude = math.tanh(stretch.ratio)
                 boosted = max(
                     -1.0,
                     min(
@@ -202,6 +216,8 @@ class EventWindowTimingStrategy(TradingAlgorithm):
                         "hours_since_event": round(hours_since, 2),
                         "iv_crush": round(iv_crush, 4),
                         "overextension": round(overextension, 4),
+                        "overextension_met": True,
+                        "overextension_basis": stretch.basis,
                         "event_type": event_type or "unknown",
                     },
                 )
@@ -219,6 +235,7 @@ class EventWindowTimingStrategy(TradingAlgorithm):
                     "iv_crush_met": iv_crush_met,
                     "overextension": round(overextension, 4),
                     "overextension_met": overextension_met,
+                    "overextension_basis": stretch.basis if stretch else None,
                 },
             )
 
@@ -242,6 +259,7 @@ class EventWindowTimingStrategy(TradingAlgorithm):
             "min_overextension": self._min_overextension,
             "pre_event_dampener": self._pre_event_dampener,
             "post_event_boost": self._post_event_boost,
+            "min_overextension_atr": self._min_overextension_atr,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -252,6 +270,7 @@ class EventWindowTimingStrategy(TradingAlgorithm):
             "min_overextension",
             "pre_event_dampener",
             "post_event_boost",
+            "min_overextension_atr",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])
@@ -291,4 +310,8 @@ class EventWindowTimingStrategy(TradingAlgorithm):
             peb = float(params["post_event_boost"])
             if peb <= 0:
                 errors.append(f"post_event_boost must be positive, got {peb}")
+        if "min_overextension_atr" in params:
+            errors.extend(
+                validate_threshold_atr("min_overextension_atr", params["min_overextension_atr"])
+            )
         return errors
