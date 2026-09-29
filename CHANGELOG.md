@@ -24,6 +24,31 @@ folder layout; each entry says what you need to do.
   does not set them keeps its percent thresholds. To opt in, add them to that
   version's `config.yaml`.
 
+### Fixed
+
+- **The daily position sync no longer rewrites a lot's price to the
+  position's average.** After a buy at a different price, each lot differs
+  from the broker's average cost by construction, and the sync rewrote such
+  lots, broker-confirmed prices included, on every run: each lot's unrealized
+  P&L moved, and the difference would have been booked as realized P&L when
+  the lot closed. A lot is now checked only against its own order's fill
+  price. The lots' average is still compared with the broker's, but a
+  disagreement is only reported (`cost_basis_check.sources_disagree` on the
+  sync result), never written. A pending buy the sync marks filled takes its
+  own order's price too. Lots the old check rewrote are put back from their
+  orders on the next sync.
+- **A cancelled good-till-cancelled order is labelled cancelled, not
+  "expired".** The label was decided by when an order was placed, so a gtc
+  stop cancelled to resize it days later read "Day order expired ... (no
+  time_in_force)" — the message that once led an agent to sell a position
+  instead of re-placing its stop. A day order now reads expired only when the
+  broker dropped it at or after its session's close. Wrong labels already
+  written stay until corrected by hand.
+- **Rows a data repair closed out keep the repair's label** when later news
+  arrives for the broker order they share.
+- **A stop resized to cover a buy placed in the same cycle** is no longer
+  flagged OVER_COVER while that buy awaits the broker's confirmation.
+
 ## 0.2.0 — first public release — 2026-09-26
 
 The first public version. Development before this happened in a private

@@ -282,6 +282,27 @@ class ReconciliationService:
             )
         return merged
 
+    async def get_order(self, order_id: str, option: bool = False) -> dict[str, Any] | None:
+        """The broker's record of one order, or None when it cannot be read.
+
+        None means the question could not be answered — network, a purged
+        order, an id the broker does not recognise — never "not filled".
+        """
+        if not self._mcp_toolset or not order_id:
+            return None
+        tool = "get_option_orders" if option else "get_equity_orders"
+        try:
+            session = await self._mcp_toolset._mcp_session_manager.create_session()
+            res = await session.call_tool(tool, arguments={"order_id": order_id})
+            if getattr(res, "isError", False) or not res.content:
+                return None
+            data = json.loads(res.content[0].text).get("data", {}) or {}
+            orders = data.get("orders") or data.get("results") or []
+            return dict(orders[0]) if orders else None
+        except Exception as e:
+            logger.warning("Could not fetch broker order %s: %s", order_id, e)
+            return None
+
     async def get_order_state(self, order_id: str) -> str | None:
         """The broker's own word for one order, lower-cased, or None.
 
@@ -290,21 +311,28 @@ class ReconciliationService:
         as "unknown", never as "not filled": voiding a row on a failed lookup
         would delete a real exit.
         """
-        if not self._mcp_toolset or not order_id:
+        order = await self.get_order(order_id)
+        if not order:
+            return None
+        return str(order.get("state") or "").lower() or None
+
+    async def order_fill_price(self, order_id: str, option: bool = False) -> float | None:
+        """The price one order actually filled at, from the broker, or None.
+
+        This is a fact about ONE order. The position's average_buy_price is
+        not: in a position built from several buys it is a blend that no
+        single lot was bought at.
+        """
+        if self._dry_run or not order_id or str(order_id).startswith("sync_"):
+            return None  # no broker order behind it to ask about
+        order = await self.get_order(str(order_id), option=option)
+        if not order or str(order.get("state") or "").lower() != "filled":
             return None
         try:
-            session = await self._mcp_toolset._mcp_session_manager.create_session()
-            res = await session.call_tool("get_equity_orders", arguments={"order_id": order_id})
-            if getattr(res, "isError", False) or not res.content:
-                return None
-            data = json.loads(res.content[0].text).get("data", {}) or {}
-            orders = data.get("orders") or data.get("results") or []
-            if not orders:
-                return None
-            return str(orders[0].get("state") or "").lower() or None
-        except Exception as e:
-            logger.warning("Could not fetch broker state for order %s: %s", order_id, e)
+            price = float(order.get("average_price") or 0.0)
+        except (TypeError, ValueError):
             return None
+        return price if price > 0 else None
 
     async def _void_unfilled_close_rows(
         self, ticker: str, db_equity_trades: list[dict[str, Any]]
@@ -469,6 +497,9 @@ class ReconciliationService:
         # Track reconciliation status & mismatches
         mismatches = []
         promoted_pending = 0
+        # The cost-basis checks ride along on every result below: a flag for a
+        # person, never a correction (see _verify_fill_prices).
+        checks: dict[str, Any] = {}
 
         # Check Equity Drift
         equity_diff = broker_equity_qty - db_equity_qty
@@ -485,10 +516,8 @@ class ReconciliationService:
                 for pt in pending_equity:
                     order_id = pt.get("order_id")
                     if order_id:
-                        await self._journal.update_order_status(
-                            order_id=order_id,
-                            new_status="FILLED",
-                            fill_price=broker_equity_cost,
+                        await self._promote_pending(
+                            order_id, broker_equity_cost, whole_position=abs(db_equity_qty) < 1e-4
                         )
                         promoted_pending += 1
                         logger.info(
@@ -511,10 +540,9 @@ class ReconciliationService:
             # A journaled fill_price sourced from a limit price can differ
             # materially from the true broker fill (7/17 incident: journaled
             # ~40% above the actual fill, producing phantom P&L).
-            await self._verify_fill_prices(
-                db_equity_trades,
-                broker_equity_cost,
-            )
+            cost_check = await self._verify_fill_prices(db_equity_trades, broker_equity_cost)
+            if cost_check:
+                checks["cost_basis_check"] = cost_check
 
         # Check Options Drift per option contract
         for opt_id in all_option_ids:
@@ -545,10 +573,8 @@ class ReconciliationService:
                     for pt in pending_for_opt:
                         order_id = pt.get("order_id")
                         if order_id:
-                            await self._journal.update_order_status(
-                                order_id=order_id,
-                                new_status="FILLED",
-                                fill_price=b_cost,
+                            await self._promote_pending(
+                                order_id, b_cost, whole_position=abs(d_qty) < 1e-4, option=True
                             )
                             promoted_pending += 1
                             logger.info(
@@ -584,7 +610,9 @@ class ReconciliationService:
                     )
             else:
                 # Quantities match — verify fill-price integrity.
-                await self._verify_fill_prices(db_trades, b_cost)
+                cost_check = await self._verify_fill_prices(db_trades, b_cost, option=True)
+                if cost_check:
+                    checks.setdefault("option_cost_basis_checks", {})[opt_id] = cost_check
 
         logger.info(
             "Reconciliation Check: Equity Broker = %.4f, DB = %.4f | Options Mismatches = %d | Promoted PENDING = %d",
@@ -602,6 +630,7 @@ class ReconciliationService:
                 "db_qty": db_equity_qty,
                 "ticker": ticker,
                 "message": "Broker and database are in sync.",
+                **checks,
             }
 
         # 4. Handle Mismatch
@@ -617,6 +646,7 @@ class ReconciliationService:
                 "db_qty": db_equity_qty,
                 "ticker": ticker,
                 "message": "Drift detected but ignored due to paper trading (dry_run=true).",
+                **checks,
                 "mismatches": [
                     {
                         "asset_type": m["asset_type"],
@@ -723,6 +753,7 @@ class ReconciliationService:
                 "ticker": ticker,
                 "reconciled_trades_count": reconciled_trades_count,
                 "message": f"Successfully synchronized database. Recorded {reconciled_trades_count} sync trades.",
+                **checks,
             }
 
         return {
@@ -731,49 +762,113 @@ class ReconciliationService:
             "db_qty": db_equity_qty,
             "ticker": ticker,
             "message": "Drift resolved but no sync trades were necessary.",
+            **checks,
         }
+
+    async def _promote_pending(
+        self, order_id: str, broker_cost: float, whole_position: bool, option: bool = False
+    ) -> None:
+        """Mark a PENDING row FILLED once the broker holds its shares.
+
+        Its price comes from its own order. The position's average cost is
+        this row's price only when the row IS the whole position; written onto
+        one buy among several it records a price nobody paid.
+        """
+        price = await self.order_fill_price(order_id, option=option)
+        source = "broker"
+        if price is None and whole_position and broker_cost and broker_cost > 0:
+            price = broker_cost
+        elif price is None:
+            # Filled (the broker holds it), price not confirmed: keep the
+            # journaled price, and let a later sync check it against the order.
+            source = "broker_position"
+        await self._journal.update_order_status(
+            order_id=order_id,
+            new_status="FILLED",
+            fill_price=price,
+            fill_source=source,
+        )
 
     async def _verify_fill_prices(
         self,
         db_trades: list[dict[str, Any]],
         broker_cost: float,
-    ) -> None:
-        """Verify fill-price integrity for positions where quantities match.
+        option: bool = False,
+    ) -> dict[str, Any] | None:
+        """Check the journal's lot prices against the broker, where quantities match.
 
-        When the broker's average_buy_price differs from the journal's
-        fill_price/price by more than 1%, correct the stale price via
-        update_order_status() with an audit reason.
+        Each lot is checked against ITS OWN order: when the broker's
+        average_price for that order differs from the journaled price, the
+        journal is corrected to it. That is the case this check exists for — a
+        fill journaled at the limit price (7/17: about 40% above the real fill).
+        A lot marked ``fill_source = 'broker'`` is checked too: its order is
+        the source that confirmed it, so the two differ only if something
+        wrote the price since — which the position-average rewrite below did,
+        marking its wrong prices broker-confirmed.
 
-        This catches the case where a trade was journaled at the limit price
-        and the broker later reports a materially different actual fill.
+        The broker's average_buy_price describes the POSITION, not a lot: in a
+        position built from several buys each lot differs from it by
+        construction. Comparing lots to it rewrote correct, broker-confirmed
+        fills to the blend on every sync after an add (found 2026-09-28). So the
+        position is checked as a whole — the quantity-weighted mean of the lots
+        against the broker's average — and a disagreement is only a flag,
+        ``sources_disagree``, for a person to look at. Nothing is written for it.
+
+        Returns that position-level check, or None when there is nothing to check.
         """
-        if broker_cost is None or broker_cost <= 0:
-            return
-
+        prices: dict[Any, float] = {}
         for t in db_trades:
             j_fill = t.get("fill_price") or t.get("price")
+            if j_fill is None:
+                continue
+            prices[t.get("id")] = float(j_fill)
             order_id = t.get("order_id")
-            if (
-                j_fill is not None
-                and order_id
-                and abs(float(j_fill) - broker_cost) / broker_cost > 0.01
-            ):
-                old_price = float(j_fill)
-                await self._journal.update_order_status(
-                    order_id=order_id,
-                    new_status=t.get("order_status") or "FILLED",
-                    fill_price=broker_cost,
-                    broker_status_reason=(
-                        f"FILL_PRICE_CORRECTED from {old_price:.4f} "
-                        f"to {broker_cost:.4f} by reconciliation"
-                    ),
-                )
-                logger.warning(
-                    "[RECONCILE] Corrected stale fill price for trade %s: %.4f -> %.4f",
-                    t.get("id"),
-                    old_price,
-                    broker_cost,
-                )
+            if not order_id:
+                continue
+            order_price = await self.order_fill_price(str(order_id), option=option)
+            if order_price is None or abs(float(j_fill) - order_price) < 0.005:
+                continue
+            old_price = float(j_fill)
+            await self._journal.update_order_status(
+                order_id=str(order_id),
+                new_status=t.get("order_status") or "FILLED",
+                fill_price=order_price,
+                broker_status_reason=(
+                    f"FILL_PRICE_CORRECTED from {old_price:.4f} to {order_price:.4f} "
+                    f"by reconciliation (order {str(order_id)[:8]} average_price)"
+                ),
+            )
+            prices[t.get("id")] = order_price
+            logger.warning(
+                "[RECONCILE] Corrected fill price for trade %s from its order: %.4f -> %.4f",
+                t.get("id"),
+                old_price,
+                order_price,
+            )
+
+        lots = [
+            (float(t.get("remaining_quantity") or 0.0), prices[t.get("id")])
+            for t in db_trades
+            if t.get("id") in prices and float(t.get("remaining_quantity") or 0.0) > 1e-9
+        ]
+        quantity = sum(q for q, _ in lots)
+        if quantity <= 0 or broker_cost is None or broker_cost <= 0:
+            return None
+        weighted = sum(q * p for q, p in lots) / quantity
+        disagree = abs(weighted - broker_cost) / broker_cost > 0.01
+        if disagree:
+            logger.warning(
+                "[RECONCILE] The journal's lots average %.4f but the broker's average "
+                "cost is %.4f. Not corrected: a lot's price comes from its own order, "
+                "never from the position average. Check the lots by hand.",
+                weighted,
+                broker_cost,
+            )
+        return {
+            "sources_disagree": disagree,
+            "journal_weighted_cost": round(weighted, 4),
+            "broker_average_cost": round(float(broker_cost), 4),
+        }
 
     async def _record_sync_trade(
         self,

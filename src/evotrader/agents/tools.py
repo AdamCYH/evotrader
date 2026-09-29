@@ -3674,28 +3674,65 @@ def classify_cancelled_order(order_data: dict, now: datetime | None = None) -> t
     morning the strategy agent read "the safety net isn't there" and sold the
     position instead of re-placing the stop, just before a large rally.
 
+    What the order was decides, not only when it was placed. A gtc order does
+    not expire at the close, so a cancelled one was cancelled. On 2026-09-28
+    a gtc stop the executor cancelled to resize was labelled "Day order
+    expired ... (no time_in_force)" because it had been placed days earlier:
+    the same false message, on an order that had one.
+
+    For a day order, the time of its last transaction tells the two apart:
+    the broker drops it at or after the close, while a cancel happens whenever
+    someone sends it. Without that time, the order's age is all there is.
+
     Returns ``(state, broker_reason)`` where state is ``"expired"`` or
     ``"cancelled"``.
     """
+    from datetime import time as time_of_day
+
+    from evotrader.tools.market_hours import ET as _ET
+    from evotrader.tools.market_hours import is_trading_day, regular_close
+
+    def _at(value: object) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return t if t.tzinfo else t.replace(tzinfo=UTC)
+
     reason = order_data.get("cancel_reason")
     if reason:
         return "cancelled", str(reason)
-    created = order_data.get("created_at")
-    if created:
-        try:
-            from evotrader.tools.market_hours import ET as _ET
+    tif = str(order_data.get("time_in_force") or "").lower()
+    if tif == "gtc":
+        return "cancelled", "gtc order cancelled at the broker (a gtc order does not expire)"
+    created = _at(order_data.get("created_at")) if order_data.get("created_at") else None
+    if created is None:
+        return "cancelled", "Order cancelled"
+    expired = "Day order expired at session close" + (
+        "" if tif else " (no time_in_force — protective orders must be gtc)"
+    )
 
-            c = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-            if c.tzinfo is None:
-                c = c.replace(tzinfo=UTC)
-            ref = now or datetime.now(UTC)
-            if c.astimezone(_ET).date() < ref.astimezone(_ET).date():
-                return "expired", (
-                    "Day order expired at session close (no time_in_force — "
-                    "protective orders must be gtc)"
-                )
-        except (TypeError, ValueError):
-            pass
+    # When the order's day ends: the close of the day it was placed, or of the
+    # next trading day for an order placed after the close or on a holiday.
+    day = created.astimezone(_ET).date()
+    if not (is_trading_day(day) and created.astimezone(_ET).time() < regular_close(day)):
+        day += timedelta(days=1)
+        while not is_trading_day(day):
+            day += timedelta(days=1)
+    session_end = datetime.combine(day, regular_close(day), tzinfo=_ET)
+
+    last = order_data.get("last_transaction_at")
+    last_at = _at(last) if last else None
+    if last_at is not None:
+        t = last_at.astimezone(_ET)
+        in_session = is_trading_day(t.date()) and (
+            time_of_day(9, 30) <= t.time() < regular_close(t.date())
+        )
+        if last_at >= session_end and not in_session:
+            return "expired", expired
+        return "cancelled", "Order cancelled"
+    if (now or datetime.now(UTC)) >= session_end:
+        return "expired", expired
     return "cancelled", "Order cancelled"
 
 

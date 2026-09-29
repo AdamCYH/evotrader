@@ -325,7 +325,21 @@ class TradeJournal:
         if is_protective and not status_is_filled and matching:
             total_open = sum(float(t.get("remaining_quantity") or 0.0) for t in matching)
             reason_parts = [broker_status_reason] if broker_status_reason else []
+            # A buy placed in this same cycle and still awaiting the broker's
+            # word is a lot a moment from now. Resizing the stop to cover it is
+            # the normal add path, not an over-cover: on 2026-09-28 a stop
+            # resized right after a buy read OVER_COVER for good, because the
+            # buy was still PENDING when the stop was written.
+            pending = 0.0
             if close_qty > total_open + 1e-4:
+                pending = await self._pending_open_quantity(
+                    proposal.ticker, proposal.option_id, str(matching[0]["direction"]), session_id
+                )
+            if pending > 0 and close_qty <= total_open + pending + 1e-4:
+                reason_parts.append(
+                    f"covers {pending:g} share(s) of a buy awaiting broker confirmation"
+                )
+            elif close_qty > total_open + 1e-4:
                 reason_parts.append(
                     "OVER_COVER: protective qty exceeds journaled lots "
                     f"({close_qty:g} vs {total_open:g})"
@@ -1527,6 +1541,26 @@ class TradeJournal:
             linked += 1
         return linked
 
+    async def _pending_open_quantity(
+        self, ticker: str, option_id: str | None, direction: str, session_id: str | None
+    ) -> float:
+        """Shares of buys for this instrument placed in this cycle and still PENDING."""
+        if not session_id:
+            return 0.0
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT COALESCE(SUM(quantity), 0) AS pending
+                FROM trades
+                WHERE action = 'OPEN' AND order_status = 'PENDING'
+                  AND ticker = ? AND COALESCE(option_id, '') = ?
+                  AND direction = ? AND session_id = ?
+                """,
+                (ticker, option_id or "", direction, session_id),
+            )
+            row = await cursor.fetchone()
+        return float(row["pending"] or 0.0) if row else 0.0
+
     async def update_order_status(
         self,
         order_id: str,
@@ -1535,11 +1569,20 @@ class TradeJournal:
         filled_quantity: float | None = None,
         broker_status_reason: str | None = None,
         only_if_claimed_fill: bool = False,
+        fill_source: str | None = None,
     ) -> int:
         """Update a trade's order lifecycle status by broker order_id.
 
         Used by reconciliation when the broker confirms a terminal state
         (FILLED, REJECTED, CANCELLED, FAILED) for a previously PENDING trade.
+
+        Every row sharing the order id is updated, except one a data repair
+        closed out (CANCELLED/FAILED/EXPIRED/REJECTED with a ``REPAIRED_``
+        reason), which stays as the repair left it. Such rows can share the id
+        of the order that is still live — the phantom rows of 2026-09-25 shared
+        a resting stop's — and news about that order is about the live row: on
+        2026-09-28 a sweep relabelled repaired rows "expired" when the stop was
+        cancelled, and a fill would have turned a phantom SHORT into a real one.
 
         Args:
             order_id: Broker order ID.
@@ -1553,6 +1596,10 @@ class TradeJournal:
                 says is still working, without touching a row the broker itself
                 confirmed. Without this guard the same call would rewrite a
                 genuine fill that happens to share the order id.
+            fill_source: Where the fill's price came from. Default: ``broker``
+                for FILLED, cleared otherwise. ``broker_position`` records a
+                fill the broker's position confirms while the price is still
+                the journal's own.
 
         Returns:
             Number of rows updated.
@@ -1586,12 +1633,18 @@ class TradeJournal:
         # The broker has now spoken, so the row is no longer an unverified
         # claim either way — record which.
         updates.append("fill_source = ?")
-        params.append("broker" if new_status.upper() == "FILLED" else None)
+        if fill_source is None:
+            fill_source = "broker" if new_status.upper() == "FILLED" else None
+        params.append(fill_source)
 
         params.append(order_id)
         where = "order_id = ?"
         if only_if_claimed_fill:
             where += " AND order_status = 'FILLED' AND fill_source = 'executor_claim'"
+        where += (
+            " AND NOT (COALESCE(order_status, '') IN ('CANCELLED', 'FAILED', 'EXPIRED',"
+            " 'REJECTED') AND substr(COALESCE(broker_status_reason, ''), 1, 9) = 'REPAIRED_')"
+        )
         set_clause = ", ".join(updates)
 
         async with self._db.transaction() as conn:
