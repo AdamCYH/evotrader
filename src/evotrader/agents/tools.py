@@ -855,6 +855,11 @@ async def get_ticker_snapshot(ticker: str) -> dict:
     }
 
 
+#: How long after the open the gap may be read from the quote, while no
+#: 5-minute bar exists yet (see compute_gap_pct).
+QUOTE_GAP_WINDOW_MINUTES = 15
+
+
 def compute_gap_pct(
     intraday_candles: list[dict],
     daily_candles: list[dict],
@@ -872,8 +877,18 @@ def compute_gap_pct(
     backtest ran an ensemble that included it. Backtest-vs-live comparisons
     were over different ensembles.
 
+    The first cycle of the session runs seconds after the open, before any
+    bar exists, so there the gap comes from the quote, which already carries
+    the opening print (source ``quote_at_open``). Without it the gap channel
+    could not vote at the one cycle where a gap fade is still ahead: on
+    2026-09-29 the opening gap was unreadable at the first cycle and already
+    filled by the next one, an hour later. The quote is used only in the session's
+    first minutes, so later on a missing bar feed shows as a missing gap
+    rather than being masked by it. (The backtest reads the first bar's open,
+    which can differ from the opening quote by a few hundredths of a percent.)
+
     Returns ``(gap_pct, source)`` with source in
-    {"intraday_first_bar", "daily_bar", None}.
+    {"intraday_first_bar", "quote_at_open", "daily_bar", None}.
     """
     q = quote_data or {}
     prev_close = float(q.get("previous_close") or q.get("adjusted_previous_close") or 0.0)
@@ -887,6 +902,22 @@ def compute_gap_pct(
                 ), "intraday_first_bar"
         except (KeyError, TypeError, ValueError):
             pass
+
+    if not intraday_candles and prev_close > 0:
+        from evotrader.tools.market_hours import is_market_open, minutes_since_open
+
+        elapsed = minutes_since_open(now)
+        try:
+            last = float(q.get("last") or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if (
+            last > 0
+            and elapsed is not None
+            and elapsed <= QUOTE_GAP_WINDOW_MINUTES
+            and is_market_open(now)
+        ):
+            return round(((last - prev_close) / prev_close) * 100, 4), "quote_at_open"
 
     # Fallback: today's DAILY candle, when one exists (post-close runs).
     if daily_candles:
@@ -3499,6 +3530,15 @@ async def get_open_positions() -> dict:
         "pending_orders": pending_orders,
         "pending_count": len(pending_orders),
     }
+    # The latest broker position sync (daily, between cycles), including its
+    # cost-basis check: whether the journal's lots agree with the broker's
+    # average cost. A disagreement is flagged there, never corrected.
+    if _config is not None:
+        from evotrader.db.reconciliation import read_last_sync
+
+        last_sync = read_last_sync(_config.data_dir)
+        if last_sync:
+            result["last_position_sync"] = last_sync
     _open_positions_cache = result
     _open_positions_cache_ts = now
     return result

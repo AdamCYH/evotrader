@@ -19,10 +19,19 @@ was hiding a wrong-direction design for this instrument.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 import pytest
 
 from evotrader.agents.tools import compute_gap_pct
+from evotrader.algorithms.strategies.gap import GapStrategy
+from evotrader.models.market import (
+    MarketRegime,
+    MarketSnapshot,
+    Quote,
+    RegimeClassification,
+    TechnicalIndicators,
+)
 
 _NOW = datetime(2026, 9, 18, 14, 34, tzinfo=UTC)  # 10:34 ET, market open
 _PREV_CLOSE = 132.25  # MSTR 09-17 close
@@ -151,3 +160,63 @@ class TestGapIsWeightedZeroEverywhere:
             )
             got = comp.compute_detailed_signal(snap).composite_value
             assert got == pytest.approx(expected, abs=5e-5), label
+
+
+class TestTheFirstCycleReadsTheGapFromTheOpeningQuote:
+    """Found 2026-09-29: the first cycle runs seconds after the open, before any
+    5-minute bar exists, so the gap was unreadable exactly where a gap fade is
+    still ahead, and read only an hour later, after the gap had filled. The quote
+    already carries the opening print. Made-up prices; a Tuesday in March, when
+    09:30 ET is 14:30 UTC."""
+
+    AT_OPEN = datetime(2026, 3, 3, 14, 30, 6, tzinfo=UTC)
+    QUOTE: ClassVar[dict] = {"last": 102.6, "previous_close": 100.0}
+
+    def test_before_the_first_bar(self) -> None:
+        assert compute_gap_pct([], [], self.QUOTE, self.AT_OPEN) == (2.6, "quote_at_open")
+
+    def test_only_in_the_sessions_first_minutes(self) -> None:
+        """Later, a missing bar feed must show as a missing gap, not be masked."""
+        later = self.AT_OPEN + timedelta(minutes=20)
+        assert compute_gap_pct([], [], self.QUOTE, later) == (None, None)
+
+    def test_not_before_the_open(self) -> None:
+        early = self.AT_OPEN - timedelta(minutes=10)
+        assert compute_gap_pct([], [], self.QUOTE, early) == (None, None)
+
+    def test_not_on_a_market_holiday(self) -> None:
+        christmas = datetime(2026, 12, 25, 14, 31, tzinfo=UTC)
+        assert compute_gap_pct([], [], self.QUOTE, christmas) == (None, None)
+
+    def test_the_first_bar_wins_once_there_is_one(self) -> None:
+        bars = [{"open": 102.7}]
+        later = self.AT_OPEN + timedelta(minutes=6)
+        assert compute_gap_pct(bars, [], self.QUOTE, later) == (2.7, "intraday_first_bar")
+
+    def test_the_gap_channel_can_vote_at_that_cycle(self) -> None:
+        gap, _ = compute_gap_pct([], [], self.QUOTE, self.AT_OPEN)
+        snapshot = MarketSnapshot(
+            ticker="T",
+            timestamp=self.AT_OPEN,
+            quote=Quote(
+                ticker="T",
+                bid=102.59,
+                ask=102.61,
+                last=102.6,
+                volume=1e5,
+                timestamp=self.AT_OPEN,
+                previous_close=100.0,
+            ),
+            indicators=TechnicalIndicators(),
+            regime=RegimeClassification(
+                regime=MarketRegime.TRENDING_BULL, confidence=0.6, reasoning="t"
+            ),
+            daily_change_pct=2.6,
+            gap_pct=gap,
+        )
+
+        signal = GapStrategy(min_gap_pct=0.3, gap_fade_threshold=1.0).compute_signal(snapshot)
+
+        assert signal.metadata["applicable"] is True
+        assert signal.metadata["gap_type"] == "fade"
+        assert signal.value == pytest.approx(-1.0, abs=1e-3), "an unfilled gap, at the open"

@@ -273,6 +273,16 @@ def create_app(
         finally:
             app.state.active_evolution_task = None
 
+    def _keep_sync_result(result: dict[str, Any]) -> None:
+        """Log the sync's cost-basis check and keep it for the next cycle's agents."""
+        from evotrader.db.reconciliation import save_last_sync
+
+        logger.info("[RECONCILE] Cost basis check: %s", result.get("cost_basis_check"))
+        try:
+            save_last_sync(config.data_dir, result)
+        except Exception as e:  # never let bookkeeping break the sync
+            logger.warning("Could not keep the position sync's result: %s", e)
+
     async def _execute_metrics(source: str) -> None:
         logger.info("📊  Starting %s daily metrics generation...", source)
         try:
@@ -289,7 +299,8 @@ def create_app(
             )
             recon = ReconciliationService(app.state.journal, app.state.mcp_toolset, is_dry_run)
             ticker = config.settings.asset.primary_ticker
-            await recon.reconcile_positions(ticker=ticker)
+            sync_result = await recon.reconcile_positions(ticker=ticker)
+            _keep_sync_result(sync_result)
 
             today = datetime.datetime.now(ET).strftime("%Y-%m-%d")
             existing_list = await app.state.metrics.get_metrics_range(today, today)
@@ -1742,6 +1753,7 @@ def create_app(
         recon = ReconciliationService(journal, mcp_toolset, is_dry_run)
         ticker = config.settings.asset.primary_ticker
         result = await recon.reconcile_positions(ticker=ticker)
+        _keep_sync_result(result)
 
         # Also reconcile pending orders against Robinhood's actual order state
         from evotrader.agents.tools import reconcile_pending_orders

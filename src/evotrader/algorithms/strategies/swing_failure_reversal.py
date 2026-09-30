@@ -250,8 +250,20 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         # Deeper flush that held = stronger
         base = math.tanh((stretch_atr - self._min_stretch_atr) / self._stretch_scale)
 
-        # Freshness: decays as bars accumulate beyond min_confirm_bars
-        freshness = self._confirm_decay ** max(0, bars_since_flush - self._min_confirm_bars)
+        # Freshness: how long the reversal has stood CONFIRMED — since the
+        # first close above the flush bar's high, and never counted from
+        # before min_confirm_bars (the structure is not confirmed sooner).
+        # Counting from the flush made a low that had held longer read as
+        # staler: a structure that chopped below the flush bar's high before
+        # reclaiming it was discounted for the wait (found 2026-09-29). A
+        # reversal that reclaims at once ages exactly as before, and
+        # max_confirm_bars still retires an old flush (the stale_flush guard).
+        reclaim_offset = next(
+            (i + 1 for i, bar in enumerate(post_flush_bars) if bar.close > flush_high),
+            bars_since_flush,  # unreachable: the last bar reclaimed, or we returned above
+        )
+        bars_since_confirmed = bars_since_flush - max(reclaim_offset, self._min_confirm_bars)
+        freshness = self._confirm_decay ** max(0, bars_since_confirmed)
 
         # Reclaim quality: how cleanly price reclaimed above flush high
         reclaim_quality = max(
@@ -281,6 +293,8 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 "flush_low": round(flush_low, 4),
                 "flush_high": round(flush_high, 4),
                 "bars_since_flush": bars_since_flush,
+                "bars_since_reclaim": bars_since_flush - reclaim_offset,
+                "bars_since_confirmed": max(0, bars_since_confirmed),
                 "stretch_atr": round(stretch_atr, 4),
                 "higher_low": higher_low,
                 "reclaimed": reclaimed,

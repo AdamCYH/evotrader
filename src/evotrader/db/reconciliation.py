@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from evotrader.db.journal import TradeJournal
@@ -22,6 +25,39 @@ from evotrader.models.trade import (
 from evotrader.utils import select_agentic_account
 
 logger = logging.getLogger(__name__)
+
+#: The latest position sync's outcome, inside the data folder.
+LAST_SYNC_FILE = Path("trading") / "last_position_sync.json"
+
+
+def save_last_sync(data_dir: Path, result: dict[str, Any], now: datetime | None = None) -> None:
+    """Keep the latest sync's outcome where every cycle's agents read it.
+
+    The daily sync runs between trading cycles, so nothing it found reached a
+    cycle's record: on 2026-09-29 the cost-basis check could be verified only
+    by inference. ``get_open_positions`` now shows this record every cycle.
+    """
+    record: dict[str, Any] = {
+        "at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
+        "ticker": result.get("ticker"),
+        "status": result.get("status"),
+        "cost_basis_check": result.get("cost_basis_check"),
+    }
+    if result.get("option_cost_basis_checks"):
+        record["option_cost_basis_checks"] = result["option_cost_basis_checks"]
+    path = data_dir / LAST_SYNC_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_last_sync(data_dir: Path) -> dict[str, Any] | None:
+    """The latest position sync's outcome, or None before the first one."""
+    try:
+        return json.loads((data_dir / LAST_SYNC_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def root_cause(exc: BaseException) -> BaseException:

@@ -24,8 +24,27 @@ folder layout; each entry says what you need to do.
   does not set them keeps its percent thresholds. To opt in, add them to that
   version's `config.yaml`.
 
+- **Every cycle sees the latest position sync.** The daily sync runs between
+  trading cycles, so what it found reached no cycle's record. It now keeps its
+  latest result in the data folder (`trading/last_position_sync.json`), and
+  `get_open_positions` shows it as `last_position_sync`: when it ran, its
+  status and its cost-basis check.
+
 ### Fixed
 
+- **The gap signal can vote at the first cycle of the session.** That cycle
+  runs seconds after the open, before the first 5-minute bar exists, so the
+  opening gap was unreadable exactly when a gap fade is still ahead, and read
+  an hour later, after the gap had filled. In the session's first 15 minutes,
+  while there is no bar yet, the gap is now read from the quote
+  (`gap_source: quote_at_open`). The starter algorithm gives the gap signal no
+  weight, so this makes it observable without changing any trade.
+- **A swing-failure vote ages from when the reversal was confirmed**, not from
+  the low: from the first close above the flush bar's high, and never from
+  earlier than `min_confirm_bars`. A reversal that reclaims at once reads as
+  before; one that chopped below the flush high first is no longer discounted
+  for that wait. Its votes now report `bars_since_reclaim` and
+  `bars_since_confirmed`.
 - **The daily position sync no longer rewrites a lot's price to the
   position's average.** After a buy at a different price, each lot differs
   from the broker's average cost by construction, and the sync rewrote such
