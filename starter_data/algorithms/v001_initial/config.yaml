@@ -23,6 +23,11 @@ momentum:
   # has no ATR.
   divergence_day_change_atr: 0.5   # 0.5 daily ATR
   divergence_day_change_pct: 0.6   # 0.6% — fallback only
+  # The same guard over several sessions: also decay the vote when the move
+  # from the close N sessions ago runs against it by at least this many ATRs.
+  # Catches a decline made of small days. Off here (1 session, no threshold).
+  divergence_window_days: 1
+  divergence_cum_atr: null
   rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
 mean_reversion:
   rsi_period: 14
@@ -101,6 +106,11 @@ trend_persistence:
   counter_day_atr: 0.95          # a 0.95-ATR day against the trend halves the signal
   counter_day_pct: 1.0           # 1.0% — fallback only
   counter_day_decay: 0.5
+  # The moving-average stack as a size modifier instead of a veto: with both
+  # set, a grind against the stack still votes, scaled down. null = the stack
+  # must agree, as before.
+  counter_stack_scale: null
+  no_stack_scale: null
 vwap_reclaim_continuation:
   lookback_bars: 30
   min_dip_bars: 2

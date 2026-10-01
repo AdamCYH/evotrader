@@ -112,7 +112,10 @@ modify code → test → verify algorithms still work.
 > `range_break_continuation.min_break_atr`, `trend_persistence.counter_day_atr`
 > and `event_window_timing.min_overextension_atr`. Each defaults to off, so an
 > algorithm version that does not set it keeps its percent behaviour; to move
-> a version onto ATR units, set it in that version's `config.yaml`.
+> a version onto ATR units, set it in that version's `config.yaml`. For a
+> move over several sessions use `move_over_sessions_in_atr`: it finds the
+> anchor session by date, because whether the daily list ends with yesterday's
+> bar or today's differs between data sources and times of day.
 >
 > **Say which day a number describes.** A value computed from the daily series
 > is the PRIOR session's during the day (its last bar does not update intraday).

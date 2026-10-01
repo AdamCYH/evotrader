@@ -7,16 +7,35 @@ from typing import Any
 
 
 def extract_balanced_bracket(s: str, open_b: str = "{", close_b: str = "}") -> str:
-    """Extract the first balanced bracket structure (e.g. `{}` or `[]`) from a string."""
+    """Extract the first balanced bracket structure (e.g. `{}` or `[]`) from a string.
+
+    Brackets inside a JSON string value are text, not structure, and are not
+    counted. Counting them closed a top-level array early whenever a value
+    contained a half-open interval such as "(0, 5]": json.loads then reported
+    an unterminated string at an unrelated offset, which hid the cause.
+    """
     start = s.find(open_b)
     if start == -1:
         return s
 
     count = 0
+    in_string = False
+    escaped = False
     for i in range(start, len(s)):
-        if s[i] == open_b:
+        ch = s[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == open_b:
             count += 1
-        elif s[i] == close_b:
+        elif ch == close_b:
             count -= 1
             if count == 0:
                 return s[start : i + 1]
@@ -48,7 +67,16 @@ def clean_json_text(text: str) -> str:
 
 
 def safe_parse_json(text: str) -> Any:
-    """Parse JSON string reliably, handling markdown blocks and syntax anomalies."""
+    """Parse JSON string reliably, handling markdown blocks and syntax anomalies.
+
+    Text that is already valid JSON is parsed as it is. Extraction only runs for
+    text that needs it (a code fence, prose around the JSON), so it can never
+    damage a payload that was correct to begin with.
+    """
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        pass
     cleaned = clean_json_text(text)
     return json.loads(cleaned)
 

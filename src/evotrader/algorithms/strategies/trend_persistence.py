@@ -63,6 +63,17 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         # The counter-day size in the instrument's own units (multiples of
         # daily ATR). None keeps the percent rule. See algorithms/units.
         counter_day_atr: float | None = None,
+        # The moving-average stack as a SIZE modifier instead of a gate. The
+        # gate requires price < EMA9 < EMA21 and SMA20 < SMA50 for a bearish
+        # grind, which cannot hold for weeks after a large advance: a clean
+        # run of down days can meet every condition this channel owns and
+        # still read 0.0, so its bearish side never speaks and is never
+        # scored. With both set, a grind fires on persistence,
+        # displacement and efficiency alone, scaled 1.0 when the stack agrees,
+        # `counter_stack_scale` when it points the other way, `no_stack_scale`
+        # when it is neither. Either left as None keeps the hard gate exactly.
+        counter_stack_scale: float | None = None,
+        no_stack_scale: float | None = None,
         version: str = "v001",
     ) -> None:
         self._lookback_days = lookback_days
@@ -76,6 +87,8 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         self._counter_day_pct = counter_day_pct
         self._counter_day_decay = counter_day_decay
         self._counter_day_atr = counter_day_atr
+        self._counter_stack_scale = counter_stack_scale
+        self._no_stack_scale = no_stack_scale
         self._version = version
 
     @property
@@ -162,22 +175,29 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         meta["lookback_bars"] = len(bars)
 
         # ── 5. FIRE CONDITIONS (symmetric) ─────────────────────────
+        # The grind itself: persistence, displacement, efficiency.
         signal = 0.0
-        bearish = (
+        grind_down = (
             down_frac >= self._min_persistence_frac
             and cum_move_atr <= -self._min_cum_atr
-            and bear_stack
             and efficiency >= self._min_efficiency
         )
-        bullish = (
+        grind_up = (
             up_frac >= self._min_persistence_frac
             and cum_move_atr >= self._min_cum_atr
-            and bull_stack
             and efficiency >= self._min_efficiency
         )
+        stack_modifier = self._counter_stack_scale is not None and self._no_stack_scale is not None
+        if stack_modifier:
+            bearish, bullish = grind_down, grind_up
+        else:
+            # The hard gate, unchanged: the stack must agree with the grind.
+            bearish = grind_down and bear_stack
+            bullish = grind_up and bull_stack
 
         meta["bearish_trigger"] = bearish
         meta["bullish_trigger"] = bullish
+        meta["stack_gate"] = "modifier" if stack_modifier else "hard"
 
         # ── SCOPE MARKER ──────────────────────────────────────
         # This channel detects a multi-session grind. When neither direction
@@ -218,6 +238,20 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             meta["depth"] = round(depth, 4)
             meta["quality"] = round(quality, 4)
 
+            # ── 5b. STACK MODIFIER (only when configured) ──────────
+            if stack_modifier:
+                with_stack = bear_stack if bearish else bull_stack
+                against = bull_stack if bearish else bear_stack
+                if with_stack:
+                    leg, stack_scale = "with_stack", 1.0
+                elif against:
+                    leg, stack_scale = "counter_stack", self._counter_stack_scale
+                else:
+                    leg, stack_scale = "no_stack", self._no_stack_scale
+                signal *= stack_scale  # type: ignore[operator]
+                meta["leg"] = leg
+                meta["stack_scale_applied"] = stack_scale
+
             # ── 6. EXHAUSTION HAIRCUT ──────────────────────────────
             if abs(cum_move_atr) > self._exhaustion_atr:
                 signal *= self._exhaustion_decay
@@ -257,6 +291,8 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             "counter_day_pct": self._counter_day_pct,
             "counter_day_decay": self._counter_day_decay,
             "counter_day_atr": self._counter_day_atr,
+            "counter_stack_scale": self._counter_stack_scale,
+            "no_stack_scale": self._no_stack_scale,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -283,6 +319,10 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         if "counter_day_atr" in params:
             v = params["counter_day_atr"]
             self._counter_day_atr = None if v is None else float(v)
+        for key in ("counter_stack_scale", "no_stack_scale"):
+            if key in params:
+                v = params[key]
+                setattr(self, f"_{key}", None if v is None else float(v))
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -330,4 +370,21 @@ class TrendPersistenceStrategy(TradingAlgorithm):
                 errors.append(f"counter_day_decay must be in [0, 1.0], got {v}")
         if "counter_day_atr" in params:
             errors.extend(validate_threshold_atr("counter_day_atr", params["counter_day_atr"]))
+        for key in ("counter_stack_scale", "no_stack_scale"):
+            if key in params and params[key] is not None:
+                v = float(params[key])
+                if not (0.0 <= v <= 1.0):
+                    errors.append(
+                        f"{key} must be in [0, 1] (or null to keep the hard gate), got {v}"
+                    )
+        # The modifier only switches on with both set; one alone would look
+        # configured and silently do nothing.
+        if ("counter_stack_scale" in params) != ("no_stack_scale" in params) or (
+            "counter_stack_scale" in params
+            and (params["counter_stack_scale"] is None) != (params["no_stack_scale"] is None)
+        ):
+            errors.append(
+                "counter_stack_scale and no_stack_scale switch the stack modifier on "
+                "together: set both, or leave both null"
+            )
         return errors

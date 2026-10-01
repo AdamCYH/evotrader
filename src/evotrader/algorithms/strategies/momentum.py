@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import move_over_sessions_in_atr, session_date_et
 from evotrader.indicators.macd import macd_signal
 from evotrader.indicators.moving_averages import moving_average_signal
 from evotrader.indicators.volume import (
@@ -48,6 +49,16 @@ class MomentumStrategy(TradingAlgorithm):
         # in by setting it. When set, percent is only the fallback for a
         # snapshot with no ATR or previous close.
         divergence_day_change_atr: float | None = None,
+        # The same guard over SEVERAL sessions. The day test above sees one
+        # session, so a decline made of small days never trips it: six down
+        # days of a fifth to a third of a normal day each add up to well over
+        # a normal day and a half, while no single day crosses the threshold.
+        # When window > 1 and a threshold is set, the move from the close
+        # `window` sessions ago is tested too, and either test applies the same
+        # decay. Window 1 or no threshold (the defaults) is every existing
+        # version's behaviour.
+        divergence_window_days: int = 1,
+        divergence_cum_atr: float | None = None,
         # Which relative-volume reading confirms the trend — see
         # indicators.volume.select_relative_volume. 'daily' is every existing
         # version's behaviour.
@@ -63,6 +74,8 @@ class MomentumStrategy(TradingAlgorithm):
         self._intraday_divergence_decay = intraday_divergence_decay
         self._divergence_day_change_pct = divergence_day_change_pct
         self._divergence_day_change_atr = divergence_day_change_atr
+        self._divergence_window_days = divergence_window_days
+        self._divergence_cum_atr = divergence_cum_atr
         self._rvol_source = rvol_source
         self._version = version
 
@@ -147,15 +160,46 @@ class MomentumStrategy(TradingAlgorithm):
             self._divergence_day_change_atr is not None and divergence_atr_observed is not None
         )
         threshold_source = "atr" if use_atr else "pct"
+        strong_day = False
         if day_change is not None and raw_signal != 0.0 and raw_signal * day_change < 0:
-            strong = (
+            strong_day = (
                 divergence_atr_observed >= self._divergence_day_change_atr  # type: ignore[operator]
                 if use_atr
                 else abs(day_change) >= self._divergence_day_change_pct
             )
-            if strong:
-                raw_signal *= self._intraday_divergence_decay
-                divergence_applied = True
+
+        # The multi-session test: price now against the close `window`
+        # trading days ago, in ATRs. Found by date (see
+        # units.move_over_sessions_in_atr), so it means the same span whether
+        # the daily list ends with yesterday's bar or today's.
+        window_on = self._divergence_window_days > 1 and self._divergence_cum_atr is not None
+        window_atr: float | None = None
+        window_anchor = None
+        strong_window = False
+        if window_on:
+            move = move_over_sessions_in_atr(
+                snapshot.daily_candles,
+                self._divergence_window_days,
+                snapshot.quote.last if snapshot.quote else None,
+                atr,
+                session_date_et(snapshot.timestamp),
+            )
+            if move is not None:
+                window_atr, window_anchor = move
+                strong_window = (
+                    raw_signal != 0.0
+                    and raw_signal * window_atr < 0
+                    and abs(window_atr) >= self._divergence_cum_atr  # type: ignore[operator]
+                )
+
+        # One decay, whichever test (or both) found the trend contradicted.
+        divergence_basis: str | None = None
+        if strong_day or strong_window:
+            raw_signal *= self._intraday_divergence_decay
+            divergence_applied = True
+            divergence_basis = (
+                "both" if strong_day and strong_window else ("day" if strong_day else "window")
+            )
 
         # Volume confirmation: dampen signal if volume is low.
         # Volume modulates CONFIDENCE, not directional validity. A confirmed
@@ -211,6 +255,19 @@ class MomentumStrategy(TradingAlgorithm):
                 "divergence_threshold_pct": self._divergence_day_change_pct,
                 "divergence_threshold_atr": self._divergence_day_change_atr,
                 "divergence_threshold_source": threshold_source,
+                "divergence_basis": divergence_basis,
+                "divergence_window_days": self._divergence_window_days,
+                "divergence_cum_atr": self._divergence_cum_atr,
+                # Signed: negative is a decline over the window. None when the
+                # window test is off or the history is too short to measure.
+                "divergence_window_atr_observed": (
+                    round(window_atr, 4) if window_atr is not None else None
+                ),
+                # The session the window is measured from — which day the
+                # number describes.
+                "divergence_window_anchor": (
+                    window_anchor.isoformat() if window_anchor is not None else None
+                ),
                 # Reported whenever it can be computed, even under the percent
                 # test, so the calibration record shows the move in ATRs either way.
                 "divergence_atr_observed": (
@@ -239,6 +296,8 @@ class MomentumStrategy(TradingAlgorithm):
             "intraday_divergence_decay": self._intraday_divergence_decay,
             "divergence_day_change_pct": self._divergence_day_change_pct,
             "divergence_day_change_atr": self._divergence_day_change_atr,
+            "divergence_window_days": self._divergence_window_days,
+            "divergence_cum_atr": self._divergence_cum_atr,
             "rvol_source": self._rvol_source,
         }
 
@@ -262,6 +321,11 @@ class MomentumStrategy(TradingAlgorithm):
         if "divergence_day_change_atr" in params:
             v = params["divergence_day_change_atr"]
             self._divergence_day_change_atr = None if v is None else float(v)
+        if "divergence_window_days" in params:
+            self._divergence_window_days = int(params["divergence_window_days"])
+        if "divergence_cum_atr" in params:
+            v = params["divergence_cum_atr"]
+            self._divergence_cum_atr = None if v is None else float(v)
         if "rvol_source" in params:
             self._rvol_source = str(params["rvol_source"])
 
@@ -295,6 +359,20 @@ class MomentumStrategy(TradingAlgorithm):
             v = float(params["divergence_day_change_atr"])
             if not (0.0 < v <= 3.0):
                 errors.append(f"divergence_day_change_atr must be in (0, 3.0] daily ATRs, got {v}")
+        if "divergence_window_days" in params:
+            try:
+                w = int(params["divergence_window_days"])
+                if not (1 <= w <= 20) or w != params["divergence_window_days"]:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append(
+                    "divergence_window_days must be a whole number of sessions in "
+                    f"[1, 20] (1 = off), got {params['divergence_window_days']!r}"
+                )
+        if "divergence_cum_atr" in params and params["divergence_cum_atr"] is not None:
+            v = float(params["divergence_cum_atr"])
+            if not (0.0 < v <= 5.0):
+                errors.append(f"divergence_cum_atr must be in (0, 5.0] daily ATRs, got {v}")
         if "rvol_source" in params:
             err = validate_rvol_source(params["rvol_source"])
             if err:

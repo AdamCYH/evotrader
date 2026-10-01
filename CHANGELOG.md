@@ -6,6 +6,29 @@ folder layout; each entry says what you need to do.
 
 ## Unreleased
 
+### Added — off unless an algorithm version sets them
+
+- **`momentum.divergence_window_days` and `divergence_cum_atr`.** The
+  divergence guard halves the momentum vote when the market moves hard
+  against it, but it looked at one session, so a decline made of small days
+  never tripped it. With both set, the move from the close N sessions ago is
+  tested too, in daily ATRs, and either test applies the same single decay.
+  The anchor session is found by date, so the span is the same whether or not
+  the daily list includes today. The vote's metadata says which test fired
+  (`divergence_basis`) and from which session (`divergence_window_anchor`).
+- **`trend_persistence.counter_stack_scale` and `no_stack_scale`.** A grind
+  fired only when the moving averages were stacked the same way, which after a
+  long advance silences the channel's opposite side for weeks. With both set,
+  the stack scales the vote (1.0 with it, the counter scale against it, the
+  no-stack scale otherwise) instead of vetoing it; `leg` records which.
+
+### Fixed
+
+- **Parsing JSON whose text contains a bracket.** A `]` inside a string value,
+  such as the interval "(0,5]", closed the top-level array early and the parse
+  failed at an unrelated position. Valid JSON is now parsed as it is, and the
+  fallback extraction ignores brackets inside strings.
+
 ### Changed
 
 - **Thresholds on the size of a price move can be set in the instrument's own

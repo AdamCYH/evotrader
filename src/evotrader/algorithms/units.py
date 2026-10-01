@@ -23,7 +23,10 @@ not set it behaves bit-for-bit as it did. ``momentum.divergence_day_change_atr``
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any
 
 #: Upper bound accepted for any ATR-unit threshold. Five normal days in one
 #: move is already an extreme event; a larger value is almost certainly a
@@ -66,6 +69,76 @@ def previous_close(
         return None
     denom = 1.0 + day_change_pct / 100.0
     return last / denom if denom > 0 else None
+
+
+def session_date_et(ts: datetime) -> date:
+    """The US Eastern calendar date of a moment: the trading day a cycle belongs to.
+
+    A naive datetime is read as Eastern time, the convention the rest of the
+    code uses for market clocks (``tools.market_hours``).
+    """
+    from evotrader.tools.market_hours import ET
+
+    return (ts.replace(tzinfo=ET) if ts.tzinfo is None else ts.astimezone(ET)).date()
+
+
+def _bar_session_date(bar: Any) -> date | None:
+    """The trading day a daily bar describes.
+
+    Read from the bar's own timestamp without converting time zones: the broker
+    stamps a daily bar at midnight UTC of its session date, so converting that
+    to US Eastern would move every bar back one day.
+    """
+    ts = bar.get("timestamp") if isinstance(bar, dict) else getattr(bar, "timestamp", None)
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if isinstance(ts, datetime):
+        return ts.date()
+    return ts if isinstance(ts, date) else None
+
+
+def _bar_close(bar: Any) -> float | None:
+    v = bar.get("close") if isinstance(bar, dict) else getattr(bar, "close", None)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def move_over_sessions_in_atr(
+    daily_candles: Sequence[Any] | None,
+    sessions: int,
+    price: float | None,
+    atr: float | None,
+    today: date,
+) -> tuple[float, date] | None:
+    """The move from the close ``sessions`` trading days before ``today``, in ATRs.
+
+    Returns ``(signed move in daily ATRs, the anchor session's date)``, or None
+    when it cannot be measured honestly (too little history, no price or ATR).
+
+    The anchor is found BY DATE, not by counting bars from the end of the list.
+    Whether the list ends with yesterday's completed bar or with a bar for today
+    depends on the data source and on the time of day, so "the bar N places from
+    the end" is a different day in different cycles. A date cannot drift that
+    way. Bars dated ``today`` or later are ignored; the current price stands for
+    today.
+    """
+    if not daily_candles or sessions < 1 or not price or price <= 0 or not atr or atr <= 0:
+        return None
+    by_date: dict[date, float] = {}
+    for bar in daily_candles:
+        d, c = _bar_session_date(bar), _bar_close(bar)
+        if d is not None and c is not None and c > 0 and d < today:
+            by_date[d] = c
+    prior = sorted(by_date, reverse=True)
+    if len(prior) < sessions:
+        return None
+    anchor = prior[sessions - 1]
+    return (price - by_date[anchor]) / atr, anchor
 
 
 @dataclass(frozen=True)
