@@ -24,6 +24,23 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The daily indicators include yesterday's close.** The broker's daily bars
+  end at the previous session all day long, and the live price was written
+  over that last bar, so every daily reading (moving averages, MACD, RSI,
+  Bollinger bands, ATR, IBS, the regime and its ADX) ran without the most
+  recent completed session, and ATR stayed frozen whenever the day traded
+  inside yesterday's range. Today's bar is now added after yesterday's
+  instead: built from the session's 5-minute bars, or from the live price
+  alone before the open. Relative volume and the daily VWAP still come from
+  the last completed session. A bar with no range yet gives no IBS reading
+  (`ibs_source: forming_bar_no_range`) rather than placing today's price in
+  yesterday's range, and after the close the gap is read from today's bar
+  (it was never found: the bar's date was read a day early). Each snapshot
+  records `daily_bar_mode` and `daily_last_completed_date`. **Every daily
+  reading shifts from the first cycle that runs this version**, so compare
+  signals from before and after it separately; the engine fingerprint changes
+  with it. Backtests are unaffected: they read the previous day's completed
+  bars only.
 - **Parsing JSON whose text contains a bracket.** A `]` inside a string value,
   such as the interval "(0,5]", closed the top-level array early and the parse
   failed at an unrelated position. Valid JSON is now parsed as it is, and the

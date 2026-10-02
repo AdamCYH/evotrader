@@ -16,6 +16,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from evotrader.callbacks.exit_policy import is_exit_action
+from evotrader.indicators.daily_series import (
+    daily_bar_date,
+    last_completed_date,
+    session_daily_bar,
+)
 from evotrader.models.mcp import McpEquityQuote
 from evotrader.tools.asset_context import primary_ticker
 from evotrader.tools.universe import get_resolver, relevant_symbols
@@ -120,7 +125,7 @@ def _get_strategy_loader() -> Any:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def compute_indicators(ohlcv_json: str) -> dict:
+def compute_indicators(ohlcv_json: str, forming_last_bar: bool = False) -> dict:
     """Compute all technical indicators from OHLCV price data.
 
     Takes raw OHLCV data (JSON array of {open, high, low, close, volume}
@@ -132,6 +137,11 @@ def compute_indicators(ohlcv_json: str) -> dict:
         ohlcv_json: JSON string containing an array of OHLCV candles.
             Each candle should have: open, high, low, close, volume.
             At least 60 candles are recommended for accurate regime detection.
+        forming_last_bar: The last candle is today's session, still forming.
+            Its partial volume read against full sessions would look
+            collapsed, so the volume-based readings (relative volume, the
+            daily VWAP) come from the last COMPLETED bar, which their
+            ``prior_session`` labels then describe exactly.
     """
     import pandas as pd
 
@@ -170,7 +180,8 @@ def compute_indicators(ohlcv_json: str) -> dict:
 
     # Extract latest values
     i = len(close) - 1
-    return {
+    done = i - 1 if forming_last_bar and i > 0 else i  # the last completed bar
+    result = {
         "rsi_14": _safe_float(rsi.iloc[i]),
         "macd_line": _safe_float(macd_result.macd_line.iloc[i]),
         "macd_signal": _safe_float(macd_result.signal_line.iloc[i]),
@@ -183,13 +194,12 @@ def compute_indicators(ohlcv_json: str) -> dict:
         "ema_21": _safe_float(mas.ema_21.iloc[i]),
         "sma_20": _safe_float(mas.sma_20.iloc[i]),
         "sma_50": _safe_float(mas.sma_50.iloc[i]),
-        "vwap": _safe_float(vwap.iloc[i]),
-        "vwap_anchor": "prior_session" if _safe_float(vwap.iloc[i]) is not None else None,
+        "vwap": _safe_float(vwap.iloc[done]),
+        "vwap_anchor": "prior_session" if _safe_float(vwap.iloc[done]) is not None else None,
         "ibs": _safe_float(ibs.iloc[i]),
         "atr_14": _safe_float(atr.iloc[i]),
-        "relative_volume": _safe_float(rvol.iloc[i]),
-        # The last daily bar's volume does not update intraday, so this is the
-        # prior session's ratio all day long. Say so, as vwap_anchor does.
+        "relative_volume": _safe_float(rvol.iloc[done]),
+        # The prior session's ratio, all day long: a forming bar is not read for it.
         "relative_volume_source": "prior_session_daily",
         "regime": {
             "type": regime.regime.value,
@@ -200,6 +210,11 @@ def compute_indicators(ohlcv_json: str) -> dict:
             "volatility_percentile": regime.volatility_percentile,
         },
     }
+    if forming_last_bar and result["ibs"] is None:
+        # Today's bar has no range yet (a pre-market or opening print): there is
+        # no position in the day to read, and yesterday's range is not today's.
+        result["ibs_source"] = "forming_bar_no_range"
+    return result
 
 
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict | None:
@@ -276,23 +291,6 @@ def _parse_hist_candles(
             }
         )
     return candles
-
-
-def _patch_last_bar(candles: list[dict], live_price: float) -> None:
-    """Update the last daily candle's H/L/C with the live quote.
-
-    This makes indicators computed from daily candles reflect the *developing*
-    session instead of freezing at the prior close for the entire trading day.
-    Mutates ``candles[-1]`` in place.
-    """
-    if not candles or live_price <= 0:
-        return
-    last = candles[-1]
-    last["close"] = live_price
-    if live_price > last["high"]:
-        last["high"] = live_price
-    if live_price < last["low"]:
-        last["low"] = live_price
 
 
 async def _enrich_event_context(
@@ -818,15 +816,17 @@ async def get_ticker_snapshot(ticker: str) -> dict:
             f"(indicators need ~60 to be reliable)"
         )
 
-    # Patch the forming bar with the live price, exactly as the primary
-    # instrument's path does — otherwise ATR is frozen at yesterday's close and
-    # a stop sized from it is a day stale.
+    # End the series with today's bar, exactly as the primary instrument's path
+    # does — otherwise ATR is a day stale, and a stop sized from it is too.
+    daily_bar_mode = "unchanged"
     if candles and quote.get("last"):
-        _patch_last_bar(candles, quote["last"])
+        daily_bar_mode = session_daily_bar(candles, float(quote["last"]), now)
 
     indicators: dict = {}
     if candles:
-        indicators = compute_indicators(json.dumps(candles))
+        indicators = compute_indicators(
+            json.dumps(candles), forming_last_bar=daily_bar_mode == "forming_bar_appended"
+        )
         if "error" in indicators:
             errors.append(f"Indicator computation failed: {indicators['error']}")
             indicators = {}
@@ -919,18 +919,18 @@ def compute_gap_pct(
         ):
             return round(((last - prev_close) / prev_close) * 100, 4), "quote_at_open"
 
-    # Fallback: today's DAILY candle, when one exists (post-close runs).
+    # Fallback: today's DAILY bar, when one exists (after the close, today's bar
+    # built from the session's 5-minute bars). Not one built from a quote alone,
+    # before any bar exists: its "open" is not the session's open. The bar's date
+    # is read as stamped — converting a midnight-UTC stamp to US Eastern time put
+    # it on the previous day, so before 2026-10-02 this never matched.
     if daily_candles:
         from evotrader.tools.market_hours import ET
 
         today_eastern = now.astimezone(ET).date()
         last_candle = daily_candles[-1]
-        try:
-            last_ts = datetime.fromisoformat(str(last_candle["timestamp"]).replace("Z", "+00:00"))
-            last_date = last_ts.astimezone(ET).date()
-        except Exception:
-            last_date = None
-        if last_date == today_eastern:
+        last_date = daily_bar_date(last_candle)
+        if last_date == today_eastern and last_candle.get("forming") != "quote":
             curr_open = last_candle.get("open")
             pc = prev_close or (
                 float(daily_candles[-2]["close"]) if len(daily_candles) >= 2 else 0.0
@@ -997,50 +997,55 @@ async def gather_market_data(ticker: str) -> dict:
             f"Insufficient OHLCV data: got {len(candles)} candles (need ≥60 for accurate indicators)"
         )
 
-    # ── 2b. Patch last daily bar with live quote ───────────────
-    # Without this patch, all indicators (RSI, MACD, Bollinger, etc.)
-    # are frozen at the prior close for the entire trading day because
-    # they're computed from completed daily candles. By updating the
-    # last candle's H/L/C with the live quote, indicators reflect the
-    # developing session on every cycle.
-    if candles and quote_data and quote_data.get("last"):
-        live_price = quote_data["last"]
-        if live_price > 0:
-            _patch_last_bar(candles, live_price)
-
-    # ── 2c. Fetch intraday candles for session VWAP/IBS ────────
-    from evotrader.tools.market_hours import ET, is_market_open
+    # ── 2b. Today's 5-minute bars ──────────────────────────────
+    # Fetched once today's regular session has begun, and after the close too,
+    # so today's daily bar (2c) carries the session's real range. Only during
+    # the session do they also feed the intraday readings (3b: session VWAP,
+    # live IBS, the volume profile), exactly as before.
+    from evotrader.tools.market_hours import ET, is_market_open, is_trading_day
 
     market_open = is_market_open()
-    intraday_candles: list[dict] = []
-    if market_open:
-        today_start = (
-            now.astimezone(ET)
-            .replace(
-                hour=9,
-                minute=30,
-                second=0,
-                microsecond=0,
-            )
-            .astimezone(UTC)
-        )
+    now_et = now.astimezone(ET)
+    today_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    session_bars: list[dict] = []
+    if is_trading_day(now_et.date()) and now_et >= today_start:
         raw_intraday = await _call_mcp_tool(
             "get_equity_historicals",
             {
                 "symbols": [ticker],
                 "interval": "5minute",
-                "start_time": today_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "start_time": today_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
         )
-        intraday_candles = _parse_hist_candles(raw_intraday, now)
+        session_bars = _parse_hist_candles(raw_intraday, now)
+    intraday_candles: list[dict] = session_bars if market_open else []
+
+    # ── 2c. End the daily series with today's bar ──────────────
+    # The broker's daily list ends at the previous session, so indicators
+    # computed from it alone are a day old. Today's bar is APPENDED (see
+    # indicators.daily_series); before 2026-10-02 the live price was written over
+    # yesterday's bar instead, and yesterday's close was missing from every
+    # daily indicator.
+    daily_bar_mode = "unchanged"
+    if candles and quote_data and quote_data.get("last"):
+        live_price = quote_data["last"]
+        if live_price > 0:
+            daily_bar_mode = session_daily_bar(candles, live_price, now, session_bars)
 
     # ── 3. Compute indicators ──────────────────────────────────
     indicators: dict = {}
     if candles:
-        indicators = compute_indicators(json.dumps(candles))
+        indicators = compute_indicators(
+            json.dumps(candles), forming_last_bar=daily_bar_mode == "forming_bar_appended"
+        )
         if "error" in indicators:
             errors.append(f"Indicator computation failed: {indicators['error']}")
             indicators = {}
+        else:
+            # Composites before and after the append are read on different
+            # series: the calibration record splits on these.
+            indicators["daily_bar_mode"] = daily_bar_mode
+            indicators["daily_last_completed_date"] = last_completed_date(candles, now)
 
     # ── 3a. Make sure the time-of-day volume profile can read ──
     # A cold profile (first run, or a change of instrument) is filled from the

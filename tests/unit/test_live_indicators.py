@@ -9,103 +9,185 @@ See: data/evolution/reviews/20260715_210358_intraday_indicator_staleness_and_vwa
 
 from __future__ import annotations
 
+import json
+import math
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 import pandas as pd
 
-from evotrader.agents.tools import _patch_last_bar, compute_indicators
+from evotrader.agents.tools import compute_indicators
+from evotrader.algorithms.composite import _ENGINE_SOURCES
+from evotrader.indicators import daily_series
+from evotrader.indicators.daily_series import session_daily_bar
 from evotrader.indicators.ibs import compute_live_ibs
 from evotrader.indicators.vwap import compute_session_vwap
 
-# ── _patch_last_bar ────────────────────────────────────────────────────
+# ── today's daily bar ──────────────────────────────────────────────────
+#
+# The broker's daily list ends at the PREVIOUS session all day long. Until
+# 2026-10-02 the live price was written over that last bar, so yesterday's
+# close, high and low were missing from every daily indicator. Today's bar is
+# now appended instead. Made-up bars; 2026-03-04 is a Wednesday, before
+# daylight saving time (15:00 UTC is 10:00 ET).
+
+DURING = datetime(2026, 3, 4, 15, 0, tzinfo=UTC)  # 10:00 ET
+AFTER_CLOSE = datetime(2026, 3, 4, 22, 0, tzinfo=UTC)  # 17:00 ET
+SATURDAY = datetime(2026, 3, 7, 15, 0, tzinfo=UTC)
 
 
-class TestPatchLastBar:
-    """Verify that _patch_last_bar correctly updates H/L/C of the last candle."""
-
-    def test_updates_close_to_live_price(self):
-        candles = [
-            {"open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
-        ]
-        _patch_last_bar(candles, 103.0)
-        assert candles[-1]["close"] == 103.0
-
-    def test_extends_high_when_live_exceeds(self):
-        candles = [
-            {"open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
-        ]
-        _patch_last_bar(candles, 108.0)
-        assert candles[-1]["high"] == 108.0
-        assert candles[-1]["close"] == 108.0
-
-    def test_extends_low_when_live_below(self):
-        candles = [
-            {"open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
-        ]
-        _patch_last_bar(candles, 92.0)
-        assert candles[-1]["low"] == 92.0
-        assert candles[-1]["close"] == 92.0
-
-    def test_preserves_high_low_when_within_range(self):
-        candles = [
-            {"open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
-        ]
-        _patch_last_bar(candles, 100.0)
-        assert candles[-1]["high"] == 105  # Unchanged
-        assert candles[-1]["low"] == 95  # Unchanged
-        assert candles[-1]["close"] == 100.0
-
-    def test_noop_on_empty_candles(self):
-        candles: list[dict] = []
-        _patch_last_bar(candles, 100.0)  # Should not raise
-        assert candles == []
-
-    def test_noop_on_zero_price(self):
-        candles = [
-            {"open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
-        ]
-        _patch_last_bar(candles, 0.0)
-        assert candles[-1]["close"] == 102  # Unchanged
-
-    def test_patched_candles_produce_different_indicators(self):
-        """Core regression: indicators must differ after patching the last bar."""
-        import json
-        import math
-        from datetime import datetime, timedelta
-
-        # Build 60 daily candles with realistic up/down price movements
-        candles = []
-        base_date = datetime(2026, 5, 1)
-        for i in range(60):
-            # Sinusoidal price creates both gains and losses for valid RSI
-            price = 700 + 10 * math.sin(i * 0.3) + i * 0.1
-            dt = base_date + timedelta(days=i)
-            candles.append(
-                {
-                    "timestamp": dt.strftime("%Y-%m-%dT00:00:00Z"),
-                    "open": price - 0.5,
-                    "high": price + 2,
-                    "low": price - 2,
-                    "close": price,
-                    "volume": 10000 + i * 100,
-                }
-            )
-
-        # Compute indicators WITHOUT patching
-        original_indicators = compute_indicators(json.dumps(candles))
-        original_macd_hist = original_indicators.get("macd_histogram")
-
-        # Now patch the last bar with a significantly different live price
-        import copy
-
-        patched_candles = copy.deepcopy(candles)
-        _patch_last_bar(patched_candles, 740.0)  # Big move up from ~706
-
-        patched_indicators = compute_indicators(json.dumps(patched_candles))
-        patched_macd_hist = patched_indicators.get("macd_histogram")
-
-        # MACD histogram MUST change after patching (close drives EMA)
-        assert patched_macd_hist != original_macd_hist, (
-            "MACD histogram should change after patching last bar"
+def _daily(n: int = 60, last_day: str = "2026-03-03") -> list[dict]:
+    """``n`` daily bars stamped as the broker stamps them, ending ``last_day``."""
+    end = datetime.fromisoformat(last_day)
+    bars = []
+    for k in range(n):
+        day = end - timedelta(days=n - 1 - k)
+        price = 100 + 5 * math.sin(k * 0.3) + 0.1 * k
+        bars.append(
+            {
+                "timestamp": day.strftime("%Y-%m-%dT00:00:00Z"),
+                "open": price - 0.5,
+                "high": price + 2,
+                "low": price - 2,
+                "close": price,
+                "volume": 10_000 + 100 * k,
+            }
         )
+    return bars
+
+
+SESSION = [
+    {"open": 101.0, "high": 104.0, "low": 100.0, "close": 103.0, "volume": 500.0},
+    {"open": 103.0, "high": 106.0, "low": 102.0, "close": 105.0, "volume": 700.0},
+]
+
+
+def _overwrite_last_bar(candles: list[dict], live: float) -> None:
+    """What the live path did before 2026-10-02, kept here as the before."""
+    last = candles[-1]
+    last["close"] = live
+    last["high"] = max(last["high"], live)
+    last["low"] = min(last["low"], live)
+
+
+class TestTodaysDailyBar:
+    def test_is_appended_and_yesterday_is_kept(self) -> None:
+        candles = _daily()
+        yesterday = dict(candles[-1])
+
+        mode = session_daily_bar(candles, 103.0, DURING)
+
+        assert mode == "forming_bar_appended"
+        assert candles[-2] == yesterday, "yesterday's close, high and low are untouched"
+        assert candles[-1]["timestamp"] == "2026-03-04T00:00:00+00:00"
+        assert [candles[-1][k] for k in ("open", "high", "low", "close", "volume")] == [
+            103.0,
+            103.0,
+            103.0,
+            103.0,
+            0.0,
+        ]
+        assert candles[-1]["forming"] == "quote"
+
+    def test_is_built_from_the_sessions_bars(self) -> None:
+        candles = _daily()
+
+        session_daily_bar(candles, 104.5, DURING, SESSION)
+
+        today = candles[-1]
+        assert (today["open"], today["high"], today["low"], today["close"]) == (
+            101.0,
+            106.0,
+            100.0,
+            104.5,
+        )
+        assert today["volume"] == 1200.0
+        assert today["forming"] == "session_bars"
+
+    def test_after_the_close_takes_the_sessions_close_not_an_after_hours_print(self) -> None:
+        candles = _daily()
+
+        session_daily_bar(candles, 107.0, AFTER_CLOSE, SESSION)
+
+        today = candles[-1]
+        assert (today["high"], today["low"], today["close"]) == (106.0, 100.0, 105.0)
+
+    def test_a_bar_already_dated_today_is_updated(self) -> None:
+        candles = _daily(last_day="2026-03-04")
+
+        mode = session_daily_bar(candles, 999.0, DURING)
+
+        assert mode == "patched_today"
+        assert len(candles) == 60
+        assert candles[-1]["close"] == candles[-1]["high"] == 999.0
+
+    def test_there_is_none_on_a_weekend(self) -> None:
+        candles = _daily(last_day="2026-03-06")
+        before = [dict(c) for c in candles]
+
+        assert session_daily_bar(candles, 103.0, SATURDAY) == "no_session_today"
+        assert candles == before
+
+    def test_nothing_without_a_price(self) -> None:
+        candles = _daily()
+        assert session_daily_bar(candles, 0.0, DURING) == "unchanged"
+        assert session_daily_bar([], 103.0, DURING) == "unchanged"
+
+    def test_is_part_of_the_engine_fingerprint(self) -> None:
+        """How the series is built changes every daily reading, so a change to
+        it must move the engine fingerprint and raise the engine-change notice."""
+        module = Path(daily_series.__file__).resolve()
+        path = module.relative_to(module.parents[1]).as_posix()
+        assert any(path == s or path.startswith(f"{s}/") for s in _ENGINE_SOURCES)
+
+
+class TestIndicatorsSeeYesterdayAndToday:
+    def test_atr_moves_with_todays_range(self) -> None:
+        """The 2026-10-01 proof in miniature: with yesterday overwritten, prints
+        inside yesterday's range never moved ATR; with today appended they do."""
+        old = []
+        new = []
+        for live in (99.0, 109.0):  # both inside yesterday's 95-110 range
+            overwritten = _daily()
+            overwritten[-1].update(high=110.0, low=95.0)
+            _overwrite_last_bar(overwritten, live)
+            old.append(compute_indicators(json.dumps(overwritten))["atr_14"])
+
+            appended = _daily()
+            appended[-1].update(high=110.0, low=95.0)
+            session_daily_bar(appended, live, DURING, [dict(SESSION[0], close=live)])
+            new.append(compute_indicators(json.dumps(appended), forming_last_bar=True)["atr_14"])
+        assert old[0] == old[1], "the defect: a frozen ATR"
+        assert new[0] != new[1]
+
+    def test_todays_price_still_moves_the_daily_indicators(self) -> None:
+        readings = []
+        for live in (95.0, 112.0):
+            candles = _daily()
+            session_daily_bar(candles, live, DURING)
+            readings.append(compute_indicators(json.dumps(candles), forming_last_bar=True))
+        assert readings[0]["macd_histogram"] != readings[1]["macd_histogram"]
+        assert readings[0]["ema_9"] != readings[1]["ema_9"]
+
+    def test_relative_volume_is_the_last_completed_sessions(self) -> None:
+        completed = compute_indicators(json.dumps(_daily()))
+        candles = _daily()
+        session_daily_bar(candles, 103.0, DURING)  # volume 0 so far today
+
+        forming = compute_indicators(json.dumps(candles), forming_last_bar=True)
+
+        assert forming["relative_volume"] == completed["relative_volume"]
+        assert forming["relative_volume_source"] == "prior_session_daily"
+        assert forming["vwap"] == completed["vwap"]
+
+    def test_a_bar_with_no_range_yet_has_no_ibs(self) -> None:
+        candles = _daily()
+        session_daily_bar(candles, 103.0, DURING)
+
+        result = compute_indicators(json.dumps(candles), forming_last_bar=True)
+
+        assert result["ibs"] is None
+        assert result["ibs_source"] == "forming_bar_no_range"
 
 
 # ── compute_session_vwap ───────────────────────────────────────────────
