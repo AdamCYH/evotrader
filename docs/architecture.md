@@ -121,9 +121,12 @@ local Yahoo Finance server (the `stock-analysis` package) as a fallback.
 **Practice mode.** In `mode: sim` a proxy sits between the agents and the
 Robinhood connection. Account, portfolio and order calls go to a simulated
 broker that keeps its own account in SQLite and fills orders against live
-quotes; read-only market data (quotes, price history, option chains) passes
-through to Robinhood; every other broker tool is refused. That is why practice
-mode still needs a Robinhood login.
+quotes; read-only market data (quotes, price history, order-book depth, option
+chains and contract prices, fundamentals, earnings dates, indexes) passes
+through to Robinhood; tools that read the real account (tax lots, realized
+P&L, watchlists, screeners) are answered by the simulated broker or refused, as
+is every other broker tool. That is why practice mode still needs a Robinhood
+login.
 *Code:* `src/evotrader/sim/sim_proxy.py`, `sim/sim_broker.py`.
 
 **The data folder.** Everything that belongs to one user: `settings.yaml`,

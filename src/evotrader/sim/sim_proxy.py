@@ -2,6 +2,8 @@ import json
 import logging
 from typing import Any, ClassVar
 
+from evotrader.utils import select_agentic_account
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +67,11 @@ class SimBrokerProxy:
         "get_portfolio",
         "get_equity_positions",
         "get_option_positions",
+        # The practice account's tax lots, answered by the sim: one open lot per
+        # position, no closed lots. The broker's tool reads the real account's
+        # lots, which practice mode must never show; refused, it left the
+        # wash-sale check with no answer at all.
+        "get_equity_tax_lots",
         # Order management
         "place_stock_order",
         "place_equity_order",
@@ -83,20 +90,53 @@ class SimBrokerProxy:
         "get_order_status",
     }
 
+    # Read-only market data, passed to the real broker as it is. Each of these
+    # tools describes the market, not an account: it places nothing, changes
+    # nothing and (the tradability checks apart) takes no account number, so its
+    # answer is the same whichever account asks. A read-only tool that reads the
+    # real account is never passed through, however harmless it looks: positions,
+    # portfolio, orders and tax lots are simulated above; realized P&L and trade
+    # history (get_realized_pnl, get_pnl_trade_history), the options level
+    # (get_option_level_upgrade_info), watchlists (get_watchlists,
+    # get_watchlist_items, get_option_watchlist, get_popular_watchlists) and
+    # screeners (get_scans, get_scanner_filter_specs, run_scan) describe the
+    # owner's account or lead straight to tools that change it, nothing in the
+    # pipeline reads them, and so they stay refused below.
     ALLOWED_PASSTHROUGH_TOOLS: ClassVar[set[str]] = {
-        # Read-only market data tools allowed in sim mode
-        "get_equity_quotes",
-        "get_equity_historicals",
+        # Stocks: prices and bars
+        "get_equity_quotes",  # the live quote (the sim fills stock orders against it)
+        "get_equity_historicals",  # OHLCV bars
+        "get_equity_price_book",  # the Level 2 book: everyone's resting orders, not ours
+        "get_equity_technical_indicators",  # computed from the bars
+        # Options: contracts and their prices
         "get_option_chains",
         "get_option_instruments",
-        "get_option_quotes",
+        "get_option_quotes",  # the live quote (the sim fills option orders against it)
+        "get_option_historicals",  # a contract's bars (the IV trend reads them)
+        # Companies: facts about the issuer, not about who holds it
+        "get_equity_fundamentals",  # valuation ratios, market cap
+        "get_financials",  # revenue, profit, margins by period
+        "get_earnings_calendar",  # market-wide earnings dates (the event context reads them)
+        "get_earnings_results",  # one symbol's reported and estimated earnings
+        # Market indexes
+        "get_indexes",
+        "get_index_quotes",
+        # A name or ticker resolved to an instrument
+        "search",
+        # Whether a symbol may be traded in a session. The one pass-through that
+        # takes an account number: call_tool_raw swaps the practice account's for
+        # the real one, because the answer is about the instrument and the kind
+        # of account, not about what it holds.
         "get_equity_tradability",
-        "get_option_tradability",
+        "get_option_tradability",  # not among the broker's tools today; harmless if it returns
     }
 
     def __init__(self, sim_broker: Any, real_mcp_toolset: Any = None) -> None:
         self.sim_broker = sim_broker
         self.real_mcp_toolset = real_mcp_toolset
+        # The real account's number, for the pass-through tools that take one;
+        # looked up on first use.
+        self.real_account_number: str | None = None
 
         # Inject the proxy into SimBroker so it can fetch live prices via real toolset
         self.sim_broker.real_mcp_toolset = real_mcp_toolset
@@ -134,26 +174,26 @@ class SimBrokerProxy:
                 )
 
         if name in self.ALLOWED_PASSTHROUGH_TOOLS:
-            # Swap sim account number with real account number for passthrough tools
+            # A pass-through tool that takes an account number is asked about the
+            # real account, by its own number; the practice account's name means
+            # nothing to the broker.
             if arguments.get("account_number") == self.sim_broker.account_number:
-                if getattr(self, "real_account_number", None) is None:
+                if self.real_account_number is None:
                     try:
                         real_accounts_res = await original_session.call_tool("get_accounts", {})
                         real_acc_data = json.loads(real_accounts_res.content[0].text)
-                        items = real_acc_data.get("data", [])
+                        # The broker lists accounts under data.accounts, and the
+                        # agentic one is chosen as the live path chooses it. Read
+                        # as a bare list, this never found an account, and the
+                        # practice account's name went to the real broker.
+                        data = real_acc_data.get("data") or {}
+                        items = data.get("accounts") if isinstance(data, dict) else data
                         if isinstance(items, list) and items:
-                            self.real_account_number = next(
-                                (
-                                    a.get("account_number")
-                                    for a in items
-                                    if a.get("type", "").lower() == "agent"
-                                ),
-                                items[0].get("account_number"),
-                            )
+                            self.real_account_number = select_agentic_account(items)
                     except Exception as e:
                         logger.warning("Failed to fetch real account number for passthrough: %s", e)
 
-                if getattr(self, "real_account_number", None):
+                if self.real_account_number:
                     arguments["account_number"] = self.real_account_number
 
             # Passthrough allowed read-only market data tools
@@ -181,6 +221,11 @@ class SimBrokerProxy:
 
         elif name == "get_option_positions":
             return await self.sim_broker.get_option_positions(acc_num)
+
+        elif name == "get_equity_tax_lots":
+            return await self.sim_broker.get_equity_tax_lots(
+                acc_num, arguments.get("symbol") or arguments.get("ticker")
+            )
 
         elif name in ("place_stock_order", "place_equity_order"):
             return await self.sim_broker.place_equity_order(arguments)

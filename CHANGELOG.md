@@ -48,6 +48,26 @@ folder layout; each entry says what you need to do.
   fetched, a single strike, or no strike within 8% of the price. It also reports
   what was fetched (`strikes_fetched`: pages, whether more remained, the lowest
   and highest strike).
+- **Practice mode passes read-only market data through to the broker.** A
+  practice cycle on 2026-10-02 was refused `get_earnings_calendar`,
+  `get_equity_price_book`, `get_option_historicals` and `get_equity_tax_lots`
+  ("not supported in simulation mode"), so the earnings event context, the
+  order-book depth check and the IV trend ran blind in practice mode while they
+  work live. Every read-only tool that describes the market rather than an
+  account now passes through: quotes, bars, order-book depth and indicators;
+  option chains, contracts and their quotes and bars; fundamentals, financials,
+  earnings dates and results; indexes; instrument search. Tools that read the
+  real account are still answered by the simulated broker or refused, never
+  passed through: `get_equity_tax_lots` now answers with the practice account's
+  own position as one open lot (it records no closed lots), so the wash-sale
+  check runs instead of failing. The tradability check's account swap read the
+  broker's account list in the wrong shape and so sent the practice account's
+  name to the real broker; it now finds the real account as the live path does.
+  From the same audit of the option path: a practice option position is priced
+  per contract with its multiplier, as the broker prices one (the position sync
+  read it at a hundredth of its cost), and a close placed after the agents'
+  cache had lost the contract's ticker closes the held position instead of
+  opening a second one under "OPTION".
 - **The constitution's account limits are enforced in code.** `max_weekly_loss_pct`
   and `max_drawdown_pct` had no enforcing code, and the daily-loss limit, the
   loss-streak pause and the daily order count were checked only inside a tool

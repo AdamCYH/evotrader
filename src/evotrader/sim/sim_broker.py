@@ -910,7 +910,12 @@ class SimBroker:
                     "option_id": r["option_id"],
                     "symbol": r["ticker"],
                     "quantity": f"{r['quantity']:.4f}",
-                    "average_price": f"{r['avg_cost_basis']:.4f}",
+                    # Per contract, as the broker prices a position (per share
+                    # times the multiplier, which it names). McpPosition divides
+                    # by that multiplier; given a per-share price, the position
+                    # sync read every practice option at a hundredth of its cost.
+                    "average_price": f"{r['avg_cost_basis'] * _multiplier(r):.4f}",
+                    "trade_value_multiplier": f"{_multiplier(r):.4f}",
                     "type": r["option_type"],
                     "strike": r["strike"],
                     "expiration": r["expiration"],
@@ -918,6 +923,51 @@ class SimBroker:
             )
 
         return {"data": {"positions": positions}}
+
+    async def get_equity_tax_lots(self, account_number: str, symbol: str | None) -> dict[str, Any]:
+        """The practice account's tax lots for one symbol: its position, as one open lot.
+
+        The sim holds each position at its average cost and records no closed
+        lots, so this is all it knows: one lot per held position and no sales.
+        The wash-sale check (``tools/tax_lots.py``) reads sold lots only, so in
+        practice mode it finds none. The broker's tool reads the real account's
+        lots, which practice mode must never show.
+        """
+        if not symbol:
+            raise ValueError("symbol is required to list tax lots")
+        await self._process_pending_orders_and_expirations()
+
+        conn = await self._get_conn()
+        async with conn.execute(
+            """
+            SELECT * FROM sim_positions
+            WHERE account_number = ? AND asset_type = 'EQUITY' AND UPPER(ticker) = ?
+            """,
+            (self.account_number, symbol.upper()),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        lots = []
+        if row and row["quantity"] > 0:
+            lots.append(
+                {
+                    "symbol": row["ticker"],
+                    "quantity": f"{row['quantity']:.4f}",
+                    "cost_basis": f"{row['quantity'] * row['avg_cost_basis']:.2f}",
+                    "cost_per_share": f"{row['avg_cost_basis']:.4f}",
+                    "sold_date": None,
+                }
+            )
+        return {
+            "data": {
+                "symbol": symbol.upper(),
+                "tax_lots": lots,
+                "note": (
+                    "Practice account: one open lot per position, at its average cost; "
+                    "the simulated broker records no closed lots."
+                ),
+            }
+        }
 
     # ── Order Placement ──────────────────────────────────────────────────
 
@@ -1278,6 +1328,24 @@ class SimBroker:
             }
         }
 
+    async def _option_ticker(self, option_id: str | None) -> str | None:
+        """The underlying of a contract the practice account has held or ordered, if any."""
+        if not option_id:
+            return None
+        conn = await self._get_conn()
+        for query in (
+            "SELECT ticker FROM sim_positions"
+            " WHERE account_number = ? AND option_id = ? AND ticker != 'OPTION' LIMIT 1",
+            "SELECT ticker FROM sim_orders"
+            " WHERE account_number = ? AND option_id = ? AND ticker != 'OPTION'"
+            " ORDER BY timestamp DESC LIMIT 1",
+        ):
+            async with conn.execute(query, (self.account_number, option_id)) as cursor:
+                row = await cursor.fetchone()
+            if row:
+                return str(row["ticker"])
+        return None
+
     async def place_option_order(self, args: dict[str, Any]) -> dict[str, Any]:
         """Place and execute a simulated option order."""
         await self._process_pending_orders_and_expirations()
@@ -1291,10 +1359,16 @@ class SimBroker:
         side = leg.get("side", "buy").lower()
         position_effect = leg.get("position_effect", "open").lower()
 
-        # Try to resolve underlying ticker via cache
+        # The underlying: from the agents' cache, else from the sim's own record
+        # of the contract. A position is keyed by ticker as well as contract id,
+        # so a close whose ticker the cache had lost (a restart, a change of
+        # instrument) opened a second position under "OPTION" instead of closing
+        # the held one.
         from evotrader.agents.tools import OPTION_ID_TO_TICKER
 
-        ticker = OPTION_ID_TO_TICKER.get(option_id, "OPTION")
+        ticker = (
+            OPTION_ID_TO_TICKER.get(option_id) or await self._option_ticker(option_id) or "OPTION"
+        )
 
         qty = float(args.get("quantity", 1.0))
         order_type = args.get("type", "limit").lower()
@@ -1342,6 +1416,8 @@ class SimBroker:
                 option_type = parsed["option_type"]
                 strike = parsed["strike"]
                 expiration = parsed["expiration"]
+                if ticker == "OPTION":
+                    ticker = str(parsed["ticker"])  # the OCC symbol names the underlying
                 logger.debug(
                     f"Parsed OCC symbol {option_id} -> {option_type.upper()} {strike} Exp: {expiration}"
                 )
