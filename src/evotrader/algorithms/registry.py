@@ -173,6 +173,13 @@ class AlgorithmRegistry:
         version_dir = self._dir / version
         version_dir.mkdir(parents=True, exist_ok=True)
         metadata["is_sim"] = False
+        # When it was proposed, recorded with the version itself. Callers did not
+        # pass it, so the console fell back to the evolution log, and every
+        # version saved without a log row read "Unknown date".
+        if not metadata.get("created_at"):
+            from datetime import UTC, datetime
+
+            metadata["created_at"] = datetime.now(UTC).isoformat(timespec="seconds")
 
         metadata["version"] = version
 

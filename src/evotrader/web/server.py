@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -30,6 +31,27 @@ from evotrader.tools.market_hours import ET
 from evotrader.utils import select_agentic_account, utc_timestamp_to_et_date
 
 logger = logging.getLogger("evotrader.web")
+
+
+def _log_time_iso(row: dict) -> str | None:
+    """When an evolution-log row was written, as an ISO 8601 time with its zone.
+
+    The row has two clocks. ``timestamp`` is written by Python with the zone
+    included. ``created_at`` is SQLite's ``datetime('now')``: UTC, but with a
+    space and no zone, which browsers read as LOCAL time (Chrome) or not at all
+    (Safari), so a date shown from it is hours off or blank.
+    """
+    ts = row.get("timestamp")
+    if ts:
+        return str(ts)
+    created = row.get("created_at")
+    if not created:
+        return None
+    text = str(created).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?", text):
+        return text.replace(" ", "T") + "+00:00"
+    return text
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Event Streaming & Log Capturing Setup
@@ -2263,15 +2285,20 @@ def create_app(
             except Exception:
                 pass
 
+            # A version's date lives in its metadata (save_version stamps it) or,
+            # for versions saved before that, in the evolution log. This used to
+            # call a method the store does not have, inside a bare `except: pass`,
+            # so every proposal read "Unknown date" and nothing said why.
             try:
                 for v in versions:
                     ver_name = v.get("version")
                     if ver_name and (not v.get("created_at") or v.get("created_at") == ""):
-                        row = await app.state.evolution_store.get_by_new_version(ver_name)
-                        if row and row.get("created_at"):
-                            v["created_at"] = str(row["created_at"])
-            except Exception:
-                pass
+                        row = await app.state.evolution_store.get_by_version(ver_name)
+                        when = _log_time_iso(row) if row else None
+                        if when:
+                            v["created_at"] = when
+            except Exception as e:
+                logger.warning("Could not read version dates from the evolution log: %s", e)
 
             return {"versions": versions, "active_version": active_ver}
         except Exception as e:
@@ -2314,15 +2341,14 @@ def create_app(
             db_created_at = None
             db_status = None
             try:
-                row = await app.state.evolution_store.get_by_new_version(version)
+                row = await app.state.evolution_store.get_by_version(version)
                 if row:
                     prev_version = row.get("old_version")
-                    if row.get("created_at") is not None:
-                        db_created_at = str(row["created_at"])
+                    db_created_at = _log_time_iso(row)
                     if row.get("status") is not None:
                         db_status = str(row["status"])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Could not read %s from the evolution log: %s", version, e)
 
             if metadata:
                 if (
@@ -2332,7 +2358,14 @@ def create_app(
                 if not metadata.get("status") and db_status:
                     metadata["status"] = db_status
 
-            # 2. Fallback to registry chronological sequence
+            # 2. The parent recorded when the version was saved (save_version's
+            #    lineage). Folder order is a guess; the parent is a fact.
+            if not prev_version and metadata and metadata.get("parent_version"):
+                parent = str(metadata["parent_version"])
+                if parent != version and (config.algorithms_dir / parent / "config.yaml").is_file():
+                    prev_version = parent
+
+            # 3. Fallback to registry chronological sequence
             if not prev_version:
                 try:
                     versions = registry.list_versions()
@@ -2372,6 +2405,9 @@ def create_app(
                 "metadata": metadata,
                 "is_active": (version.strip() == active_ver.strip()),
                 "diff": diff_text,
+                # Which version the diff compares against, so it can be read
+                # as "changed from X" rather than guessed.
+                "diff_against": prev_version,
             }
         except HTTPException:
             raise

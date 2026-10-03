@@ -51,6 +51,14 @@ folder layout; each entry says what you need to do.
   signals from before and after it separately; the engine fingerprint changes
   with it. Backtests are unaffected: they read the previous day's completed
   bars only.
+- **Algorithm versions show when they were proposed.** Every version read
+  "Proposed: Unknown date": saved versions carried no date, and the console's
+  fallback to the evolution log called a method that does not exist, inside an
+  error handler that hid it. Versions now record their date when saved, the
+  fallback works, and dates are sent with their time zone so every browser
+  shows the same time. The same lookup now also picks the version a proposal
+  is compared against (`diff_against` in the API): the one it was proposed
+  from, or its recorded parent, rather than whichever folder sorts before it.
 - **Parsing JSON whose text contains a bracket.** A `]` inside a string value,
   such as the interval "(0,5]", closed the top-level array early and the parse
   failed at an unrelated position. Valid JSON is now parsed as it is, and the
