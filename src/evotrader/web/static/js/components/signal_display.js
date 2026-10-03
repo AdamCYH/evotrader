@@ -52,6 +52,7 @@ const CHANNEL_LABELS = {
     swing_failure_reversal: "Failed breakdown",
     trend_persistence: "Multi-day trend",
     vwap_reclaim_continuation: "VWAP reclaim",
+    gap_fail_continuation: "Failed gap",
 };
 
 export function channelLabel(name) {
@@ -84,6 +85,14 @@ const REASON_LABELS = {
     insufficient_data: "not enough data",
     insufficient_daily_candles: "not enough history",
     day_change_unavailable: "no day change yet",
+    gap_too_small: "no gap today",
+    no_gap_or_atr: "no gap reading",
+    no_previous_close: "no previous close",
+    opening_range_forming: "too early in the session",
+    no_session_vwap: "no live intraday data",
+    gap_not_failed: "no setup",
+    vwap_not_lost: "no setup",
+    fill_not_held: "no setup",
 };
 
 function isVoting(sig) {

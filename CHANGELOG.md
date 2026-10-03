@@ -8,6 +8,16 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **A `gap_fail_continuation` channel, in shadow.** The `gap` channel reads
+  0.0 the moment an opening gap has filled, so nothing voted on what a failed
+  gap does next. The new channel votes in the direction of the fade once price
+  is through the prior close, past session VWAP and has held there for the
+  last few 5-minute bars (bearish after a failed gap-up, bullish after a failed
+  gap-down), from an hour into the session, fading to nothing over the last
+  half hour. It ships at weight 0 in every regime of the starter algorithm, so
+  it runs and its firings are recorded but it does not move the combined
+  signal until promoted on that record. A version whose config predates a
+  shadow channel runs it at weight 0 too.
 - **`momentum.divergence_window_days` and `divergence_cum_atr`.** The
   divergence guard halves the momentum vote when the market moves hard
   against it, but it looked at one session, so a decline made of small days

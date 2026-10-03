@@ -73,6 +73,16 @@ test("every quiet channel says why", () => {
         metadata: { applicable: false, reason: "insufficient_data" } }), "not enough data");
 });
 
+test("the failed-gap channel has a plain name and plain reasons", () => {
+    assert.equal(channelLabel("gap_fail_continuation"), "Failed gap");
+    assert.equal(silenceReason({ name: "gap_fail_continuation", value: 0, weight: 0.1,
+        metadata: { applicable: false, reason: "gap_too_small" } }), "no gap today");
+    assert.equal(silenceReason({ name: "gap_fail_continuation", value: 0, weight: 0.1,
+        metadata: { applicable: true, reason: "gap_not_failed" } }), "no setup");
+    assert.equal(silenceReason({ name: "gap_fail_continuation", value: -0.41, weight: 0.0,
+        metadata: { applicable: true, reason: "gap_failed" } }), "watch only (-0.41)");
+});
+
 test("unknown channels and reasons still render", () => {
     assert.equal(channelLabel("keltner_squeeze"), "keltner squeeze");
     assert.equal(silenceReason({ name: "k", value: 0, weight: 0.1, metadata: { reason: "brand_new_reason" } }),

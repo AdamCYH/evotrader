@@ -220,6 +220,10 @@ class StrategyLoader:
                     "options_positioning": 0.10,
                     "swing_failure_reversal": 0.12,
                     "trend_persistence": 0.0,
+                    # Shadow channels: a version whose config predates them
+                    # runs them at weight 0 (recorded, not voting).
+                    "vwap_reclaim_continuation": 0.0,
+                    "gap_fail_continuation": 0.0,
                 }
                 weights[name] = default_weights.get(name, 1.0 / len(sub_strategies))
 

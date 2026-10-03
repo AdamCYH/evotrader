@@ -76,3 +76,11 @@ strategies:
     # record of firings, not on a hunch.
     status: active
     added_in: v001
+
+  gap_fail_continuation:
+    module: evotrader.algorithms.strategies.gap_fail_continuation
+    class: GapFailContinuationStrategy
+    description: "Continuation of a fully faded opening gap, in the direction of the fade"
+    # Shadow mode too: it runs and is recorded at weight 0 in every regime.
+    status: active
+    added_in: v001

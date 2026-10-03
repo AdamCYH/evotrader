@@ -124,6 +124,18 @@ vwap_reclaim_continuation:
   rvol_scale: 1.0
   require_current_session_anchor: true
   rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
+gap_fail_continuation:
+  min_gap_pct: 1.5          # used only when no daily ATR can be measured
+  min_gap_atr: 0.3          # the gap must be at least this many daily ATRs
+  min_penetration_atr: 0.05 # price through the prior close, against the gap
+  min_vwap_dev_atr: 0.1     # and past session VWAP, against the gap
+  hold_bars: 3              # the last three 5-minute closes all through the prior close
+  base_strength: 0.6
+  gap_scale_atr: 0.5
+  penetration_scale_atr: 0.5
+  min_minutes_since_open: 60.0   # the first hour belongs to the gap channel's fill read
+  late_session_minute: 360.0     # fade to 0 from 15:30 ET ...
+  session_minutes: 390.0         # ... to the 16:00 ET close
 composite:
   momentum_weight: 0.2
   mean_reversion_weight: 0.18
@@ -134,15 +146,18 @@ composite:
   options_positioning_weight: 0.1
   swing_failure_reversal_weight: 0.12
   trend_persistence_weight: 0.0
+  gap_fail_continuation_weight: 0.0
   regime_adaptive: true
   renormalize_on_abstain: true
   # With regime_adaptive on, these weights replace the flat ones above for the
-  # regime detected this cycle. vwap_reclaim_continuation is weighted 0 in
-  # every regime: it runs and is recorded, but does not vote until promoted.
+  # regime detected this cycle. vwap_reclaim_continuation and
+  # gap_fail_continuation are weighted 0 in every regime: they run and are
+  # recorded, but do not vote until promoted.
   regime_weights:
     trending_bull:
       momentum: 0.2045
       vwap_reclaim_continuation: 0.0
+      gap_fail_continuation: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -154,6 +169,7 @@ composite:
     trending_bear:
       momentum: 0.2045
       vwap_reclaim_continuation: 0.0
+      gap_fail_continuation: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -165,6 +181,7 @@ composite:
     range_bound:
       momentum: 0.22
       vwap_reclaim_continuation: 0.0
+      gap_fail_continuation: 0.0
       mean_reversion: 0.12
       gap: 0.0
       intraday_vwap_zscore: 0.4
@@ -176,6 +193,7 @@ composite:
     high_volatility:
       momentum: 0.3375
       vwap_reclaim_continuation: 0.0
+      gap_fail_continuation: 0.0
       mean_reversion: 0.1538
       gap: 0.0
       intraday_vwap_zscore: 0.1183
