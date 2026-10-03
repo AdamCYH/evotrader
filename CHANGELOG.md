@@ -34,6 +34,20 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The option chain reaches the money.** The broker lists an expiry's contracts
+  from the lowest strike up, a page at a time, and `gather_option_chain` read the
+  next-page link from one place only and gave up after five pages. When an
+  underlying has a long run of strikes below its price, the near-the-money
+  contracts fall past what was fetched, and the nearest-strike selection then
+  mapped every offset onto the one highest strike it had: the strategy agent saw
+  a chain of one strike far below the price, cycle after cycle, and concluded
+  options were unavailable. The link is now found wherever the server puts it
+  (beside the list, at the top level, or as a bare cursor), pages are followed
+  until strikes on both sides of the money are in hand (40 at most), and the
+  response says in `errors` when the list stops short: a page that could not be
+  fetched, a single strike, or no strike within 8% of the price. It also reports
+  what was fetched (`strikes_fetched`: pages, whether more remained, the lowest
+  and highest strike).
 - **The constitution's account limits are enforced in code.** `max_weekly_loss_pct`
   and `max_drawdown_pct` had no enforcing code, and the daily-loss limit, the
   loss-streak pause and the daily order count were checked only inside a tool

@@ -1438,6 +1438,147 @@ async def gather_market_data(ticker: str) -> dict:
     }
 
 
+# The strikes the chain tool offers: at the money out to ~8% either side, where
+# the 0.20–0.55 delta contracts a small account can use sit. The call side steps
+# up from the price, the put side steps down.
+_CALL_STRIKE_OFFSETS = (1.0, 1.01, 1.02, 1.03, 1.05, 1.08)
+_PUT_STRIKE_OFFSETS = (1.0, 0.99, 0.98, 0.97, 0.95, 0.92)
+
+# How many pages of an expiry's contracts to walk before giving up. The broker
+# hands them out from the lowest strike up, a page at a time, so when many
+# strikes sit below the money the near-the-money ones only appear on a later
+# page. The walk stops as soon as strikes on both sides of the money are in
+# hand, so this is a ceiling, not the usual count.
+_OPTION_CHAIN_MAX_PAGES = 40
+
+
+def _money_band(underlying_price: float | None) -> tuple[float | None, float | None]:
+    """The lowest and highest strike the offsets can ask for, or (None, None)."""
+    if not underlying_price:
+        return None, None
+    return underlying_price * min(_PUT_STRIKE_OFFSETS), underlying_price * max(_CALL_STRIKE_OFFSETS)
+
+
+def _instrument_strike(inst: dict) -> float | None:
+    """The contract's strike, or None when the broker's text is not a number."""
+    try:
+        return _safe_float(inst.get("strike_price"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _distinct_strikes(instruments: list[dict]) -> list[float]:
+    """Every strike in the list once, lowest first."""
+    strikes = {_instrument_strike(inst) for inst in instruments}
+    return sorted(s for s in strikes if s is not None)
+
+
+def _next_page_cursor(raw: dict) -> str | None:
+    """The cursor for the next page of a broker list response, or None.
+
+    The broker's own guide says: when ``next`` is non-null, take its ``cursor``
+    query parameter and call the tool again. A one-page response carries no
+    ``next`` at all, and no stored response shows where the link sits when
+    there is one, so every place it could be is checked: beside the list, at the
+    top level, or in a pagination block; as a link or as a bare cursor (the
+    broker's P&L tool already hands out a bare ``next_cursor``).
+    """
+    import urllib.parse
+
+    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+    for holder in (data, raw, data.get("pagination"), raw.get("pagination")):
+        if not isinstance(holder, dict):
+            continue
+        for key in ("next", "next_cursor", "nextCursor", "next_url"):
+            value = holder.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            if "?" in value or "://" in value:
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(value).query)
+                if query.get("cursor"):
+                    return query["cursor"][0]
+                continue  # a link with no cursor in it cannot be followed
+            return value  # already a bare cursor
+    return None
+
+
+async def _fetch_option_instruments(
+    ticker: str,
+    expiry: str,
+    option_type: str,
+    underlying_price: float | None,
+    errors: list[str],
+) -> tuple[list[dict], dict]:
+    """Walk the broker's pages of one expiry's contracts.
+
+    Returns the contracts and a summary of the walk (pages fetched, whether
+    pages were left, the strikes seen), and appends to ``errors`` anything that
+    cut the walk short, so a list that never reaches the money is reported as
+    the broker's list stopping short rather than passed off as the chain.
+
+    Before 2026-10 the walk read the next-page link from one place only and
+    gave up after five pages, so with a long run of strikes below the price the
+    near-the-money contracts fell past what was fetched, and the nearest-strike
+    selection then mapped every offset onto the highest strike it had: the agent
+    read "a chain of one strike" well below the price on every cycle for days
+    and concluded options were unavailable.
+    """
+    low_target, high_target = _money_band(underlying_price)
+    instruments: list[dict] = []
+    cursor: str | None = None
+    pages = 0
+    for _ in range(_OPTION_CHAIN_MAX_PAGES):
+        mcp_args: dict = {
+            "chain_symbol": ticker,
+            "expiration_dates": expiry,
+            "state": "active",
+            "tradability": "tradable",
+        }
+        if option_type in ("call", "put"):
+            mcp_args["type"] = option_type
+        if cursor:
+            mcp_args["cursor"] = cursor
+        raw = await _call_mcp_tool("get_option_instruments", mcp_args)
+        if not raw:
+            if pages:
+                errors.append(
+                    f"Page {pages + 1} of the {expiry} contracts could not be fetched; "
+                    f"working from the first {pages} page(s)."
+                )
+            break
+        pages += 1
+        data = raw.get("data", {}) or {}
+        instruments.extend(data.get("instruments", []) or [])
+        cursor = _next_page_cursor(raw)
+        if not cursor:
+            break
+        strikes = _distinct_strikes(instruments)
+        if strikes and low_target and strikes[0] <= low_target and strikes[-1] >= high_target:
+            break  # both sides of the money are in hand; the rest is far out
+    else:
+        strikes = _distinct_strikes(instruments)
+        span = f"strikes {strikes[0]}–{strikes[-1]}" if strikes else "no strikes"
+        short_of = (
+            f"the strikes around {round(underlying_price, 2)}"
+            if underlying_price
+            else "the end of the list"
+        )
+        errors.append(
+            f"Stopped after {_OPTION_CHAIN_MAX_PAGES} pages of {expiry} contracts ({span}) "
+            f"before reaching {short_of}."
+        )
+
+    strikes = _distinct_strikes(instruments)
+    summary = {
+        "pages": pages,
+        "more_pages": cursor is not None,
+        "strikes": len(strikes),
+        "lowest_strike": strikes[0] if strikes else None,
+        "highest_strike": strikes[-1] if strikes else None,
+    }
+    return instruments, summary
+
+
 async def gather_option_chain(
     ticker: str,
     option_type: str = "both",
@@ -1455,7 +1596,6 @@ async def gather_option_chain(
         option_type: "call", "put", or "both".
         expiration_range_days: Max days to expiration to include (default 45).
     """
-    import urllib.parse
     from datetime import UTC, datetime
 
     errors: list[str] = []
@@ -1520,53 +1660,18 @@ async def gather_option_chain(
             quote = McpEquityQuote(**q)
             underlying_price = quote.resolve_live_price()
 
-    # 3. Fetch instruments for targeted expiration date (with pagination loop)
-    instruments: list[dict] = []
-    cursor = None
-    for _page_idx in range(5):
-        mcp_args = {
-            "chain_symbol": ticker,
-            "expiration_dates": best_expiry,
-            "state": "active",
-            "tradability": "tradable",
-        }
-        if option_type in ("call", "put"):
-            mcp_args["type"] = option_type
-        if cursor:
-            mcp_args["cursor"] = cursor
-
-        raw_inst = await _call_mcp_tool("get_option_instruments", mcp_args)
-        if not raw_inst:
-            break
-
-        data = raw_inst.get("data", {}) or {}
-        page_instruments = data.get("instruments", []) or []
-        instruments.extend(page_instruments)
-
-        if not page_instruments:
-            break
-
-        # Parse next page cursor
-        next_url = data.get("next")
-        if not next_url:
-            break
-        try:
-            parsed = urllib.parse.urlparse(next_url)
-            query_params = urllib.parse.parse_qs(parsed.query)
-            cursor_list = query_params.get("cursor")
-            if cursor_list:
-                cursor = cursor_list[0]
-            else:
-                break
-        except Exception:
-            break
+    # 3. Fetch the expiry's contracts, page by page, until the strikes on both
+    # sides of the money are in hand (see _fetch_option_instruments for why).
+    instruments, strikes_fetched = await _fetch_option_instruments(
+        ticker, best_expiry, option_type, underlying_price, errors
+    )
 
     if not instruments:
         return {
             "ticker": ticker,
             "option_type": option_type,
             "contracts": [],
-            "errors": ["No option instruments found for the targeted expiration"],
+            "errors": ["No option instruments found for the targeted expiration", *errors],
         }
 
     # 4. Spaced ATM & OTM selection using percentage offsets (for affordable options under $100)
@@ -1575,32 +1680,48 @@ async def gather_option_chain(
         calls = [inst for inst in instruments if inst.get("type") == "call"]
         puts = [inst for inst in instruments if inst.get("type") == "put"]
 
-        # Call offsets: ATM up to ~8% out of the money (focus on actionable 0.20–0.55 delta contracts)
-        call_offsets = [1.0, 1.01, 1.02, 1.03, 1.05, 1.08]
-        # Put offsets: ATM down to ~8% out of the money
-        put_offsets = [1.0, 0.99, 0.98, 0.97, 0.95, 0.92]
-
-        for offset in call_offsets:
+        for offset in _CALL_STRIKE_OFFSETS:
             target_strike = underlying_price * offset
             if calls:
                 best_c = min(
                     calls,
-                    key=lambda c: abs((_safe_float(c.get("strike_price")) or 0.0) - target_strike),
+                    key=lambda c: abs((_instrument_strike(c) or 0.0) - target_strike),
                 )
                 if best_c not in selected_instruments:
                     selected_instruments.append(best_c)
 
-        for offset in put_offsets:
+        for offset in _PUT_STRIKE_OFFSETS:
             target_strike = underlying_price * offset
             if puts:
                 best_p = min(
                     puts,
-                    key=lambda p: abs((_safe_float(p.get("strike_price")) or 0.0) - target_strike),
+                    key=lambda p: abs((_instrument_strike(p) or 0.0) - target_strike),
                 )
                 if best_p not in selected_instruments:
                     selected_instruments.append(best_p)
 
         selected_instruments = selected_instruments[:12]
+
+        # Say plainly when the list does not reach the money. Picking the nearest
+        # strike for every offset collapses a list that stops short onto its one
+        # edge strike, and that has to read as "the broker's list stopped short",
+        # not as "the chain has one strike".
+        strikes = _distinct_strikes(instruments)
+        low_target, high_target = _money_band(underlying_price)
+        near_the_money = [s for s in strikes if low_target <= s <= high_target]
+        if len(strikes) == 1:
+            errors.append(
+                f"Only one strike ({strikes[0]}) came back for {best_expiry} "
+                f"({len(instruments)} contract(s)); no spread of strikes around the "
+                f"underlying ({round(underlying_price, 2)}) could be offered."
+            )
+        elif strikes and not near_the_money:
+            errors.append(
+                f"None of the {len(strikes)} strikes the broker returned for {best_expiry} "
+                f"({strikes[0]}–{strikes[-1]}, {strikes_fetched['pages']} page(s)) is within "
+                f"8% of the underlying ({round(underlying_price, 2)}); the contracts listed "
+                "are the nearest available, not a spread around the money."
+            )
     else:
         selected_instruments = instruments[:10]
 
@@ -1765,6 +1886,7 @@ async def gather_option_chain(
         "expiration_range_days": expiration_range_days,
         "contracts_count": len(contracts),
         "contracts": contracts,
+        "strikes_fetched": strikes_fetched,
         "budget_picks": budget_picks,
         "iv_trend": iv_trend_data,
         "timestamp": now.isoformat(),
