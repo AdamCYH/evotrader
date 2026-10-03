@@ -94,6 +94,10 @@ class RiskGate:
         """
         return _check_constitution(order_args, self._constitution, held_quantity)
 
+    def is_exit_order(self, order_args: dict[str, Any], held_quantity: float | None = None) -> bool:
+        """True when the order reduces a position it holds; see ``_is_exit_order``."""
+        return _is_exit_order(order_args, held_quantity)
+
     def summarise_order(self, order_args: dict[str, Any]) -> str:
         """Create a summary of the order."""
         return _summarise_order(order_args)

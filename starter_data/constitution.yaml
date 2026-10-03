@@ -20,8 +20,8 @@ risk_limits:
   max_short_position_pct: 5       # [agent] largest short position; matters only if shorting is enabled
   max_total_exposure_pct: 80      # [code] ceiling of the sizing risk budget; [agent] everything invested at once
   max_daily_loss_pct: 2           # [code] past this loss in a day (closed trades), no new entries until the next session; exits stay allowed
-  max_weekly_loss_pct: 5          # [agent]
-  max_drawdown_pct: 10            # [agent] fall from the portfolio's peak
+  max_weekly_loss_pct: 5          # [code] past this loss over the trailing seven days (closed trades), no new entries; exits stay allowed
+  max_drawdown_pct: 10            # [code] fall from the portfolio's recorded peak; past it, no new entries until the account recovers; exits stay allowed
   require_stop_loss: true         # [agent] every share position carries a resting stop order
   max_stop_loss_pct: 5            # [agent] widest stop, % from entry; keep it wider than 1.5 × ATR of the instrument
   max_order_value_usd: 5000       # [code] largest single NEW order in dollars; closing or protecting what you hold is never capped; fit it to your account

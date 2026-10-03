@@ -34,6 +34,18 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The constitution's account limits are enforced in code.** `max_weekly_loss_pct`
+  and `max_drawdown_pct` had no enforcing code, and the daily-loss limit, the
+  loss-streak pause and the daily order count were checked only inside a tool
+  the risk-manager agent is asked to call. All of them are now one verdict
+  (`callbacks/account_rails.py`), applied by `check_risk_limits`,
+  `check_option_risk_limits` and the pre-order gate in front of the executor's
+  order tools, which refuses a new entry past any of them. The drawdown limit
+  measures the account against the highest value the metrics job has recorded.
+  Exits and protective orders are never blocked. `get_open_positions` reports
+  the account's standing against each limit (`account_rails`) every cycle, so
+  a halt is visible before an order is tried. A limit that cannot be measured
+  (no account value, no recorded peak) is reported as not evaluated.
 - **The daily indicators include yesterday's close.** The broker's daily bars
   end at the previous session all day long, and the live price was written
   over that last bar, so every daily reading (moving averages, MACD, RSI,

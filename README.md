@@ -265,7 +265,10 @@ code — can place an order on its own:
   agent cannot rewrite them.
 - **Risk gate.** Code in front of the executor's order tools that checks every
   order again: allowed ticker, order size, no short sale beyond the shares held,
-  no margin, and protective stop orders forced to stay open until cancelled.
+  no margin, protective stop orders forced to stay open until cancelled, and
+  the account limits (the daily and weekly loss, the fall from the account's
+  peak, a pause after a run of losses, the order count, the option premium) on
+  every new entry. Closing or protecting a position is never blocked by them.
   Closing or protecting an existing position is never blocked by rules meant
   for new entries.
 - **Approval gate.** `require_trade_approval: true` makes every order wait for

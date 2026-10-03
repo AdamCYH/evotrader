@@ -1075,6 +1075,50 @@ def create_execution_agent(
             )
             return None
 
+    async def _account_limit_violations(order_args: dict, held_qty: float | None) -> list[str]:
+        """The constitution's account limits an ENTRY would break right now.
+
+        Empty for an exit, and empty when the account cannot be measured (that
+        is reported by the risk tools and the positions report, and logged
+        here); the gate never guesses an account value.
+        """
+        from evotrader.agents import tools as _tools_mod
+        from evotrader.callbacks.account_rails import evaluate_account_rails
+
+        try:
+            is_option = "legs" in order_args
+            side = str(order_args.get("side", "")).lower()
+            # Unknown is not zero (see _check_constitution): a sell whose held
+            # quantity could not be read is treated as the exit it almost
+            # always is, so a loss limit never traps a position.
+            if gate.is_exit_order(order_args, held_qty) or (
+                held_qty is None and not is_option and side == "sell"
+            ):
+                return []
+            quantity = float(order_args.get("quantity", 0) or 0)
+            price = float(order_args.get("price", order_args.get("limit_price", 0)) or 0)
+            order_value = (
+                quantity * price * (100 if is_option else 1) if quantity and price else None
+            )
+            state = await _tools_mod.account_rails_state()
+            verdict = evaluate_account_rails(
+                state,
+                config.constitution,
+                is_exit=False,
+                order_value=order_value,
+                is_option=is_option,
+            )
+        except Exception:
+            logger.warning(
+                "[RISK GATE] account limits could not be evaluated for %s; allowing the order",
+                gate.summarise_order(order_args),
+                exc_info=True,
+            )
+            return []
+        for gap in verdict.warnings:
+            logger.warning("[RISK GATE] %s", gap)
+        return list(verdict.violations)
+
     async def before_tool_callback(tool, args, tool_context):
         if is_unchecked_order_tool(tool.name):
             # Fail closed: see risk_gate._ORDER_TOOL_NAME.
@@ -1147,6 +1191,16 @@ def create_execution_agent(
             # sell from a short sale. Without it every exit reads as a short.
             held_qty = await _resolve_held_quantity(args)
             violations = gate.check_violations(args, held_quantity=held_qty)
+            if not violations:
+                # 1b. The account-level limits (daily and weekly loss, drawdown
+                #     from the peak, loss-streak pause, order count, option
+                #     premium): the same verdict check_risk_limits reports to
+                #     the Risk Manager, applied here so that it holds whether
+                #     or not that tool was called. Entries only.
+                violations = await _account_limit_violations(args, held_qty)
+                action = "ACCOUNT_LIMIT_BLOCKED" if violations else "CONSTITUTION_BLOCKED"
+            else:
+                action = "CONSTITUTION_BLOCKED"
             if violations:
                 logger.error(
                     "[RISK GATE] BLOCKED: %s (held=%s) — violations: %s",
@@ -1156,7 +1210,7 @@ def create_execution_agent(
                 )
                 return {
                     "allowed": False,
-                    "action": "CONSTITUTION_BLOCKED",
+                    "action": action,
                     "violations": violations,
                     # A deterministic policy decision, NOT a transient fault.
                     # Retrying the identical order will fail identically. On
@@ -1396,6 +1450,8 @@ def create_orchestrator_agent(
             # network.
             _policy_markers = (
                 "CONSTITUTION_BLOCKED",
+                "ACCOUNT_LIMIT_BLOCKED",
+                "DRAWDOWN HALT",
                 "OPTION_ID_MISMATCH",
                 "not in allowed list",
                 "disabled in constitution",

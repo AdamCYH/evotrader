@@ -2375,34 +2375,10 @@ def _daily_loss_verdict(
     *,
     is_exit: bool,
 ) -> tuple[str | None, str | None]:
-    """``(violation, warning)`` for the constitution's daily-loss limit.
+    """``(violation, warning)`` for the daily-loss limit; see callbacks.account_rails."""
+    from evotrader.callbacks.account_rails import daily_loss_verdict
 
-    The limit is a share of the REAL account. Both risk checks used to test
-    ``today_pnl < -(max_daily_loss_pct * max_order_value_usd * 10)`` — 5% of
-    $100,000, i.e. $5,000 whatever the real balance — so on a small account it
-    could never fire.
-
-    Counts closed-trade losses today. Past the limit, new entries are refused
-    for the rest of the day; an exit or protective order never is, because the
-    sell that stops a loss is the last order a loss limit should block.
-    """
-    if today_pnl >= 0:
-        return None, None
-    if not account_value or account_value <= 0:
-        return None, (
-            f"Daily-loss limit not evaluated: account value unavailable "
-            f"(closed-trade P&L today ${today_pnl:.2f})."
-        )
-    limit = max_daily_loss_pct * account_value
-    if -today_pnl < limit:
-        return None, None
-    detail = (
-        f"Daily loss ${-today_pnl:.2f} exceeds the {max_daily_loss_pct:.0%} limit "
-        f"(${limit:.2f} of the ${account_value:.2f} account)"
-    )
-    if is_exit:
-        return None, f"{detail}, but this is an exit — permitted so risk can be reduced."
-    return f"{detail}: no new entries until the next session. Exits stay allowed.", None
+    return daily_loss_verdict(today_pnl, account_value, max_daily_loss_pct, is_exit=is_exit)
 
 
 async def _recorded_account_value() -> float | None:
@@ -2416,6 +2392,82 @@ async def _recorded_account_value() -> float | None:
     except Exception as e:
         logger.warning("Recorded account value unavailable: %s", e)
         return None
+
+
+async def account_rails_state(portfolio: dict | None = None) -> Any:
+    """Everything the account-level limits are measured against, right now.
+
+    The broker's account value when it can be asked (``portfolio`` is a result of
+    ``_agentic_portfolio`` a caller already has), else the metrics job's last
+    recorded value; the recorded peak, raised to today's value if that is
+    higher; closed-trade P&L today and over the trailing week; the loss streak
+    and today's order count from the journal. Never raises: what cannot be read
+    is left unknown and named in ``gaps``.
+    """
+    from evotrader.callbacks.account_rails import AccountState
+
+    gaps: list[str] = []
+    value: float | None = None
+    source = "unavailable"
+    try:
+        if portfolio is None:
+            portfolio = await _agentic_portfolio()
+        if portfolio and portfolio.get("total_value"):
+            value = float(portfolio["total_value"])
+            source = "broker"
+    except Exception as e:
+        gaps.append(f"Broker account value unavailable: {e}")
+    if value is None:
+        recorded = await _recorded_account_value()
+        if recorded:
+            value, source = recorded, "recorded"
+
+    peak: float | None = None
+    if _metrics is not None:
+        try:
+            recorded_peak = await _metrics.get_peak_portfolio_value()
+            if isinstance(recorded_peak, (int, float)) and recorded_peak > 0:
+                peak = float(recorded_peak)
+        except Exception as e:
+            gaps.append(f"Recorded account peak unavailable: {e}")
+    if value and (peak is None or value > peak):
+        peak = value
+
+    def _num(raw: Any) -> float:
+        return float(raw) if isinstance(raw, (int, float)) else 0.0
+
+    async def _read(name: str, *args: Any) -> Any:
+        try:
+            return await getattr(_journal, name)(*args)
+        except Exception as e:
+            gaps.append(f"Journal {name} unavailable for the account limits: {e}")
+            return None
+
+    today_pnl = week_pnl = 0.0
+    losses = 0
+    last_loss: datetime | None = None
+    trades_today = 0
+    if _journal is not None:
+        today_pnl = _num(await _read("get_today_pnl"))
+        week_pnl = _num(await _read("get_pnl", "week"))
+        losses = int(_num(await _read("get_session_consecutive_losses")))
+        ts = await _read("get_last_loss_timestamp")
+        last_loss = ts if isinstance(ts, datetime) else None
+        trades_today = int(_num(await _read("get_trade_count_today")))
+    else:
+        gaps.append("Journal not initialised: loss limits not evaluated.")
+
+    return AccountState(
+        account_value=value,
+        value_source=source,
+        peak_value=peak,
+        today_pnl=today_pnl,
+        week_pnl=week_pnl,
+        consecutive_losses=losses,
+        last_loss_at=last_loss,
+        trades_today=trades_today,
+        gaps=tuple(gaps),
+    )
 
 
 async def check_risk_limits(
@@ -2448,7 +2500,6 @@ async def check_risk_limits(
     constitution = _config.constitution
     rules = constitution.trading_rules
     limits = constitution.risk_limits
-    breakers = constitution.circuit_breakers
 
     violations: list[str] = []
     warnings: list[str] = []
@@ -2488,36 +2539,10 @@ async def check_risk_limits(
             f"Order value ${order_value:.2f} exceeds limit ${limits.max_order_value_usd:.2f}"
         )
 
-    # 4. Daily loss — evaluated after step 8, which fetches the account value
-    #    the limit is a share of.
-    today_pnl = await _journal.get_today_pnl()
-
-    # 5. Consecutive losses circuit breaker
-    # EXIT TRADES ARE EXEMPT — blocking a close traps the agent in a losing
-    # position, which is MORE risky than allowing the exit.
-    # The breaker only blocks for `pause_duration_minutes` after the last loss;
-    # once the cooldown expires, trading resumes even if the streak is unbroken.
-    # Session-scoped: the streak resets at each trading session boundary so a
-    # Friday streak cannot block Monday morning trading (see review
-    # 20260727_204248_circuit_breaker_streak_semantics).
-    is_exit = is_exit_action(action)
-    consecutive_losses = await _journal.get_session_consecutive_losses()
-    if consecutive_losses >= breakers.consecutive_losses_pause and not is_exit:
-        last_loss_ts = await _journal.get_last_loss_timestamp()
-        pause_expired = last_loss_ts is not None and datetime.now(UTC) - last_loss_ts > timedelta(
-            minutes=breakers.pause_duration_minutes
-        )
-        if not pause_expired:
-            violations.append(
-                f"Circuit breaker: {consecutive_losses} consecutive losses "
-                f"(limit: {breakers.consecutive_losses_pause}), "
-                f"pause expires {breakers.pause_duration_minutes}min after last loss"
-            )
-
-    # 6. Daily trade count check (exits exempt — you must always be able to close)
-    trade_count = await _journal.get_trade_count_today()
-    if trade_count >= rules.max_trades_per_day and not is_exit:
-        violations.append(f"Daily trade limit reached: {trade_count}/{rules.max_trades_per_day}")
+    # 4-6 and 8b. The account-level limits (daily and weekly loss, drawdown
+    #    from the peak, the loss-streak pause, today's order count) are one
+    #    shared verdict, evaluated after step 8 fetches the account value they
+    #    are measured against. The pre-order gate applies the same verdict.
 
     # 7. Extended/Overnight hours check
     from evotrader.tools.market_hours import (
@@ -2546,6 +2571,7 @@ async def check_risk_limits(
     cash_balance: float | None = None
     buying_power: float | None = None
     portfolio_value: float | None = None
+    portfolio: dict | None = None
     try:
         portfolio = await _agentic_portfolio()
         if portfolio:
@@ -2589,20 +2615,17 @@ async def check_risk_limits(
     except Exception as e:
         warnings.append(f"Could not verify cash balance: {e}")
 
-    # 8b. Daily loss, as a share of the real account (see _daily_loss_verdict).
-    account_value = portfolio_value
-    if not account_value and today_pnl < 0:
-        account_value = await _recorded_account_value()
-    loss_violation, loss_warning = _daily_loss_verdict(
-        today_pnl,
-        account_value,
-        limits.max_daily_loss_pct,
-        is_exit=is_exit,
-    )
-    if loss_violation:
-        violations.append(loss_violation)
-    if loss_warning:
-        warnings.append(loss_warning)
+    # 8b. The account-level limits, against the account value just fetched.
+    from evotrader.callbacks.account_rails import evaluate_account_rails
+
+    rails_state = await account_rails_state(portfolio=portfolio if portfolio_value else None)
+    rails = evaluate_account_rails(rails_state, constitution, is_exit=is_exit)
+    violations.extend(rails.violations)
+    warnings.extend(rails.warnings)
+    today_pnl = rails_state.today_pnl
+    consecutive_losses = rails_state.consecutive_losses
+    trade_count = rails_state.trades_today
+    account_value = rails_state.account_value
 
     # 9. Wash sale guard (configurable block/warn) — only for new entries
     wash_sale_risk: dict | None = None
@@ -2669,6 +2692,7 @@ async def check_risk_limits(
             "cash_balance": cash_balance,
             "buying_power": buying_power,
             "wash_sale_risk": wash_sale_risk,
+            "account_rails": rails.report,
         },
     }
 
@@ -2709,7 +2733,6 @@ async def check_option_risk_limits(
     constitution = _config.constitution
     rules = constitution.trading_rules
     limits = constitution.risk_limits
-    breakers = constitution.circuit_breakers
 
     violations: list[str] = []
     warnings: list[str] = []
@@ -2748,41 +2771,16 @@ async def check_option_risk_limits(
             f"Option premium ${total_premium:.2f} exceeds max order value ${limits.max_order_value_usd:.2f}"
         )
 
-    # 6. Daily loss — evaluated after step 9, which fetches the account value
-    #    the limit is a share of.
-    today_pnl = await _journal.get_today_pnl()
-
-    # 7. Consecutive losses circuit breaker
-    # EXIT TRADES ARE EXEMPT — same rationale as equity: blocking a close
-    # traps the agent in a losing position.
-    # The breaker only blocks for `pause_duration_minutes` after the last loss;
-    # once the cooldown expires, trading resumes even if the streak is unbroken.
-    # Session-scoped: the streak resets at each trading session boundary so a
-    # Friday streak cannot block Monday morning trading (see review
-    # 20260727_204248_circuit_breaker_streak_semantics).
+    # 6-8 and 9b. The account-level limits (daily and weekly loss, drawdown,
+    #    the loss-streak pause, today's order count) are one shared verdict,
+    #    evaluated after step 9 fetches the account value. Exits are exempt.
     is_exit = is_exit_action(action)
-    consecutive_losses = await _journal.get_session_consecutive_losses()
-    if consecutive_losses >= breakers.consecutive_losses_pause and not is_exit:
-        last_loss_ts = await _journal.get_last_loss_timestamp()
-        pause_expired = last_loss_ts is not None and datetime.now(UTC) - last_loss_ts > timedelta(
-            minutes=breakers.pause_duration_minutes
-        )
-        if not pause_expired:
-            violations.append(
-                f"Circuit breaker: {consecutive_losses} consecutive losses "
-                f"(limit: {breakers.consecutive_losses_pause}), "
-                f"pause expires {breakers.pause_duration_minutes}min after last loss"
-            )
-
-    # 8. Daily trade count check (exits exempt)
-    trade_count = await _journal.get_trade_count_today()
-    if trade_count >= rules.max_trades_per_day and not is_exit:
-        violations.append(f"Daily trade limit reached: {trade_count}/{rules.max_trades_per_day}")
 
     # 9. Portfolio-proportional premium check + buying power
     cash_balance: float | None = None
     buying_power: float | None = None
     portfolio_value: float | None = None
+    portfolio: dict | None = None
     try:
         portfolio = await _agentic_portfolio()
         if portfolio:
@@ -2812,20 +2810,19 @@ async def check_option_risk_limits(
     except Exception as e:
         warnings.append(f"Could not verify portfolio for option risk check: {e}")
 
-    # 9b. Daily loss, as a share of the real account (see _daily_loss_verdict).
-    account_value = portfolio_value
-    if not account_value and today_pnl < 0:
-        account_value = await _recorded_account_value()
-    loss_violation, loss_warning = _daily_loss_verdict(
-        today_pnl,
-        account_value,
-        limits.max_daily_loss_pct,
-        is_exit=is_exit,
-    )
-    if loss_violation:
-        violations.append(loss_violation)
-    if loss_warning:
-        warnings.append(loss_warning)
+    # 9b. The account-level limits, against the account value just fetched. The
+    #     premium cap was applied above with its own floor; the shared verdict
+    #     is not given the premium here, so the cap is not reported twice.
+    from evotrader.callbacks.account_rails import evaluate_account_rails
+
+    rails_state = await account_rails_state(portfolio=portfolio if portfolio_value else None)
+    rails = evaluate_account_rails(rails_state, constitution, is_exit=is_exit, is_option=True)
+    violations.extend(rails.violations)
+    warnings.extend(rails.warnings)
+    today_pnl = rails_state.today_pnl
+    consecutive_losses = rails_state.consecutive_losses
+    trade_count = rails_state.trades_today
+    account_value = rails_state.account_value
 
     # 10. Validate expiration is not same-day (too risky)
     # datetime and UTC come from the module imports. A local import here made
@@ -2863,6 +2860,7 @@ async def check_option_risk_limits(
             ),
             "consecutive_losses": consecutive_losses,
             "trades_today": trade_count,
+            "account_rails": rails.report,
             "cash_balance": cash_balance,
             "buying_power": buying_power,
             "portfolio_value": portfolio_value,
@@ -3535,6 +3533,20 @@ async def get_open_positions() -> dict:
         "pending_orders": pending_orders,
         "pending_count": len(pending_orders),
     }
+    # The account against the constitution's limits (daily and weekly loss,
+    # drawdown from the peak, loss streak, order count): what a NEW entry would
+    # meet right now. Shown every cycle so a halt is read before an order is
+    # proposed, not discovered when the gate refuses it.
+    if _config is not None and getattr(_config, "constitution", None) is not None:
+        try:
+            from evotrader.callbacks.account_rails import evaluate_account_rails
+
+            rails_state = await account_rails_state()
+            result["account_rails"] = evaluate_account_rails(
+                rails_state, _config.constitution, is_exit=False
+            ).report
+        except Exception as e:  # never break the positions tool over it
+            logger.warning("account rails skipped in get_open_positions: %s", e)
     # The latest broker position sync (daily, between cycles), including its
     # cost-basis check: whether the journal's lots agree with the broker's
     # average cost. A disagreement is flagged there, never corrected.
