@@ -43,8 +43,9 @@ folder layout; each entry says what you need to do.
   order tools, which refuses a new entry past any of them. The drawdown limit
   measures the account against the highest value the metrics job has recorded.
   Exits and protective orders are never blocked. `get_open_positions` reports
-  the account's standing against each limit (`account_rails`) every cycle, so
-  a halt is visible before an order is tried. A limit that cannot be measured
+  the account's standing against each limit (`account_rails`) every cycle,
+  from the journal and the last recorded account value, so a halt is visible
+  before an order is tried. A limit that cannot be measured
   (no account value, no recorded peak) is reported as not evaluated.
 - **The daily indicators include yesterday's close.** The broker's daily bars
   end at the previous session all day long, and the live price was written

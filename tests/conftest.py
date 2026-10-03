@@ -64,6 +64,21 @@ def _signin_folder_is_temporary(tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 
 @pytest.fixture(autouse=True)
+def _practice_broker_is_not_left_bound() -> Iterator[None]:
+    """A test that starts the app binds its practice broker into the tools module
+    and leaves it there. The next tool call that reaches the broker then opens
+    that broker's database, which nothing closes, and its worker thread keeps
+    the whole test process alive after the last test (CI cancelled a run at its
+    20-minute limit on 2026-10-03 for exactly this). Every test starts and ends
+    with the proxy it found."""
+    from evotrader.agents import tools
+
+    before = tools._sim_proxy
+    yield
+    tools._sim_proxy = before
+
+
+@pytest.fixture(autouse=True)
 def _no_live_holdings_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests never ask Yahoo Finance what a fund holds.
 

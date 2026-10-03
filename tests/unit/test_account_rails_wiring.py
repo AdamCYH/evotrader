@@ -125,6 +125,7 @@ class TestThePositionsReport:
         out = await tools.get_open_positions()
         rails = out["account_rails"]
         assert rails["account_value"] == NOW_VALUE and rails["peak_value"] == PEAK
+        assert rails["value_source"] == "recorded", "the positions tool never asks the broker"
         assert rails["drawdown_halt"] is True and rails["entries_blocked"] is True
         assert rails["weekly_loss_limit_usd"] == pytest.approx(0.15 * NOW_VALUE)
 

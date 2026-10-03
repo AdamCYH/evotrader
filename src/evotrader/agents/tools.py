@@ -2394,13 +2394,14 @@ async def _recorded_account_value() -> float | None:
         return None
 
 
-async def account_rails_state(portfolio: dict | None = None) -> Any:
+async def account_rails_state(portfolio: dict | None = None, *, ask_broker: bool = True) -> Any:
     """Everything the account-level limits are measured against, right now.
 
     The broker's account value when it can be asked (``portfolio`` is a result of
-    ``_agentic_portfolio`` a caller already has), else the metrics job's last
-    recorded value; the recorded peak, raised to today's value if that is
-    higher; closed-trade P&L today and over the trailing week; the loss streak
+    ``_agentic_portfolio`` a caller already has; ``ask_broker=False`` skips the
+    call, for a report that must not cost a broker round trip), else the metrics
+    job's last recorded value; the recorded peak, raised to today's value if that
+    is higher; closed-trade P&L today and over the trailing week; the loss streak
     and today's order count from the journal. Never raises: what cannot be read
     is left unknown and named in ``gaps``.
     """
@@ -2410,7 +2411,7 @@ async def account_rails_state(portfolio: dict | None = None) -> Any:
     value: float | None = None
     source = "unavailable"
     try:
-        if portfolio is None:
+        if portfolio is None and ask_broker:
             portfolio = await _agentic_portfolio()
         if portfolio and portfolio.get("total_value"):
             value = float(portfolio["total_value"])
@@ -3536,12 +3537,14 @@ async def get_open_positions() -> dict:
     # The account against the constitution's limits (daily and weekly loss,
     # drawdown from the peak, loss streak, order count): what a NEW entry would
     # meet right now. Shown every cycle so a halt is read before an order is
-    # proposed, not discovered when the gate refuses it.
+    # proposed, not discovered when the gate refuses it. Read from the journal
+    # and the metrics job's last recorded account value: this tool never asked
+    # the broker, and the gate re-measures with the broker's value anyway.
     if _config is not None and getattr(_config, "constitution", None) is not None:
         try:
             from evotrader.callbacks.account_rails import evaluate_account_rails
 
-            rails_state = await account_rails_state()
+            rails_state = await account_rails_state(ask_broker=False)
             result["account_rails"] = evaluate_account_rails(
                 rails_state, _config.constitution, is_exit=False
             ).report
