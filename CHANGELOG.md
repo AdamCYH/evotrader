@@ -34,6 +34,32 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **Shadow channels no longer move the combined signal.** The combined signal
+  is scaled down when few channels corroborate it: below 0.4 of the channels on
+  duty voting, it is multiplied by that share divided by 0.4. The count
+  included channels at weight 0, which is how a new channel runs before it is
+  promoted, so a silent shadow channel counted as an absent witness and a
+  voting one as a corroborating witness. The combined signal then moved from
+  one hour to the next with every weighted input unchanged: with the starter
+  algorithm's three shadow channels in scope during regular hours, two
+  weighted votes read 2 of 8 and were scaled by 0.625. Only channels with
+  weight in the current regime are counted now. **Regular-hours readings are
+  higher than before** wherever a weight-0 channel was in scope (the scale it
+  caused no longer applies), so compare readings across this change with care.
+- **A channel still collecting its session bars counts as on duty.** A channel
+  that needs 20 five-minute bars has 12 at 10:30 ET; it was left out of the
+  count until it had them, so the same votes were scaled differently at 10:30
+  and 11:30. A channel that will have its bars before the close now reports
+  `warming_up` and is counted (`swing_failure_reversal`,
+  `vwap_reclaim_continuation`); one that cannot have them, such as 20 one-hour
+  bars in a 6.5-hour session, stays out as before.
+- **The scale can be checked from the cycle's own record.** The market-data
+  payload reports `participation_numerator` and `participation_denominator`
+  next to `participation_scale`, and the combined signal's metadata names the
+  channels warming up (`warming_up_signals`).
+- **The engine fingerprint covers `algorithms/units.py`,** the move-size rules
+  six strategies share. A change to it would have changed readings without the
+  engine-change notice.
 - **The option chain reaches the money.** The broker lists an expiry's contracts
   from the lowest strike up, a page at a time, and `gather_option_chain` read the
   next-page link from one place only and gave up after five pages. When an
@@ -113,6 +139,12 @@ folder layout; each entry says what you need to do.
 
 ### Changed
 
+- **The momentum vote says when its MACD reading is noise.** It now reports the
+  daily MACD histogram in ATRs (`macd_hist_atr`) and whether it is inside a
+  neutral band of 0.10 ATR (`macd_neutral`, with the band as
+  `macd_neutral_atr`). A histogram of 0.05 ATR makes the MACD part of the vote
+  read -0.14, which an agent can mistake for dissent on a rising day. Reported
+  only: the vote itself is unchanged.
 - **Thresholds on the size of a price move can be set in the instrument's own
   units.** Five thresholds were in percent of price, which silently tunes them
   to one instrument: 0.7% is two thirds of a normal day on SPY and a tenth of

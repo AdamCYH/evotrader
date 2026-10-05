@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.base import TradingAlgorithm, warming_up
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
@@ -111,15 +111,18 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
 
         # ── 1. ABSTAIN GUARDS ──
         if not candles or len(candles) < self._lookback_bars or atr is None or atr <= 0:
-            return AlgoSignal(
-                name=self.name,
-                value=0.0,
-                weight=1.0,
-                metadata={
-                    "applicable": False,
-                    "reason": "insufficient_data",
-                },
-            )
+            meta: dict[str, Any] = {"applicable": False, "reason": "insufficient_data"}
+            # Early in a session in progress the lookback has not filled yet;
+            # the channel is on duty and the composite counts it in the
+            # participation denominator (see base.warming_up).
+            if (
+                atr is not None
+                and atr > 0
+                and snapshot.indicators.vwap_anchor == "current_session"
+                and warming_up(candles or [], self._lookback_bars)
+            ):
+                meta.update(warming_up=True, bars=len(candles), bars_needed=self._lookback_bars)
+            return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
 
         if vwap is None:
             return AlgoSignal(

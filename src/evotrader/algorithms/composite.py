@@ -26,10 +26,13 @@ SIGNAL_EPSILON = 1e-3
 
 
 #: Every module whose code can change a composite value for the same snapshot
-#: and config, relative to the ``evotrader`` package.
+#: and config, relative to the ``evotrader`` package. ``units.py`` holds the
+#: move-size rules six strategies share; it was outside the hash until
+#: 2026-10-05, so a change to it would have moved composites silently.
 _ENGINE_SOURCES = (
     "algorithms/composite.py",
     "algorithms/base.py",
+    "algorithms/units.py",
     "algorithms/strategies",
     "indicators",
 )
@@ -308,10 +311,11 @@ class CompositeStrategy(TradingAlgorithm):
         if detailed.n_additive:
             _participation = detailed.n_applicable / detailed.n_additive
             metadata["participation_ratio"] = round(_participation, 3)
-            # Distinct from participation_ratio: this is the denominator the
-            # attenuation actually applied — of the channels able to vote, how
-            # many spoke. Silence and inapplicability are different failures
-            # and are reported separately.
+            # Distinct from participation_ratio: of the channels able to vote,
+            # how many spoke, shadow channels included. Silence and
+            # inapplicability are different failures and are reported
+            # separately. The attenuation's own counts are
+            # participation_numerator and participation_denominator below.
             metadata["voting_ratio"] = (
                 round(detailed.n_voting / detailed.n_applicable, 3)
                 if detailed.n_applicable
@@ -335,6 +339,19 @@ class CompositeStrategy(TradingAlgorithm):
                 and abs(s.value) < SIGNAL_EPSILON
             )
             metadata["in_scope_count"] = detailed.n_in_scope
+            # On duty, only early: still collecting the session bars they need.
+            metadata["warming_up_signals"] = ", ".join(
+                s.name
+                for s in detailed.signals
+                if s.metadata.get("role") != "multiplier"
+                and not s.metadata.get("applicable", True)
+                and s.metadata.get("warming_up") is True
+            )
+            # The counts the attenuation used (weighted channels only) and the
+            # factor it applied.
+            metadata["participation_numerator"] = detailed.participation_numerator
+            metadata["participation_denominator"] = detailed.participation_denominator
+            metadata["participation_scale"] = round(detailed.participation_scale, 4)
             # Where MAX_AMPLIFICATION actually bound. Empty on most cycles; when
             # it lists EVERY pool member the cap divided out and did nothing.
             metadata["amplification_capped"] = ", ".join(detailed.amplification_capped)
@@ -519,8 +536,19 @@ class CompositeStrategy(TradingAlgorithm):
             for s in applicable
             if s.metadata.get("in_scope", True) or abs(s.value) >= SIGNAL_EPSILON
         ]
+        # On duty but early: not yet applicable only because the session has
+        # not produced the bars the channel needs, which it will before the
+        # close (base.warming_up). Counted in the denominator below so the
+        # scale does not change with the hour.
+        warming = [
+            s
+            for s in additive
+            if not s.metadata.get("applicable", True) and s.metadata.get("warming_up") is True
+        ]
 
         MIN_PARTICIPATION = 0.4
+        participation_numerator = 0
+        participation_denominator = 0
         if additive:
             # Drive participation off signals that actually emitted a
             # directional read, relative to channels able to vote this cycle.
@@ -557,10 +585,45 @@ class CompositeStrategy(TradingAlgorithm):
             # A channel that VOTED is always counted in scope regardless of its
             # marker, so participation can never exceed 1.0 even if a strategy
             # emits a contradictory pair.
-            denom = (
-                len(in_scope) if in_scope else (len(applicable) if applicable else len(additive))
+            #
+            # ── ONLY CHANNELS WITH WEIGHT COUNT ──────────────
+            # A shadow channel (weight 0.0 in this regime) is recorded in the
+            # snapshot but carries no authority, so it is neither a witness
+            # when it votes nor an absent one when it is silent. Counting it
+            # moved the headline with every weighted input unchanged: with two
+            # weighted channels voting and three silent shadows in scope, 2 of
+            # 8 scaled the composite by 0.625; one shadow voting turned that
+            # into 3 of 8 and 0.9375; on the weighted channels alone it is 2 of
+            # 5 and no scale. Silent shadows did most of the damage, because
+            # they sit in the denominator on every regular-hours cycle.
+            #
+            # ── WARMING UP COUNTS ────────────────────────────
+            # A weighted channel still collecting its session bars is on duty
+            # (base.warming_up), so it is in the denominator from the first
+            # cycle that can measure the bar pace. Without it the same two
+            # votes read 2 of 4 at 10:30 ET and 2 of 5 at 11:30, because a
+            # 20-bar channel fills at 11:10 on five-minute bars.
+            #
+            # With no weighted channel on duty (a configuration that weights
+            # only channels that cannot speak) the composite is zero whatever
+            # the scale, and the count falls back to every channel as before.
+            duty = [*in_scope, *warming]
+            weighted_duty = [s for s in duty if s.weight > 0]
+            if weighted_duty:
+                participation_numerator = sum(1 for s in voting if s.weight > 0)
+                participation_denominator = len(weighted_duty)
+            else:
+                participation_numerator = len(voting)
+                participation_denominator = (
+                    len(in_scope)
+                    if in_scope
+                    else (len(applicable) if applicable else len(additive))
+                )
+            participation = (
+                participation_numerator / participation_denominator
+                if participation_denominator
+                else 0.0
             )
-            participation = len(voting) / denom if denom else 0.0
             if participation < MIN_PARTICIPATION:
                 participation_scale = participation / MIN_PARTICIPATION
                 composite_value *= participation_scale
@@ -581,6 +644,8 @@ class CompositeStrategy(TradingAlgorithm):
             n_in_scope=len(in_scope),
             composite_unattenuated=max(-1.0, min(1.0, composite_unattenuated)),
             participation_scale=participation_scale,
+            participation_numerator=participation_numerator,
+            participation_denominator=participation_denominator,
         )
 
     def _get_regime_weights(self, regime: MarketRegime) -> dict[str, float]:

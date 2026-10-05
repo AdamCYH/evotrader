@@ -662,6 +662,10 @@ def _composite_provenance(detailed) -> dict:
         # lose the two extra keys rather than the whole provenance block.
         "composite_unattenuated": (round(_unattenuated, 4) if _unattenuated is not None else None),
         "participation_scale": round(_scale, 4),
+        # What the scale was computed from: weighted channels that voted, over
+        # weighted channels on duty. Below 0.4 the scale is their ratio / 0.4.
+        "participation_numerator": getattr(detailed, "participation_numerator", None),
+        "participation_denominator": getattr(detailed, "participation_denominator", None),
         "attenuation_applied": _scale < 1.0,
     }
 

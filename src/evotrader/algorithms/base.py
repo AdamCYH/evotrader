@@ -8,10 +8,50 @@ ensemble composition via the registry system.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from itertools import pairwise
 from typing import Any
 
-from evotrader.models.market import MarketSnapshot
+from evotrader.models.market import OHLCV, MarketSnapshot
 from evotrader.models.signals import AlgoSignal
+
+#: Minutes in a full regular session, 9:30 to 16:00 ET.
+REGULAR_SESSION_MINUTES = 390.0
+
+
+def warming_up(candles: Sequence[OHLCV], bars_needed: int) -> bool:
+    """Whether a channel short of session bars will have enough before the close.
+
+    A channel that needs ``bars_needed`` bars of the current session and has
+    fewer is in one of two states, and the composite's participation scale
+    treats them differently:
+
+    * **warming up**: the session is producing bars at a pace that reaches
+      ``bars_needed`` before the close. The channel is on duty, only early, and
+      it is counted in the participation denominator, so the same votes are
+      scaled alike at 10:30 and at 14:30. A 20-bar channel has 12 five-minute
+      bars at 10:30 ET and 24 at 11:30, so without this the denominator grew
+      by one between those two cycles for no market reason.
+    * **unreachable**: a full session never holds that many bars at this pace
+      (20 one-hour bars do not fit in 6.5 hours). That channel cannot speak
+      today at all and stays out, like an off-duty one.
+
+    The pace is the smallest positive gap between consecutive bars (a missing
+    bar can only widen a gap). Two bars are needed to measure it, so with
+    fewer the answer is False: the pre-market and opening-print cycles keep the
+    denominator they had.
+    """
+    n = len(candles)
+    if n < 2 or n >= bars_needed:
+        return False
+    gaps = [
+        (later.timestamp - earlier.timestamp).total_seconds() / 60.0
+        for earlier, later in pairwise(candles)
+    ]
+    pace = min((g for g in gaps if g > 0), default=None)
+    if pace is None:
+        return False
+    return REGULAR_SESSION_MINUTES / pace >= bars_needed
 
 
 class TradingAlgorithm(ABC):

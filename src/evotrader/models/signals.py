@@ -106,6 +106,21 @@ class CompositeAlgoSignal(BaseModel):
         le=1.0,
         description="Factor the participation attenuation applied. 1.0 = none.",
     )
+    # The two counts the scale was computed from, so it can be checked from the
+    # cycle's own record: scale = (numerator / denominator) / 0.4 when that
+    # ratio is under 0.4, else 1.0. Both count only channels with weight in this
+    # regime; the denominator also counts channels still collecting their
+    # session bars. 0 and 0 when there were no additive channels.
+    participation_numerator: int = Field(
+        default=0,
+        ge=0,
+        description="Weighted channels that voted, as counted by the attenuation.",
+    )
+    participation_denominator: int = Field(
+        default=0,
+        ge=0,
+        description="Weighted channels on duty (in scope or warming up), as counted.",
+    )
     # Names of survivors that hit MAX_AMPLIFICATION during renormalization.
     # When the cap binds on EVERY survivor it divides out of the subsequent
     # normalisation and has no effect at all, so its real influence is only

@@ -24,6 +24,13 @@ from evotrader.indicators.volume import (
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
+#: A daily MACD histogram smaller than this many ATRs is reported as neutral
+#: (``macd_neutral``). It is a reading aid only: the value of the channel does
+#: not change. At 0.10 ATR the MACD sub-signal reads inside +/-0.27. Over three
+#: years of daily bars the band holds the quietest quarter of MSTR's days (25%)
+#: and about 40% of QQQ's and SPY's.
+MACD_NEUTRAL_ATR = 0.10
+
 
 class MomentumStrategy(TradingAlgorithm):
     """Trend-following strategy based on moving average crossovers.
@@ -135,6 +142,12 @@ class MomentumStrategy(TradingAlgorithm):
             )
 
         # Combine: 60% MA crossover, 40% MACD
+        macd_hist_atr = (
+            round(macd_h / ind.atr_14, 4)
+            if macd_h is not None and ind.atr_14 is not None and ind.atr_14 > 0
+            else None
+        )
+
         raw_signal = 0.6 * ma_sig + 0.4 * macd_sig
 
         # Intraday-divergence dampener: daily MAs lag multi-day reversals.
@@ -228,6 +241,17 @@ class MomentumStrategy(TradingAlgorithm):
             metadata={
                 "ma_signal": ma_sig,
                 "macd_signal": macd_sig,
+                # The daily MACD histogram in ATRs, signed, and whether it is
+                # inside the neutral band. A histogram of 0.05 ATR makes the
+                # MACD sub-signal read -0.14, small enough to be noise and
+                # large enough to be read as dissent on a day the price rises.
+                # Inside the band it is neither a co-sign nor a dissent; the
+                # flag is reported so that is not decided anew every cycle.
+                "macd_hist_atr": macd_hist_atr,
+                "macd_neutral": (
+                    abs(macd_hist_atr) < MACD_NEUTRAL_ATR if macd_hist_atr is not None else None
+                ),
+                "macd_neutral_atr": MACD_NEUTRAL_ATR,
                 # Saturation telemetry: distinguishes a genuine extreme
                 # read from a clamped one.  Without this, an uninformative
                 # rail-pinned -1.0 is indistinguishable downstream from a

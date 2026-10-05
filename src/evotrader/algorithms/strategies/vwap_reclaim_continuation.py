@@ -62,7 +62,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.base import TradingAlgorithm, warming_up
 from evotrader.indicators.volume import select_relative_volume, validate_rvol_source
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
@@ -148,6 +148,15 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
             meta["applicable"] = False
             meta["reason"] = "insufficient_intraday_candles"
             meta["candle_count"] = len(candles) if candles else 0
+            # On duty, only early: counted in the participation denominator
+            # (see base.warming_up).
+            if (
+                atr is not None
+                and atr > 0
+                and ind.vwap_anchor == "current_session"
+                and warming_up(candles or [], self._min_dip_bars + 1)
+            ):
+                meta["warming_up"] = True
             return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
         if vwap is None or atr is None or atr <= 0:
             meta["applicable"] = False
