@@ -60,6 +60,14 @@ folder layout; each entry says what you need to do.
 - **The engine fingerprint covers `algorithms/units.py`,** the move-size rules
   six strategies share. A change to it would have changed readings without the
   engine-change notice.
+- **The attribution record carries the participation scale and its counts.**
+  `signal_attribution` has had `composite_unattenuated` and
+  `participation_scale` columns since migration 0024, but only the strategy
+  agent wrote the row and it was never asked for them, so they stayed empty.
+  After each cycle they are now filled, with `participation_numerator` and
+  `participation_denominator` (migration 0025), from the market-data response
+  the cycle keeps in its log. Past rows are filled the same way on the first
+  cycle after the update, where the response has them.
 - **The option chain reaches the money.** The broker lists an expiry's contracts
   from the lowest strike up, a page at a time, and `gather_option_chain` read the
   next-page link from one place only and gave up after five pages. When an

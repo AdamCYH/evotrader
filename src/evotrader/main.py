@@ -1168,6 +1168,9 @@ async def start(
                         # stored — so the calibration report can score each
                         # channel on its own calls, not only the one that led.
                         await store.backfill_channel_votes()
+                        # The participation scale and its counts, from the
+                        # market-data response this cycle kept.
+                        await store.backfill_participation()
                         scored = await AttributionScorer(store, _fetch_daily_candles).run()
                         if scored.get("scored") or scored.get("backfilled_5d"):
                             logger.info(

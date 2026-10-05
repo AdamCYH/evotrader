@@ -54,6 +54,8 @@ class SignalAttributionStore:
         trigger_atr: float | None = None,
         composite_unattenuated: float | None = None,
         participation_scale: float | None = None,
+        participation_numerator: int | None = None,
+        participation_denominator: int | None = None,
         timestamp: str | None = None,
         agent_absent: bool = False,
     ) -> int | None:
@@ -76,8 +78,9 @@ class SignalAttributionStore:
                         final_direction, final_conviction, risk_budget, position_size,
                         traded, price_at_decision,
                         deviation_atr, trigger_atr, agent_absent,
-                        composite_unattenuated, participation_scale
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        composite_unattenuated, participation_scale,
+                        participation_numerator, participation_denominator
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         timestamp or datetime.now(UTC).isoformat(),
@@ -105,6 +108,8 @@ class SignalAttributionStore:
                         1 if agent_absent else 0,
                         composite_unattenuated,
                         participation_scale,
+                        participation_numerator,
+                        participation_denominator,
                     ),
                 )
                 return cur.lastrowid
@@ -250,6 +255,75 @@ class SignalAttributionStore:
                 return filled
         except Exception as e:
             logger.error("Failed to backfill channel votes: %s", e)
+            return 0
+
+    async def backfill_participation(self, limit: int = 5000) -> int:
+        """Fill the participation scale and its counts from the cycle's own record.
+
+        ``composite_unattenuated``, ``participation_scale``,
+        ``participation_numerator`` and ``participation_denominator`` are in
+        the market-data tool's response every cycle, and that response is kept
+        in ``agent_thought_log``. The first two had columns from 2026-09-28,
+        but only the strategy agent wrote them and it was never asked to, so
+        every row had them empty. Taking them from the record, as
+        ``backfill_channel_votes`` does, needs no transcription and fills past
+        rows too (the counts exist only from 2026-10-05).
+
+        Uses the session's market-data response at or before the row (the
+        latest one if clocks disagree). Fills only rows whose scale is still
+        empty and never overwrites a value already written. Returns the number
+        of rows filled.
+        """
+        path = "$.response.algo_signal."
+        try:
+            async with self._db.transaction() as conn:
+                cur = await conn.execute(
+                    f"""
+                    SELECT a.id,
+                           json_extract(t.meta, '{path}composite_unattenuated') AS unattenuated,
+                           json_extract(t.meta, '{path}participation_scale') AS scale,
+                           json_extract(t.meta, '{path}participation_numerator') AS numerator,
+                           json_extract(t.meta, '{path}participation_denominator') AS denominator
+                    FROM signal_attribution a
+                    JOIN agent_thought_log t ON t.id = (
+                        SELECT t2.id FROM agent_thought_log t2
+                        WHERE t2.session_id = a.session_id
+                          AND t2.event_type = 'tool_response'
+                          AND t2.content = 'gather_market_data'
+                          AND json_valid(t2.meta)
+                        ORDER BY (t2.timestamp <= a.timestamp) DESC, t2.timestamp DESC
+                        LIMIT 1
+                    )
+                    WHERE a.participation_scale IS NULL AND a.session_id IS NOT NULL
+                    ORDER BY a.timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                rows = [dict(r) for r in await cur.fetchall()]
+                filled = 0
+                for row in rows:
+                    if row["scale"] is None:
+                        continue
+                    await conn.execute(
+                        "UPDATE signal_attribution SET "
+                        "composite_unattenuated = COALESCE(composite_unattenuated, ?), "
+                        "participation_scale = ?, "
+                        "participation_numerator = COALESCE(participation_numerator, ?), "
+                        "participation_denominator = COALESCE(participation_denominator, ?) "
+                        "WHERE id = ? AND participation_scale IS NULL",
+                        (
+                            row["unattenuated"],
+                            row["scale"],
+                            row["numerator"],
+                            row["denominator"],
+                            row["id"],
+                        ),
+                    )
+                    filled += 1
+                return filled
+        except Exception as e:
+            logger.error("Failed to backfill participation: %s", e)
             return 0
 
     async def backfill_algo_only_rows(self, limit: int = 200) -> int:

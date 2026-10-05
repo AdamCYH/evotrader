@@ -2473,6 +2473,11 @@ async def log_signal_attribution(attribution_json: str) -> dict:
         # see migration 0024.
         "composite_unattenuated",
         "participation_scale",
+        # What the scale was computed from (migration 0025). All four are also
+        # filled from the cycle's own record after the cycle, so the agent is
+        # not asked for them.
+        "participation_numerator",
+        "participation_denominator",
     }
     kwargs = {k: v for k, v in data.items() if k in allowed}
     if "traded" in kwargs:
