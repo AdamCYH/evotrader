@@ -307,6 +307,26 @@ class ThoughtLogger:
             await conn.execute("DELETE FROM cycle_runs WHERE session_id = ?", (session_id,))
         logger.info("Deleted cycle logs from DB: session_id=%s", session_id)
 
+    async def get_composite_readings(self, since: str | None = None) -> list[dict[str, Any]]:
+        """Every stored combined-signal reading, oldest first.
+
+        ``since`` is a UTC ISO timestamp; None returns them all. Only the four
+        fields the account chart's signal overlay needs (timestamp, ticker,
+        composite_signal, regime), with no row limit, unlike
+        :meth:`get_market_snapshots`, which caps the market panel's history.
+        """
+        query = (
+            "SELECT timestamp, ticker, composite_signal, regime FROM market_snapshots "
+            "WHERE composite_signal IS NOT NULL"
+        )
+        params: tuple[str, ...] = ()
+        if since:
+            query += " AND timestamp >= ?"
+            params = (since,)
+        query += " ORDER BY timestamp"
+        async with self._db.connection() as conn, conn.execute(query, params) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
     async def get_market_snapshots(self, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch the most recent technical indicators and algorithm signals from the market_snapshots table."""
         points = []

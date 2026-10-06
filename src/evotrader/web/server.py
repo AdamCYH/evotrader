@@ -13,7 +13,7 @@ import os
 import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -862,6 +862,30 @@ def create_app(
                 pass
 
         return {"points": points, "latest": latest}
+
+    @app.get("/api/chart/signal-daily", dependencies=[Depends(verify_auth)])
+    async def get_signal_daily(period: str = "all") -> dict[str, Any]:
+        """The combined signal per trading day, for the account chart's overlay.
+
+        One row per US Eastern date (``web.signal_summary``), cut at the same
+        date as the equity curve for the period, so the two line up day by day.
+        """
+        from evotrader.utils import get_period_cutoff_dt
+        from evotrader.web.signal_summary import daily_signal_summary
+
+        cutoff = get_period_cutoff_dt(period, ET) if period and period != "all" else None
+        # A day of margin: an Eastern date starts four or five hours into the UTC one.
+        since = (cutoff - timedelta(days=1)).astimezone(UTC).isoformat() if cutoff else None
+        try:
+            readings = await app.state.thought_logger.get_composite_readings(since)
+        except Exception as e:
+            logger.error("Failed to read the signal history: %s", e)
+            return {"days": [], "error": "signal history unavailable"}
+        days = daily_signal_summary(readings)
+        if cutoff:
+            first = cutoff.strftime("%Y-%m-%d")
+            days = [d for d in days if d["date"] >= first]
+        return {"days": days}
 
     @app.get("/api/thoughts", dependencies=[Depends(verify_auth)])
     async def get_thoughts(session_id: str | None = None) -> dict[str, Any]:

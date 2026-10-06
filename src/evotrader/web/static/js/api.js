@@ -109,6 +109,14 @@ export async function fetchTechChart(limit = 500, period = "all") {
 }
 
 /**
+ * The combined signal per trading day for the period (average, range, count),
+ * for the account chart's signal overlay.
+ */
+export async function fetchSignalDaily(period = "all") {
+    return apiFetch(`/api/chart/signal-daily?period=${encodeURIComponent(period)}`);
+}
+
+/**
  * Fetch unique past sessions (cycles)
  */
 export async function fetchCycles() {

@@ -6,6 +6,27 @@ folder layout; each entry says what you need to do.
 
 ## Unreleased
 
+### Added — in the console
+
+- **The combined signal on the account chart.** A **Signal** button on the
+  Account / P&L chart splits it into two panes on the same dates: the curve on
+  top, each day lightly tinted green or red by the way the day's average signal
+  leaned (stronger days darker), and below it the day's average as a bar with a
+  thin line for its range. Hovering a day shows the value, its change from the
+  day before, the signal's average and lean, its range, how many readings it
+  had and the instrument. A strip under the chart says how often a
+  long-leaning day was followed by a gain by the next day the system ran, how
+  often a short-leaning day was followed by a loss, and the correlation
+  between the two, with the number of days; over a few weeks that describes the
+  period, it is not evidence of an edge. The choice is remembered in the
+  browser. The daily figures come from a new endpoint,
+  `/api/chart/signal-daily?period=…`, one row per US Eastern date, the same
+  calendar the equity curve uses.
+- **The account chart is easier to read with or without the overlay:** a
+  smoother line over a soft fill, points only on hover and on deposit days,
+  short date labels, round price levels, and one tooltip for the whole day
+  with a guide line through it.
+
 ### Added — off unless an algorithm version sets them
 
 - **A `gap_fail_continuation` channel, in shadow.** The `gap` channel reads

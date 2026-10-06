@@ -23,7 +23,7 @@
     <!-- Marked for Markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="stylesheet" href="style.css?v=3">
 </head>
 
 <body>
@@ -213,6 +213,11 @@
                                 <div style="display: flex; gap: 0.5rem; align-items: center;">
                                     <button id="btn-chart-tab-account" class="btn btn-sm btn-primary">Account</button>
                                     <button id="btn-chart-tab-pnl" class="btn btn-sm btn-secondary">P&L</button>
+                                    <button id="btn-chart-signal-overlay" class="btn btn-sm btn-signal-toggle"
+                                        aria-pressed="false"
+                                        title="Overlay the combined signal: each day's average under the curve, and every day tinted by the way it leaned">
+                                        <i class="fa-solid fa-wave-square"></i> Signal
+                                    </button>
                                     <button id="btn-log-deposit" class="btn btn-sm btn-ghost"
                                         title="Log a deposit or withdrawal to calibrate the equity curve">
                                         <i class="fa-solid fa-money-bill-transfer"></i> Adjust
@@ -222,6 +227,11 @@
                             <!-- Equity Chart Canvas -->
                             <div class="chart-container" id="perf-chart-container" style="position: relative; height: 210px; width: 100%;">
                                 <canvas id="perfChart"></canvas>
+                            </div>
+                            <!-- Signal overlay: how the curve moved after the days the signal leaned -->
+                            <div id="signal-overlay-insight" class="overlay-insight" hidden>
+                                <span class="insight-title"><i class="fa-solid fa-wave-square"></i> The next day</span>
+                                <div class="insight-body"></div>
                             </div>
                             <!-- Account stats -->
                             <div id="indicator-grid-account" class="indicator-grid">
@@ -1225,7 +1235,7 @@
     </div>
 
     <!-- Modular Application Coordinator -->
-    <script type="module" src="js/app.js?v=6"></script>
+    <script type="module" src="js/app.js?v=7"></script>
 </body>
 
 </html>

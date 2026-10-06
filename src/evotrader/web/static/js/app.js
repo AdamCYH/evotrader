@@ -9,6 +9,7 @@ import {
     channelBreakdown, etLong, formatPct, isLiveSession, relativeVolume,
     signalLean, vwapDistance,
 } from "./components/signal_display.js";
+import { alignSignalDays, equityValues, nextDayFollowThrough } from "./components/equity_overlay.js";
 import { initMemoryController } from "./memory_controller.js";
 import {
     openDetailDrawer, closeDetailDrawer, switchDrawerTab,
@@ -68,6 +69,8 @@ const state = {
     isInitialLoad: true,
     drawerExpanded: localStorage.getItem("gd_drawer_expanded") === "true",
     chartMode: "account",  // 'account' | 'pnl'
+    // The combined signal drawn under the account / P&L curve (remembered).
+    signalOverlay: localStorage.getItem("gd_perf_signal_overlay") === "true",
     techChartMode: "signals", // 'signals' | 'strategies' | 'technicals'
     performancePeriod: "week",
     latestTechPoints: [],
@@ -155,6 +158,7 @@ const holdingsTableBody = document.getElementById("holdings-table-body");
 const holdingsTotalPnl = document.getElementById("holdings-total-pnl");
 const btnChartTabAccount = document.getElementById("btn-chart-tab-account");
 const btnChartTabPnl = document.getElementById("btn-chart-tab-pnl");
+const btnChartSignal = document.getElementById("btn-chart-signal-overlay");
 const btnLogDeposit = document.getElementById("btn-log-deposit");
 const perfChartTitle = document.getElementById("perf-chart-title");
 const indicatorGridAccount = document.getElementById("indicator-grid-account");
@@ -658,6 +662,17 @@ function setupEventHandlers() {
     if (btnChartTabAccount) btnChartTabAccount.addEventListener("click", () => switchChartTab("account"));
     if (btnChartTabPnl) btnChartTabPnl.addEventListener("click", () => switchChartTab("pnl"));
 
+    // Signal overlay on the account / P&L chart
+    showSignalToggle();
+    if (btnChartSignal) {
+        btnChartSignal.addEventListener("click", () => {
+            state.signalOverlay = !state.signalOverlay;
+            localStorage.setItem("gd_perf_signal_overlay", String(state.signalOverlay));
+            showSignalToggle();
+            refreshPerfChart();
+        });
+    }
+
     // Technical & Signal Chart Mode Tabs (Signals vs Strategies vs Technicals)
     const tabSignals = document.getElementById("tab-chart-signals");
     const tabStrategies = document.getElementById("tab-chart-strategies");
@@ -898,14 +913,105 @@ function setupEventHandlers() {
 async function refreshPerfChart() {
     try {
         const metrics = await api.fetchPortfolioMetrics(state.performancePeriod);
-        const adj = metrics.adjustments || [];
-        const startingValue = metrics.starting_value || 0;
-        const totalCapitalBase = metrics.total_capital_base || 0;
-        perfChart.showEquityCurve(metrics.history, adj, state.chartMode, startingValue);
-        updateEquityStats(metrics.history, adj, state.chartMode, startingValue, totalCapitalBase);
+        await renderPerfChart(metrics);
     } catch (err) {
         console.error("Failed to refresh performance chart:", err);
     }
+}
+
+/** The toggle's pressed state follows state.signalOverlay. */
+function showSignalToggle() {
+    if (!btnChartSignal) return;
+    btnChartSignal.classList.toggle("active", state.signalOverlay);
+    btnChartSignal.setAttribute("aria-pressed", String(state.signalOverlay));
+}
+
+/**
+ * Draw the equity curve for this period's metrics, with the combined signal
+ * under it when the overlay is on, then the stat badges and the overlay's
+ * next-day summary.
+ */
+async function renderPerfChart(metrics) {
+    const history = metrics.history || [];
+    const adj = metrics.adjustments || [];
+    const startingValue = metrics.starting_value || 0;
+    const totalCapitalBase = metrics.total_capital_base || 0;
+    let signalDays = null;
+    let overlayError = false;
+    if (state.signalOverlay) {
+        try {
+            const res = await api.fetchSignalDaily(state.performancePeriod);
+            signalDays = alignSignalDays(history, res.days || []);
+        } catch (err) {
+            console.warn("Failed to load the signal history:", err);
+            overlayError = true;
+        }
+    }
+    const container = document.getElementById("perf-chart-container");
+    if (container) container.classList.toggle("with-signal", !!signalDays);
+    perfChart.showEquityCurve(history, adj, state.chartMode, startingValue, signalDays);
+    updateEquityStats(history, adj, state.chartMode, startingValue, totalCapitalBase);
+    renderSignalInsight(history, signalDays, overlayError);
+}
+
+/**
+ * The strip under the chart: after the days the signal leaned one way, how
+ * often the curve moved that way by the next day the system ran.
+ */
+function renderSignalInsight(history, signalDays, failed = false) {
+    const box = document.getElementById("signal-overlay-insight");
+    if (!box) return;
+    box.hidden = !state.signalOverlay;
+    if (!state.signalOverlay) return;
+    const body = box.querySelector(".insight-body");
+    if (!body) return;
+    body.replaceChildren();
+
+    const note = (text) => {
+        const span = document.createElement("span");
+        span.className = "insight-muted";
+        span.textContent = text;
+        body.append(span);
+    };
+    const chip = (tone, strong, text, title) => {
+        const span = document.createElement("span");
+        span.className = `insight-chip insight-${tone}`;
+        const dot = document.createElement("i");
+        dot.className = "insight-dot";
+        const b = document.createElement("b");
+        b.textContent = strong;
+        span.append(dot, b, document.createTextNode(" " + text));
+        if (title) span.title = title;
+        body.append(span);
+    };
+
+    box.title = "Each day's average combined signal against the change in the curve by the next day " +
+        "the system ran (the account without deposits, or realized P&L).";
+    if (failed || !signalDays) return note("Signal history unavailable.");
+    if (!signalDays.some(Boolean)) return note("No signal readings in this period.");
+
+    const stats = nextDayFollowThrough(equityValues(history, state.chartMode), signalDays);
+    if (stats.days === 0) return note("Needs a second day with readings to compare.");
+    const gain = state.chartMode === "pnl" ? "a realized gain" : "a gain";
+    const loss = state.chartMode === "pnl" ? "a realized loss" : "a loss";
+    if (stats.long.days) {
+        chip("long", `${stats.long.up} of ${stats.long.days}`, `long-leaning days were followed by ${gain}`);
+    } else {
+        note("No long-leaning days.");
+    }
+    if (stats.short.days) {
+        chip("short", `${stats.short.down} of ${stats.short.days}`, `short-leaning days were followed by ${loss}`);
+    } else {
+        note("No short-leaning days.");
+    }
+    const r = stats.r === null ? "n/a" : (stats.r >= 0 ? "+" : "\u2212") + Math.abs(stats.r).toFixed(2);
+    chip(
+        "neutral",
+        r,
+        `correlation of the day's signal with the next day's change · ${stats.days} day${stats.days === 1 ? "" : "s"}`,
+        "Each day's average combined signal against the change in the curve to the next day " +
+        "the system ran. Over a few weeks this describes the period; it is not evidence of an edge.",
+    );
 }
 
 /** Refresh the technical and algorithm signals chart */
@@ -1110,11 +1216,7 @@ async function loadDashboardData() {
         // Always populate the performance chart (left panel — period-filtered)
         try {
             const metrics = await api.fetchPortfolioMetrics(state.performancePeriod);
-            const adj = metrics.adjustments || [];
-            const startingValue = metrics.starting_value || 0;
-            const totalCapitalBase = metrics.total_capital_base || 0;
-            perfChart.showEquityCurve(metrics.history, adj, state.chartMode, startingValue);
-            updateEquityStats(metrics.history, adj, state.chartMode, startingValue, totalCapitalBase);
+            await renderPerfChart(metrics);
         } catch (chartErr) {
             console.warn("Failed to load portfolio metrics for chart:", chartErr);
         }

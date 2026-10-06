@@ -4004,3 +4004,120 @@ input:checked + .slider:before {
     .driver-row { grid-template-columns: minmax(96px, 1fr) 1fr 46px 58px; gap: 0.4rem; }
     .drivers-quiet { grid-template-columns: 1fr; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Account chart: the combined-signal overlay
+   ═══════════════════════════════════════════════════════════════ */
+
+/* The toggle: a quiet outline until pressed, then a pill in ink with a
+   green-to-red bar, the overlay's two colours. */
+.btn-signal-toggle {
+    background: var(--bg-light);
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+    position: relative;
+}
+
+.btn-signal-toggle:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-hover);
+}
+
+.btn-signal-toggle.active {
+    background: #1f2937;
+    color: #ffffff;
+    border-color: #1f2937;
+    box-shadow: inset 0 -2px 0 0 transparent;
+}
+
+.btn-signal-toggle.active::after {
+    content: "";
+    position: absolute;
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: 2px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--emerald), #94a3b8, var(--crimson));
+}
+
+.btn-signal-toggle.active:hover:not(:disabled) {
+    background: #111827;
+    border-color: #111827;
+}
+
+#perf-chart-container.with-signal {
+    height: 270px !important;
+}
+
+/* The strip under the chart: what happened by the next run. */
+.overlay-insight {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    background: linear-gradient(180deg, var(--bg-light), var(--bg-card));
+}
+
+.overlay-insight[hidden] {
+    display: none;
+}
+
+.insight-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.insight-body {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.5rem;
+    align-items: center;
+}
+
+.insight-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.18rem 0.55rem 0.18rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+.insight-chip b {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.insight-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: #94a3b8;
+    flex: none;
+}
+
+.insight-long .insight-dot { background: var(--emerald); }
+.insight-short .insight-dot { background: var(--crimson); }
+.insight-neutral { cursor: help; }
+
+.insight-muted {
+    font-size: 0.74rem;
+    color: var(--text-dim);
+}
