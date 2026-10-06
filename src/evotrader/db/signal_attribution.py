@@ -278,32 +278,39 @@ class SignalAttributionStore:
         try:
             async with self._db.transaction() as conn:
                 cur = await conn.execute(
-                    f"""
-                    SELECT a.id,
-                           json_extract(t.meta, '{path}composite_unattenuated') AS unattenuated,
-                           json_extract(t.meta, '{path}participation_scale') AS scale,
-                           json_extract(t.meta, '{path}participation_numerator') AS numerator,
-                           json_extract(t.meta, '{path}participation_denominator') AS denominator
-                    FROM signal_attribution a
-                    JOIN agent_thought_log t ON t.id = (
-                        SELECT t2.id FROM agent_thought_log t2
-                        WHERE t2.session_id = a.session_id
-                          AND t2.event_type = 'tool_response'
-                          AND t2.content = 'gather_market_data'
-                          AND json_valid(t2.meta)
-                        ORDER BY (t2.timestamp <= a.timestamp) DESC, t2.timestamp DESC
-                        LIMIT 1
-                    )
-                    WHERE a.participation_scale IS NULL AND a.session_id IS NOT NULL
-                    ORDER BY a.timestamp DESC
-                    LIMIT ?
-                    """,
+                    "SELECT id, timestamp, session_id FROM signal_attribution "
+                    "WHERE participation_scale IS NULL AND session_id IS NOT NULL "
+                    "ORDER BY timestamp DESC LIMIT ?",
                     (limit,),
                 )
                 rows = [dict(r) for r in await cur.fetchall()]
                 filled = 0
                 for row in rows:
-                    if row["scale"] is None:
+                    # One lookup per row with the row's values as parameters, as
+                    # backfill_channel_votes does. A single joined query needs the
+                    # row's timestamp inside a subquery's ORDER BY, and SQLite
+                    # before 3.50 (Ubuntu 24.04 ships 3.45) rejects that with
+                    # "no such column".
+                    found = await (
+                        await conn.execute(
+                            f"""
+                            SELECT json_extract(meta, '{path}composite_unattenuated') AS unattenuated,
+                                   json_extract(meta, '{path}participation_scale') AS scale,
+                                   json_extract(meta, '{path}participation_numerator') AS numerator,
+                                   json_extract(meta, '{path}participation_denominator')
+                                       AS denominator
+                            FROM agent_thought_log
+                            WHERE session_id = ?
+                              AND event_type = 'tool_response'
+                              AND content = 'gather_market_data'
+                              AND json_valid(meta)
+                            ORDER BY (timestamp <= ?) DESC, timestamp DESC
+                            LIMIT 1
+                            """,
+                            (row["session_id"], row["timestamp"]),
+                        )
+                    ).fetchone()
+                    if not found or found["scale"] is None:
                         continue
                     await conn.execute(
                         "UPDATE signal_attribution SET "
@@ -313,10 +320,10 @@ class SignalAttributionStore:
                         "participation_denominator = COALESCE(participation_denominator, ?) "
                         "WHERE id = ? AND participation_scale IS NULL",
                         (
-                            row["unattenuated"],
-                            row["scale"],
-                            row["numerator"],
-                            row["denominator"],
+                            found["unattenuated"],
+                            found["scale"],
+                            found["numerator"],
+                            found["denominator"],
                             row["id"],
                         ),
                     )
