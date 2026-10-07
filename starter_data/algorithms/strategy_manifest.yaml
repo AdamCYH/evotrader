@@ -84,3 +84,12 @@ strategies:
     # Shadow mode too: it runs and is recorded at weight 0 in every regime.
     status: active
     added_in: v001
+
+  vwap_reclaim_fade:
+    module: evotrader.algorithms.strategies.vwap_reclaim_fade
+    class: VwapReclaimFadeStrategy
+    description: "Fade of a low-volume VWAP reclaim against the daily trend"
+    # Shadow mode: the same reclaim the continuation channel reads, the
+    # opposite thesis. At most one of the two can be promoted, on its record.
+    status: active
+    added_in: v001

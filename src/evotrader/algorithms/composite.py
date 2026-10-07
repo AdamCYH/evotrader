@@ -714,6 +714,7 @@ class CompositeStrategy(TradingAlgorithm):
                 "trend_persistence": 0.0,
                 "vwap_reclaim_continuation": 0.0,
                 "gap_fail_continuation": 0.0,
+                "vwap_reclaim_fade": 0.0,
             },
             MarketRegime.TRENDING_BEAR: {
                 "momentum": 0.43,
@@ -727,6 +728,7 @@ class CompositeStrategy(TradingAlgorithm):
                 "trend_persistence": 0.0,
                 "vwap_reclaim_continuation": 0.0,
                 "gap_fail_continuation": 0.0,
+                "vwap_reclaim_fade": 0.0,
             },
             MarketRegime.RANGE_BOUND: {
                 "momentum": 0.0,
@@ -740,6 +742,7 @@ class CompositeStrategy(TradingAlgorithm):
                 "trend_persistence": 0.0,
                 "vwap_reclaim_continuation": 0.0,
                 "gap_fail_continuation": 0.0,
+                "vwap_reclaim_fade": 0.0,
             },
             MarketRegime.HIGH_VOLATILITY: {
                 "momentum": 0.47,
@@ -753,5 +756,6 @@ class CompositeStrategy(TradingAlgorithm):
                 "trend_persistence": 0.0,
                 "vwap_reclaim_continuation": 0.0,
                 "gap_fail_continuation": 0.0,
+                "vwap_reclaim_fade": 0.0,
             },
         }

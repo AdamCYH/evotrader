@@ -47,6 +47,20 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **A `vwap_reclaim_fade` channel, in shadow.** `vwap_reclaim_continuation`
+  votes with the daily trend after an intraday dip through session VWAP is
+  reclaimed. The new channel reads the same reclaim the other way: when it
+  happened on light volume for the time of day, it votes against it (bearish
+  in a bull stack, bullish in a bear stack), on the thesis that a reclaim
+  without participation is the end of the bounce rather than the start of a
+  move. It abstains at normal volume (relative volume 1.0 or more) and is at
+  full strength at 0.6 or less. Both channels now find the dip and the reclaim
+  with one shared function (`indicators/vwap_episode.py`), so they can disagree
+  about what a reclaim means but never about whether one happened;
+  `vwap_reclaim_continuation`'s output is unchanged. It ships at weight 0 in
+  every regime of the starter algorithm: it runs and its firings are recorded,
+  but it does not move the combined signal until promoted on that record. The
+  console calls it "VWAP reclaim fade".
 - **A `gap_fail_continuation` channel, in shadow.** The `gap` channel reads
   0.0 the moment an opening gap has filled, so nothing voted on what a failed
   gap does next. The new channel votes in the direction of the fade once price

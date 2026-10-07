@@ -136,6 +136,19 @@ gap_fail_continuation:
   min_minutes_since_open: 60.0   # the first hour belongs to the gap channel's fill read
   late_session_minute: 360.0     # fade to 0 from 15:30 ET ...
   session_minutes: 390.0         # ... to the 16:00 ET close
+vwap_reclaim_fade:
+  lookback_bars: 30
+  min_dip_bars: 2
+  min_dip_atr: 0.1
+  max_dip_atr: 0.9
+  max_minutes_since_reclaim: 90.0
+  dip_scale: 0.35
+  reclaim_decay: 0.8
+  base_strength: 0.6
+  max_rvol_for_fade: 1.0    # a reclaim at or above normal volume: abstain
+  full_fade_rvol: 0.6       # full strength at or below this relative volume
+  require_current_session_anchor: true
+  rvol_source: session
 composite:
   momentum_weight: 0.2
   mean_reversion_weight: 0.18
@@ -147,17 +160,19 @@ composite:
   swing_failure_reversal_weight: 0.12
   trend_persistence_weight: 0.0
   gap_fail_continuation_weight: 0.0
+  vwap_reclaim_fade_weight: 0.0
   regime_adaptive: true
   renormalize_on_abstain: true
   # With regime_adaptive on, these weights replace the flat ones above for the
-  # regime detected this cycle. vwap_reclaim_continuation and
-  # gap_fail_continuation are weighted 0 in every regime: they run and are
-  # recorded, but do not vote until promoted.
+  # regime detected this cycle. vwap_reclaim_continuation,
+  # gap_fail_continuation and vwap_reclaim_fade are weighted 0 in every
+  # regime: they run and are recorded, but do not vote until promoted.
   regime_weights:
     trending_bull:
       momentum: 0.2045
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
+      vwap_reclaim_fade: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -170,6 +185,7 @@ composite:
       momentum: 0.2045
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
+      vwap_reclaim_fade: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -182,6 +198,7 @@ composite:
       momentum: 0.22
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
+      vwap_reclaim_fade: 0.0
       mean_reversion: 0.12
       gap: 0.0
       intraday_vwap_zscore: 0.4
@@ -194,6 +211,7 @@ composite:
       momentum: 0.3375
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
+      vwap_reclaim_fade: 0.0
       mean_reversion: 0.1538
       gap: 0.0
       intraday_vwap_zscore: 0.1183

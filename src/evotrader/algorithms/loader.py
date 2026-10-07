@@ -224,6 +224,7 @@ class StrategyLoader:
                     # runs them at weight 0 (recorded, not voting).
                     "vwap_reclaim_continuation": 0.0,
                     "gap_fail_continuation": 0.0,
+                    "vwap_reclaim_fade": 0.0,
                 }
                 weights[name] = default_weights.get(name, 1.0 / len(sub_strategies))
 

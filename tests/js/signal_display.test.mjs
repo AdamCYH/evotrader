@@ -83,6 +83,16 @@ test("the failed-gap channel has a plain name and plain reasons", () => {
         metadata: { applicable: true, reason: "gap_failed" } }), "watch only (-0.41)");
 });
 
+test("the reclaim-fade channel has a plain name and plain reasons", () => {
+    assert.equal(channelLabel("vwap_reclaim_fade"), "VWAP reclaim fade");
+    assert.equal(silenceReason({ name: "vwap_reclaim_fade", value: 0, weight: 0.1,
+        metadata: { applicable: true, reason: "reclaim_on_volume" } }), "reclaim had volume");
+    assert.equal(silenceReason({ name: "vwap_reclaim_fade", value: 0, weight: 0.1,
+        metadata: { applicable: false, reason: "rvol_unavailable" } }), "no volume data");
+    assert.equal(silenceReason({ name: "vwap_reclaim_fade", value: -0.19, weight: 0.0,
+        metadata: { applicable: true, reason: "reclaim_faded" } }), "watch only (-0.19)");
+});
+
 test("unknown channels and reasons still render", () => {
     assert.equal(channelLabel("keltner_squeeze"), "keltner squeeze");
     assert.equal(silenceReason({ name: "k", value: 0, weight: 0.1, metadata: { reason: "brand_new_reason" } }),

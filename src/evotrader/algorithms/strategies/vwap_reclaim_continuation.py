@@ -64,6 +64,7 @@ from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm, warming_up
 from evotrader.indicators.volume import select_relative_volume, validate_rvol_source
+from evotrader.indicators.vwap_episode import locate_vwap_dip_episode
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
 
@@ -198,74 +199,32 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
         direction = 1.0 if bull_stack else -1.0
 
         # ── 2. LOCATE THE MOST RECENT DIP EPISODE ────────────────────────────
-        window = candles[-self._lookback_bars :]
-        closes = [c.close for c in window]
-        n = len(closes)
-
-        def _is_dip(close_value: float) -> bool:
-            return close_value < vwap if bull_stack else close_value > vwap
-
-        last_dip_idx = -1
-        for i in range(n - 1, -1, -1):
-            if _is_dip(closes[i]):
-                last_dip_idx = i
-                break
-
-        if last_dip_idx < 0:
+        episode = locate_vwap_dip_episode(
+            candles,
+            vwap=vwap,
+            atr=atr,
+            bull_stack=bull_stack,
+            price=price,
+            lookback_bars=self._lookback_bars,
+            now=snapshot.timestamp,
+        )
+        if episode.no_cross:
             # Price never crossed VWAP in the window → no pullback to judge.
             meta["in_scope"] = False
             meta["out_of_scope_reason"] = "no_vwap_cross_in_window"
-            meta["lookback_bars_seen"] = n
+            meta["lookback_bars_seen"] = episode.lookback_bars_seen
             return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
 
-        start_idx = last_dip_idx
-        while start_idx - 1 >= 0 and _is_dip(closes[start_idx - 1]):
-            start_idx -= 1
-
-        episode = closes[start_idx : last_dip_idx + 1]
-        dip_bars = len(episode)
-        extreme = min(episode) if bull_stack else max(episode)
-        depth_atr = abs(vwap - extreme) / atr
-        bars_since_reclaim = (n - 1) - last_dip_idx
-        meta["dip_bars"] = dip_bars
-        meta["depth_atr"] = round(depth_atr, 4)
-        meta["bars_since_reclaim"] = bars_since_reclaim
-
-        # Age of the reclaim in WALL-CLOCK minutes, from the first bar that
-        # closed back on the trend side of VWAP. Falls back to bars x 5 only
-        # when timestamps are absent, and says so.
-        age_min: float | None = None
-        age_source = "bars_assumed_5min"
-        reclaim_bar = window[last_dip_idx + 1] if last_dip_idx + 1 < n else None
-        if reclaim_bar is None:
-            # No bar has closed back on the trend side yet, so there is no age
-            # to measure. This used to read 'bars_assumed_5min' — the label for
-            # a MISSING TIMESTAMP — on every not-reclaimed cycle, which made a
-            # healthy clock look broken in the census.
-            age_source = "no_reclaim_bar"
-        reclaim_ts = getattr(reclaim_bar, "timestamp", None) if reclaim_bar else None
-        now_ts = snapshot.timestamp
-        if reclaim_ts is not None and now_ts is not None:
-            try:
-                if reclaim_ts.tzinfo is None and now_ts.tzinfo is not None:
-                    reclaim_ts = reclaim_ts.replace(tzinfo=now_ts.tzinfo)
-                elif now_ts.tzinfo is None and reclaim_ts.tzinfo is not None:
-                    now_ts = now_ts.replace(tzinfo=reclaim_ts.tzinfo)
-                delta = (now_ts - reclaim_ts).total_seconds() / 60.0
-                if delta >= 0:
-                    age_min = delta
-                    age_source = "candle_timestamps"
-            except Exception:
-                age_min = None
-        if age_min is None and reclaim_bar is not None:
-            age_min = float(bars_since_reclaim) * 5.0
-        meta["age_min"] = round(age_min, 2) if age_min is not None else None
-        meta["age_source"] = age_source
+        meta.update(episode.as_meta())
+        dip_bars = episode.dip_bars
+        depth_atr = episode.depth_atr
+        bars_since_reclaim = episode.bars_since_reclaim
+        age_min = episode.age_min
 
         # ── 3. GATES ─────────────────────────────────────────────────────────
         # These are GENUINE abstentions: a candidate dip existed and was
         # evaluated, so they stay in the renormalization denominator.
-        reclaimed_now = (price > vwap) if bull_stack else (price < vwap)
+        reclaimed_now = episode.reclaimed_now
         meta["reclaimed_now"] = reclaimed_now
         if not reclaimed_now:
             meta["reason"] = "not_reclaimed"

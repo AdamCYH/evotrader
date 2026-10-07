@@ -53,6 +53,7 @@ const CHANNEL_LABELS = {
     trend_persistence: "Multi-day trend",
     vwap_reclaim_continuation: "VWAP reclaim",
     gap_fail_continuation: "Failed gap",
+    vwap_reclaim_fade: "VWAP reclaim fade",
 };
 
 export function channelLabel(name) {
@@ -93,6 +94,8 @@ const REASON_LABELS = {
     gap_not_failed: "no setup",
     vwap_not_lost: "no setup",
     fill_not_held: "no setup",
+    reclaim_on_volume: "reclaim had volume",
+    rvol_unavailable: "no volume data",
 };
 
 function isVoting(sig) {
