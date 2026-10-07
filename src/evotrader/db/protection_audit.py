@@ -71,6 +71,190 @@ def _is_take_profit(row: dict[str, Any]) -> bool:
     return action == "CLOSE" and _positive(row.get("limit_price"))
 
 
+def _quantity(row: dict[str, Any]) -> float:
+    try:
+        return float(row.get("quantity") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def held_by_ticker(open_trades: list[dict[str, Any]]) -> dict[str, tuple[float, list[Any]]]:
+    """Shares held per ticker, summed over every open equity lot, with the lot ids.
+
+    Summed, never lot by lot. The audit used to compare each lot with the
+    ticker's whole resting stop, so a position bought in two lots — say 10
+    shares, then 4 more — under a stop still sized for the first 10 passed:
+    each lot alone fits under 10. The 4 shares added last ran with no stop
+    until a later cycle's agent redid the arithmetic by hand.
+
+    Option lots are left out: they are contracts, not shares, and a stop on
+    the stock does not protect them. A SHORT lot is left out too: a sell stop
+    does not protect a short.
+    """
+    held: dict[str, float] = {}
+    lots: dict[str, list[Any]] = {}
+    for trade in open_trades:
+        if trade.get("option_id") or _norm(trade.get("direction")) == "SHORT":
+            continue
+        try:
+            qty = float(trade.get("remaining_quantity") or trade.get("quantity") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= _QTY_TOLERANCE:
+            continue
+        ticker = _norm(trade.get("ticker"))
+        held[ticker] = held.get(ticker, 0.0) + qty
+        lots.setdefault(ticker, []).append(trade.get("id"))
+    return {ticker: (qty, lots[ticker]) for ticker, qty in held.items()}
+
+
+def coverage_by_ticker(
+    open_trades: list[dict[str, Any]], book: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Shares held against shares a resting stop would sell, per ticker.
+
+    The number every cycle used to work out by hand, from the two lists
+    ``get_open_positions`` already returns: the journal's open lots and the
+    resting order book (``pending_orders``, which reconciliation refreshes from
+    the broker's own list at the start and the end of every cycle). One
+    function, so the strategy agent, the executor, the orchestrator and the
+    post-cycle audit all quote the same number.
+
+    The rules are the audit's:
+
+    * held: every open equity lot of the ticker, summed (``held_by_ticker``).
+    * covered: resting STOPS only. A take-profit is listed with its quantity
+      but protects nothing on the way down.
+    * A stop is recognised by its shape (action, stop price or stop order
+      type), never by the direction field, which protective rows record
+      inconsistently.
+    * One row per order id, the broker's own copy over our submission record.
+
+    ``status``:
+
+    * ``full``: the stops cover every share held, and each has a known
+      trigger price and time in force.
+    * ``unknown``: the quantity is covered, but a counted stop lacks its
+      trigger price or its time in force. Unverified, not protected.
+    * ``partial``: some shares have no stop; ``uncovered_qty`` says how many.
+      A shortfall is never hidden behind ``unknown``.
+    * ``none``: shares held and no resting stop.
+    * ``flat``: nothing held. A stop still resting here is a leftover
+      (``excess_stop_qty``).
+    """
+    by_id: dict[str, dict[str, Any]] = {}
+    unnamed: list[dict[str, Any]] = []
+    for row in book:
+        if row.get("option_id"):
+            continue
+        order_id = str(row.get("order_id") or "")
+        if not order_id:
+            unnamed.append(row)
+            continue
+        kept = by_id.get(order_id)
+        if kept is None or (
+            row.get("source") == "broker_sync" and kept.get("source") != "broker_sync"
+        ):
+            by_id[order_id] = row
+    rows_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for row in [*by_id.values(), *unnamed]:
+        rows_by_ticker.setdefault(_norm(row.get("ticker")), []).append(row)
+
+    held = held_by_ticker(open_trades)
+    out: dict[str, dict[str, Any]] = {}
+    for ticker in sorted(set(held) | set(rows_by_ticker)):
+        if ticker in ("", "?"):
+            continue
+        held_qty, lot_ids = held.get(ticker, (0.0, []))
+        stops: list[dict[str, Any]] = []
+        take_profits: list[dict[str, Any]] = []
+        entries: list[dict[str, Any]] = []
+        for row in rows_by_ticker.get(ticker, []):
+            if _is_stop(row):
+                stops.append(row)
+            elif _is_take_profit(row):
+                take_profits.append(row)
+            elif _norm(row.get("action")) == "OPEN":
+                entries.append(row)
+        if held_qty <= _QTY_TOLERANCE and not stops and not take_profits and not entries:
+            continue
+
+        covered = sum(_quantity(r) for r in stops)
+        entry_qty = sum(_quantity(r) for r in entries)
+        uncovered = max(0.0, held_qty - covered)
+        unverified = any(
+            not _positive(r.get("stop_price")) or not r.get("time_in_force") for r in stops
+        )
+        if held_qty <= _QTY_TOLERANCE:
+            status = "flat"
+        elif covered <= _QTY_TOLERANCE:
+            status = "none"
+        elif uncovered > _QTY_TOLERANCE:
+            status = "partial"
+        elif unverified:
+            status = "unknown"
+        else:
+            status = "full"
+        sources = {"broker" if r.get("source") == "broker_sync" else "journal" for r in stops}
+
+        out[ticker] = {
+            "status": status,
+            "held_qty": round(held_qty, 4),
+            "covered_qty": round(covered, 4),
+            "uncovered_qty": round(uncovered if uncovered > _QTY_TOLERANCE else 0.0, 4),
+            "excess_stop_qty": round(max(0.0, covered - held_qty), 4),
+            "take_profit_qty": round(sum(_quantity(r) for r in take_profits), 4),
+            "pending_entry_qty": round(entry_qty, 4),
+            # Resting buys: if they fill, these shares join the position, and
+            # this is what the stops would then leave uncovered.
+            "uncovered_if_entries_fill": round(max(0.0, held_qty + entry_qty - covered), 4),
+            "gtc_all": bool(stops)
+            and all(str(r.get("time_in_force") or "").lower() == "gtc" for r in stops),
+            "cover_source": (sources.pop() if len(sources) == 1 else "mixed") if sources else None,
+            "lot_ids": [i for i in lot_ids if i is not None],
+            "orders": [
+                {
+                    "order_id": r.get("order_id"),
+                    "role": role,
+                    "quantity": round(_quantity(r), 4),
+                    "stop_price": r.get("stop_price"),
+                    "limit_price": r.get("limit_price"),
+                    "time_in_force": r.get("time_in_force"),
+                    "source": r.get("source"),
+                }
+                for role, rows in (
+                    ("stop", stops),
+                    ("take_profit", take_profits),
+                    ("entry", entries),
+                )
+                for r in rows
+            ],
+        }
+    return out
+
+
+def coverage_record(block: dict[str, Any] | None) -> str | None:
+    """One ticker's coverage as the compact JSON the journal keeps on a row."""
+    if not block:
+        return None
+    keep = (
+        "status",
+        "held_qty",
+        "covered_qty",
+        "uncovered_qty",
+        "excess_stop_qty",
+        "take_profit_qty",
+        "pending_entry_qty",
+        "gtc_all",
+        "cover_source",
+    )
+    record = {key: block.get(key) for key in keep}
+    record["stop_order_ids"] = [
+        o.get("order_id") for o in block.get("orders") or [] if o.get("role") == "stop"
+    ]
+    return json.dumps(record, separators=(",", ":"))
+
+
 def cover_from_broker_orders(pending_orders: list[dict[str, Any]]) -> dict[str, float]:
     """Resting stop quantity per ticker, from the broker's own working orders.
 
@@ -99,7 +283,10 @@ def find_protection_gaps(
     recent_trades: list[dict[str, Any]],
     broker_cover: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """One entry per held position whose resting stop does not cover it.
+    """One entry per held ticker whose resting stop does not cover it.
+
+    Held is the ticker's whole position, every open lot summed
+    (``held_by_ticker``): a stop covers a position, not a lot.
 
     ``recent_trades`` supplies the protective orders to match against; an order
     counts as cover only while it is genuinely resting, so a FAILED or
@@ -108,14 +295,17 @@ def find_protection_gaps(
     stop coverage legitimately leaves it no room (a resting stop reserves its
     shares).
 
-    Each gap names the rows it counted, so a verdict the next cycle disagrees
-    with can be checked against the journal rather than merely contradicted.
+    Each gap names the lots it summed and the rows it counted, so a verdict the
+    next cycle disagrees with can be checked against the journal rather than
+    merely contradicted.
     """
     stop_qty: dict[str, float] = {}
     tp_qty: dict[str, float] = {}
     stop_rows: dict[str, list[Any]] = {}
     for row in recent_trades:
         if _norm(row.get("order_status")) not in _RESTING_STATUSES:
+            continue
+        if row.get("option_id"):
             continue
         ticker = _norm(row.get("ticker"))
         try:
@@ -129,14 +319,7 @@ def find_protection_gaps(
             tp_qty[ticker] = tp_qty.get(ticker, 0.0) + qty
 
     gaps: list[dict[str, Any]] = []
-    for trade in open_trades:
-        ticker = _norm(trade.get("ticker"))
-        try:
-            held = float(trade.get("remaining_quantity") or trade.get("quantity") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if held <= _QTY_TOLERANCE:
-            continue
+    for ticker, (held, lot_ids) in held_by_ticker(open_trades).items():
         journal_cover = stop_qty.get(ticker, 0.0)
         # ── BROKER COVER OVERRIDES JOURNAL COVER ─────────────────────
         # This module exists to catch a position whose stop is not really
@@ -163,9 +346,12 @@ def find_protection_gaps(
                     journal_cover,
                 )
             continue
+        lots = [i for i in lot_ids if i is not None]
         gaps.append(
             {
-                "trade_id": trade.get("id"),
+                # The oldest lot, as before; every lot summed is in trade_ids.
+                "trade_id": lots[0] if lots else None,
+                "trade_ids": lots,
                 "ticker": ticker,
                 "held_quantity": round(held, 4),
                 "stop_quantity_resting": round(covered, 4),

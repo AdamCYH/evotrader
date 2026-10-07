@@ -1383,6 +1383,15 @@ async def gather_market_data(ticker: str) -> dict:
     except Exception as e:
         errors.append(f"Failed to fetch open positions with live marks: {e}")
 
+    # ── 6c. Protective coverage for this ticker ────────────────
+    # The same block get_open_positions carries, so the snapshot the strategy
+    # agent reads states the stop arithmetic instead of leaving it to be redone.
+    protective_coverage: dict | None = None
+    try:
+        protective_coverage = (await _protective_coverage()).get(ticker.upper())
+    except Exception as e:
+        errors.append(f"Protective coverage unavailable (non-fatal): {e}")
+
     # ── 7. Level II order book depth (execution intelligence) ───
     level_ii_data: dict | None = None
     if _config and _config.constitution.level_ii.enabled:
@@ -1430,6 +1439,8 @@ async def gather_market_data(ticker: str) -> dict:
         "algo_signal": algo_result,
         "portfolio_state": portfolio_state,
         "open_positions": open_positions if open_positions else None,
+        # Shares held vs shares under a resting stop (see get_open_positions).
+        "protective_coverage": protective_coverage,
         "level_ii": level_ii_data,
         # These were both len(candles) — the DAILY count — while the snapshot's
         # recent_candles is the INTRADAY list. 09-18 10:34 reported 62 against
@@ -3560,7 +3571,31 @@ async def record_trade(trade_json: str) -> dict:
     global _open_positions_cache
     _open_positions_cache = None
 
-    return {"trade_ids": trade_ids, "status": "recorded", "order_status": resolved_order_status}
+    # ── The book's protection after this row, in the same response ──────
+    # A flag, not a gate. An entry can change the shares held while the
+    # resting stop keeps its old size, and the executor copies the strategy's
+    # reasoning verbatim, so a row could claim a stop covered every share when
+    # none did. The executor reads the real numbers here, and the row keeps
+    # them in coverage_at_record, which only this code writes. The reasoning
+    # text is never edited.
+    coverage_after = None
+    if not option_id and ticker:
+        try:
+            coverage_after = (await _protective_coverage()).get(str(ticker).upper())
+            from evotrader.db.protection_audit import coverage_record
+
+            record = coverage_record(coverage_after)
+            if record and trade_ids:
+                await _journal.record_coverage(trade_ids, record)
+        except Exception as e:  # never fail a recorded trade over the flag
+            logger.warning("coverage_after unavailable for %s: %s", ticker, e)
+
+    return {
+        "trade_ids": trade_ids,
+        "status": "recorded",
+        "order_status": resolved_order_status,
+        "coverage_after": coverage_after,
+    }
 
 
 async def get_trade_history(limit: int = 20) -> dict:
@@ -3592,12 +3627,69 @@ async def get_performance_summary(days: int = 30) -> dict:
     return await _journal.get_performance_summary(days=days)
 
 
+def _pending_order_view(row: dict) -> dict:
+    """One ``pending_orders`` row as the agents read it."""
+    trade_json = {}
+    try:
+        trade_json = json.loads(row["trade_json"]) if row.get("trade_json") else {}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {
+        "order_id": row["order_id"],
+        "ticker": trade_json.get("ticker", "?"),
+        "action": trade_json.get("action", "?"),
+        "direction": trade_json.get("direction", "?"),
+        "quantity": trade_json.get("quantity", 0),
+        "order_type": trade_json.get("order_type", "?"),
+        "limit_price": trade_json.get("limit_price"),
+        # The trigger level for a resting stop. Its absence used to
+        # force agents to guess: the same single stop was reported at
+        # five different prices across eight cycles because the only
+        # record of it was prose. A null here means genuinely unknown —
+        # treat the position as unverified, not as protected.
+        "stop_price": (
+            trade_json.get("stop_price")
+            or trade_json.get("trigger_price")
+            or trade_json.get("stop")
+        ),
+        # Whether the order survives the close. Its absence made gtc
+        # unverifiable from the book, so the 2026-09-25 10:30 and 11:30
+        # ET cycles cancelled and re-placed a stop that was already
+        # correctly gtc. A null means unknown — not "day".
+        "time_in_force": trade_json.get("time_in_force"),
+        # 'broker_sync' means the broker itself listed this order as
+        # working. Anything else came from our own submission record.
+        "source": trade_json.get("source", "journal"),
+        "broker_state": trade_json.get("state"),
+        "option_id": trade_json.get("option_id"),
+        "created_at": row.get("created_at", "?"),
+    }
+
+
+async def _protective_coverage() -> dict[str, dict]:
+    """Per-ticker protective coverage, read from the journal now (no cache)."""
+    from evotrader.db.protection_audit import coverage_by_ticker
+
+    if not _journal:
+        return {}
+    positions = await _journal.get_open_trades()
+    book = [_pending_order_view(row) for row in await _journal.get_pending_orders()]
+    return coverage_by_ticker(positions, book)
+
+
 async def get_open_positions() -> dict:
     """Get currently open positions and pending orders from the trade journal.
 
     Returns trades that have action='OPEN' and no corresponding closing trade.
     Also returns any pending (unresolved) orders so the agent can monitor them
     and cancel stale orders if needed.
+
+    ``protective_coverage`` does the stop arithmetic per ticker: shares held
+    (every open lot summed) against shares under a resting stop. Read
+    ``status`` (full, unknown, partial, none, flat) and ``uncovered_qty``
+    instead of working it out. A take-profit is listed but does not count as
+    cover, and ``unknown`` means a stop lacks its trigger price or time in
+    force: treat it as unverified, not as protected.
 
     Uses a short TTL cache (30s) to avoid redundant queries within the same
     trading cycle when multiple agents call this tool in quick succession.
@@ -3617,45 +3709,7 @@ async def get_open_positions() -> dict:
     # orders that haven't been filled/cancelled yet.
     pending_orders = []
     try:
-        raw_pending = await _journal.get_pending_orders()
-        for row in raw_pending:
-            trade_json = {}
-            try:
-                trade_json = json.loads(row["trade_json"]) if row.get("trade_json") else {}
-            except (json.JSONDecodeError, TypeError):
-                pass
-            pending_orders.append(
-                {
-                    "order_id": row["order_id"],
-                    "ticker": trade_json.get("ticker", "?"),
-                    "action": trade_json.get("action", "?"),
-                    "direction": trade_json.get("direction", "?"),
-                    "quantity": trade_json.get("quantity", 0),
-                    "order_type": trade_json.get("order_type", "?"),
-                    "limit_price": trade_json.get("limit_price"),
-                    # The trigger level for a resting stop. Its absence used to
-                    # force agents to guess: the same single stop was reported at
-                    # five different prices across eight cycles because the only
-                    # record of it was prose. A null here means genuinely unknown —
-                    # treat the position as unverified, not as protected.
-                    "stop_price": (
-                        trade_json.get("stop_price")
-                        or trade_json.get("trigger_price")
-                        or trade_json.get("stop")
-                    ),
-                    # Whether the order survives the close. Its absence made gtc
-                    # unverifiable from the book, so the 2026-09-25 10:30 and 11:30
-                    # ET cycles cancelled and re-placed a stop that was already
-                    # correctly gtc. A null means unknown — not "day".
-                    "time_in_force": trade_json.get("time_in_force"),
-                    # 'broker_sync' means the broker itself listed this order as
-                    # working. Anything else came from our own submission record.
-                    "source": trade_json.get("source", "journal"),
-                    "broker_state": trade_json.get("state"),
-                    "option_id": trade_json.get("option_id"),
-                    "created_at": row.get("created_at", "?"),
-                }
-            )
+        pending_orders = [_pending_order_view(row) for row in await _journal.get_pending_orders()]
     except Exception as e:
         logger.warning("Failed to fetch pending orders: %s", e)
 
@@ -3665,6 +3719,16 @@ async def get_open_positions() -> dict:
         "pending_orders": pending_orders,
         "pending_count": len(pending_orders),
     }
+    # Computed, not inferred: shares held against shares a resting stop would
+    # sell. An add can fill while the stop stays at the earlier size, and the
+    # shortfall used to surface only when an agent redid this arithmetic by
+    # hand, a cycle later.
+    try:
+        from evotrader.db.protection_audit import coverage_by_ticker
+
+        result["protective_coverage"] = coverage_by_ticker(positions, pending_orders)
+    except Exception as e:  # never break the positions tool over it
+        logger.warning("protective coverage skipped in get_open_positions: %s", e)
     # The account against the constitution's limits (daily and weekly loss,
     # drawdown from the peak, loss streak, order count): what a NEW entry would
     # meet right now. Shown every cycle so a halt is read before an order is
@@ -3998,6 +4062,9 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
     from evotrader.tools.asset_context import allowed_tickers
 
     synced: list[str] = []
+    # What each working order is, not only its id, so whoever reads the book
+    # (the orchestrator's cycle summary) can state quantities and levels.
+    book: list[dict] = []
     errors: list[str] = []
     for ticker in allowed_tickers():
         try:
@@ -4028,6 +4095,21 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
                     str(order_id), json.dumps(row), _current_session_id
                 )
                 synced.append(str(order_id))
+                book.append(
+                    {
+                        key: row.get(key)
+                        for key in (
+                            "order_id",
+                            "ticker",
+                            "action",
+                            "quantity",
+                            "stop_price",
+                            "limit_price",
+                            "time_in_force",
+                            "state",
+                        )
+                    }
+                )
             except Exception as e:
                 errors.append(f"{order_id}: {e}")
                 logger.warning("[ORDERBOOK] Could not record broker order %s: %s", order_id, e)
@@ -4040,7 +4122,12 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
         )
         global _open_positions_cache
         _open_positions_cache = None
-    return {"synced": len(synced), "order_ids": synced, "errors": errors if errors else None}
+    return {
+        "synced": len(synced),
+        "order_ids": synced,
+        "orders": book,
+        "errors": errors if errors else None,
+    }
 
 
 async def reconcile_pending_orders() -> dict:
@@ -4055,9 +4142,21 @@ async def reconcile_pending_orders() -> dict:
     row resolved.
 
     Should be called at the start of each trading cycle.
+
+    ``order_book.orders`` lists each working broker order with its quantity
+    and levels, and ``protective_coverage`` is the per-ticker stop arithmetic
+    after reconciling (the same block ``get_open_positions`` returns): quote
+    those rather than restating coverage from memory.
     """
     if not _journal:
         return {"reconciled": [], "pending_count": 0, "message": "Journal not initialised"}
+
+    async def _coverage() -> dict | None:
+        try:
+            return await _protective_coverage()
+        except Exception as e:
+            logger.warning("[RECONCILE] protective coverage unavailable: %s", e)
+            return None
 
     # In sim mode, defer to check_and_journal_pending_fills instead
     if _sim_proxy is not None:
@@ -4065,6 +4164,7 @@ async def reconcile_pending_orders() -> dict:
             "reconciled": [],
             "pending_count": 0,
             "message": "Sim mode — use check_and_journal_pending_fills",
+            "protective_coverage": await _coverage(),
         }
 
     # Fetch account number for querying orders — must use the agentic account
@@ -4092,6 +4192,7 @@ async def reconcile_pending_orders() -> dict:
             "reconciled": [],
             "pending_count": 0,
             "order_book": order_book,
+            "protective_coverage": await _coverage(),
             "message": "No pending orders to reconcile",
         }
 
@@ -4278,6 +4379,7 @@ async def reconcile_pending_orders() -> dict:
         "reconciled_count": len(reconciled),
         "still_pending_count": max(0, still_pending),
         "order_book": order_book,
+        "protective_coverage": await _coverage(),
         "errors": errors if errors else None,
     }
 

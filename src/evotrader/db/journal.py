@@ -1453,6 +1453,19 @@ class TradeJournal:
                 (terminal_status.upper(), order_id),
             )
 
+    async def record_coverage(self, trade_ids: list[int], coverage: str) -> None:
+        """Keep the book's protective coverage on the rows just recorded.
+
+        Machine-written (see migration 0026): the agent's reasoning on the
+        same row is prose, and this is the order book's account of the same
+        moment.
+        """
+        async with self._db.transaction() as conn:
+            await conn.executemany(
+                "UPDATE trades SET coverage_at_record = ? WHERE id = ?",
+                [(coverage, trade_id) for trade_id in trade_ids],
+            )
+
     async def delete_pending_order(self, order_id: str) -> None:
         """Remove a pending order row entirely (after successful journaling).
 

@@ -27,6 +27,24 @@ folder layout; each entry says what you need to do.
   short date labels, round price levels, and one tooltip for the whole day
   with a guide line through it.
 
+### Added — in what the agents read
+
+- **Protective coverage, computed.** `get_open_positions` returns
+  `protective_coverage`: per ticker, the shares held (every open lot summed)
+  against the shares under resting stop orders, with `uncovered_qty` and a
+  `status` of `full`, `unknown` (covered on quantity, but a stop lacks its
+  trigger price or time in force), `partial`, `none` or `flat`. A take-profit
+  is listed but not counted as cover. The same block is in the
+  `gather_market_data` snapshot, in `reconcile_pending_orders` (whose
+  `order_book.orders` now lists each working order's quantity and levels), and
+  in `record_trade`'s response as `coverage_after`, so the executor sees a
+  shortfall in the same call that created it. Until now the agents worked this
+  out by hand, and shares added to a position could run without a stop until a
+  later cycle redid the arithmetic. Each journal row also keeps the figure from
+  the moment it was recorded, in a new `coverage_at_record` column written by
+  the code, never by an agent; the agent's reasoning text is not edited. The
+  column is added automatically at the next start (migration 0026).
+
 ### Added — off unless an algorithm version sets them
 
 - **A `gap_fail_continuation` channel, in shadow.** The `gap` channel reads
@@ -55,6 +73,12 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The protection audit compares whole positions, not lots.** After every
+  cycle the audit checks that each held position is covered by a resting stop.
+  It compared each purchase lot on its own with the ticker's whole stop, so a
+  position bought in two lots under a stop sized for the first passed: each lot
+  alone fit. It now sums the lots per ticker, leaves option lots out
+  (contracts, not shares), and names every lot it summed (`trade_ids`).
 - **Shadow channels no longer move the combined signal.** The combined signal
   is scaled down when few channels corroborate it: below 0.4 of the channels on
   duty voting, it is multiplied by that share divided by 0.4. The count

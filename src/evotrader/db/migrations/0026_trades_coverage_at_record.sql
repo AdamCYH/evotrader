@@ -1,0 +1,15 @@
+-- The order book's protective coverage at the moment a row was recorded.
+--
+-- NOTE: the runner splits this file on the semicolon character, so this
+-- comment uses none.
+--
+-- Written by record_trade, never by an agent. The reasoning column is the
+-- strategy agent's prose, which the executor copies verbatim, and prose once
+-- claimed a resized stop covered every share held while the broker still held
+-- the stop at its earlier, smaller size. This column is the journal's own
+-- account of the same moment, as compact JSON: shares held, shares under a
+-- resting stop, the shortfall, and a status (full, unknown, partial, none,
+-- flat). See db/protection_audit.coverage_by_ticker.
+--
+-- NULL means the row predates this column, or the row is an option.
+ALTER TABLE trades ADD COLUMN coverage_at_record TEXT;
