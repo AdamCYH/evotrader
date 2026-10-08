@@ -58,8 +58,10 @@ class TestTheLiveGap:
         )
         assert len(gaps) == 1 and gaps[0]["uncovered_quantity"] == 3.0
 
-    def test_partial_cover_reports_only_the_remainder(self) -> None:
-        """The documented split: stop on N-1, take-profit on 1."""
+    def test_the_designed_split_is_not_a_gap(self) -> None:
+        """Stop on N-1, take-profit on 1: every share is under one order or the
+        other, by design (a resting order reserves its shares). Logged, not
+        reported."""
         gaps = find_protection_gaps(
             [_open(1, "MSTR", 12.0)],
             [
@@ -67,9 +69,28 @@ class TestTheLiveGap:
                 _protective("MSTR", "TAKE_PROFIT", 1.0, "PENDING"),
             ],
         )
+        assert gaps == []
+
+    def test_partial_cover_reports_only_the_remainder(self) -> None:
+        """Shares under neither order are still a gap, take-profit or not."""
+        gaps = find_protection_gaps(
+            [_open(1, "XYZ", 12.0)],
+            [
+                _protective("XYZ", "STOP_LOSS", 10.0, "PENDING"),
+                _protective("XYZ", "TAKE_PROFIT", 1.0, "PENDING"),
+            ],
+        )
         assert len(gaps) == 1
-        assert gaps[0]["uncovered_quantity"] == 1.0
+        assert gaps[0]["uncovered_quantity"] == 2.0
         assert gaps[0]["take_profit_quantity_resting"] == 1.0
+
+    def test_a_take_profit_with_no_stop_at_all_is_a_gap(self) -> None:
+        """A take-profit protects nothing on the way down: no stop, no split."""
+        gaps = find_protection_gaps(
+            [_open(1, "XYZ", 12.0)],
+            [_protective("XYZ", "TAKE_PROFIT", 12.0, "PENDING")],
+        )
+        assert len(gaps) == 1 and gaps[0]["uncovered_quantity"] == 12.0
 
     def test_a_flat_book_has_nothing_to_report(self) -> None:
         assert find_protection_gaps([], [_protective("MSTR", "STOP_LOSS", 5, "FAILED")]) == []

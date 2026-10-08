@@ -3762,10 +3762,13 @@ async def get_open_positions() -> dict:
 
     ``protective_coverage`` does the stop arithmetic per ticker: shares held
     (every open lot summed) against shares under a resting stop. Read
-    ``status`` (full, unknown, partial, none, flat) and ``uncovered_qty``
+    ``status`` (full, split, unknown, partial, none, flat) and the counts
     instead of working it out. A take-profit is listed but does not count as
-    cover, and ``unknown`` means a stop lacks its trigger price or time in
-    force: treat it as unverified, not as protected.
+    cover; ``split`` means every share is under the stop or a resting
+    take-profit (``tp_only_qty`` shares have no stop: the tranche), and
+    ``partial`` means ``no_order_qty`` shares are under neither. ``unknown``
+    means a stop lacks its trigger price or time in force: treat it as
+    unverified, not as protected.
 
     ``take_profit_coverage`` is the upside half per ticker: ``status``
     (resting or none), ``tp_qty``, ``tp_qty_uncovered`` and each resting

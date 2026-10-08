@@ -99,14 +99,36 @@ class TestTheArithmetic:
         assert block["gtc_all"] is True
 
     def test_a_take_profit_is_listed_but_is_not_cover(self) -> None:
-        """It protects nothing on the way down (the audit's rule)."""
+        """It protects nothing on the way down (the audit's rule): its shares
+        count as uncovered by a stop, and the status says they are split off."""
         block = coverage_by_ticker([_lot(1, 14.0)], [_stop("s1", 13.0), _take_profit("t1", 1.0)])[
             "XYZ"
         ]
-        assert block["status"] == "partial"
+        assert block["status"] == "split"
+        assert block["covered_qty"] == pytest.approx(13.0)
         assert block["uncovered_qty"] == pytest.approx(1.0)
+        assert block["tp_only_qty"] == pytest.approx(1.0)
+        assert block["no_order_qty"] == 0.0
         assert block["take_profit_qty"] == pytest.approx(1.0)
         assert {o["role"] for o in block["orders"]} == {"stop", "take_profit"}
+
+    def test_shares_under_neither_order_are_still_partial(self) -> None:
+        block = coverage_by_ticker([_lot(1, 15.0)], [_stop("s1", 10.0), _take_profit("t1", 3.0)])[
+            "XYZ"
+        ]
+        assert block["status"] == "partial"
+        assert block["no_order_qty"] == pytest.approx(2.0)
+        assert block["tp_only_qty"] == pytest.approx(3.0)
+
+    def test_a_take_profit_alone_is_none(self) -> None:
+        block = coverage_by_ticker([_lot(1, 6.0)], [_take_profit("t1", 6.0)])["XYZ"]
+        assert block["status"] == "none"
+
+    def test_an_unverified_stop_outranks_the_split(self) -> None:
+        block = coverage_by_ticker(
+            [_lot(1, 14.0)], [_stop("s1", 13.0, time_in_force=None), _take_profit("t1", 1.0)]
+        )["XYZ"]
+        assert block["status"] == "unknown"
 
     def test_a_stop_without_its_level_is_unverified_not_protected(self) -> None:
         block = coverage_by_ticker([_lot(1, 10.0)], [_stop("s1", 10.0, stop_price=None)])["XYZ"]
@@ -446,3 +468,46 @@ async def test_the_column_exists(db) -> None:
         cur = await conn.execute("PRAGMA table_info(trades)")
         names = {row["name"] for row in await cur.fetchall()}
     assert "coverage_at_record" in names
+
+
+# ── The designed split: a take-profit tranche beside the stop ────────────
+
+
+class TestTheAuditKnowsTheSplit:
+    """A resting order reserves its shares, so a take-profit tranche and the
+    stop split the position between them. The audit must not call the
+    tranche's shares a gap every cycle, or the next agent "repairs" it by
+    cancelling the take-profit."""
+
+    def test_the_brokers_split_is_not_a_gap(self) -> None:
+        lots = [_lot(1, 12.0)]
+        gaps = find_protection_gaps(
+            lots, [], broker_cover={"XYZ": 8.0}, broker_take_profit={"XYZ": 4.0}
+        )
+        assert gaps == []
+
+    def test_a_split_that_leaves_shares_under_neither_is_a_gap(self) -> None:
+        lots = [_lot(1, 12.0)]
+        gaps = find_protection_gaps(
+            lots, [], broker_cover={"XYZ": 8.0}, broker_take_profit={"XYZ": 2.0}
+        )
+        assert len(gaps) == 1 and gaps[0]["uncovered_quantity"] == 4.0
+
+    def test_only_the_brokers_own_take_profits_count_as_broker_cover(self) -> None:
+        from evotrader.db.protection_audit import take_profit_cover_from_broker_orders
+
+        ours = {**_take_profit("t0", 9.0), "source": "journal"}
+        theirs = _take_profit("t1", 4.0)
+        assert take_profit_cover_from_broker_orders([ours, theirs]) == {"XYZ": 4.0}
+
+    def test_the_tools_and_the_audit_agree(self) -> None:
+        lots = [_lot(1, 12.0)]
+        block = coverage_by_ticker(lots, [_stop("s1", 8.0), _take_profit("t1", 4.0)])["XYZ"]
+        assert block["status"] == "split"
+        assert block["tp_only_qty"] == 4.0
+        assert (
+            find_protection_gaps(
+                lots, [], broker_cover={"XYZ": 8.0}, broker_take_profit={"XYZ": 4.0}
+            )
+            == []
+        )

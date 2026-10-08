@@ -136,9 +136,17 @@ def coverage_by_ticker(
       trigger price and time in force.
     * ``unknown``: the quantity is covered, but a counted stop lacks its
       trigger price or its time in force. Unverified, not protected.
-    * ``partial``: some shares have no stop; ``uncovered_qty`` says how many.
-      A shortfall is never hidden behind ``unknown``.
-    * ``none``: shares held and no resting stop.
+    * ``split``: some shares are under a resting take-profit instead of the
+      stop, and every share is under one or the other: the designed split of
+      a take-profit tranche (a resting order reserves its shares, so the stop
+      and the take-profit cannot both sit on a share). ``tp_only_qty`` says
+      how many shares have no stop.
+    * ``partial``: some shares are under no resting sell order at all;
+      ``no_order_qty`` says how many (``uncovered_qty`` counts every share
+      without a stop). A shortfall is never hidden behind ``unknown`` or
+      ``split``.
+    * ``none``: shares held and no resting stop (a take-profit alone is not
+      protection).
     * ``flat``: nothing held. A stop still resting here is a leftover
       (``excess_stop_qty``).
     """
@@ -180,8 +188,11 @@ def coverage_by_ticker(
             continue
 
         covered = sum(_quantity(r) for r in stops)
+        tp_qty = sum(_quantity(r) for r in take_profits)
         entry_qty = sum(_quantity(r) for r in entries)
         uncovered = max(0.0, held_qty - covered)
+        tp_only = min(tp_qty, uncovered)
+        no_order = max(0.0, uncovered - tp_qty)
         unverified = any(
             not _positive(r.get("stop_price")) or not r.get("time_in_force") for r in stops
         )
@@ -189,10 +200,12 @@ def coverage_by_ticker(
             status = "flat"
         elif covered <= _QTY_TOLERANCE:
             status = "none"
-        elif uncovered > _QTY_TOLERANCE:
+        elif no_order > _QTY_TOLERANCE:
             status = "partial"
         elif unverified:
             status = "unknown"
+        elif uncovered > _QTY_TOLERANCE:
+            status = "split"
         else:
             status = "full"
         sources = {"broker" if r.get("source") == "broker_sync" else "journal" for r in stops}
@@ -203,7 +216,11 @@ def coverage_by_ticker(
             "covered_qty": round(covered, 4),
             "uncovered_qty": round(uncovered if uncovered > _QTY_TOLERANCE else 0.0, 4),
             "excess_stop_qty": round(max(0.0, covered - held_qty), 4),
-            "take_profit_qty": round(sum(_quantity(r) for r in take_profits), 4),
+            "take_profit_qty": round(tp_qty, 4),
+            # Shares under a resting take-profit and no stop (a split), and
+            # shares under no resting sell order at all (a gap).
+            "tp_only_qty": round(tp_only if tp_only > _QTY_TOLERANCE else 0.0, 4),
+            "no_order_qty": round(no_order if no_order > _QTY_TOLERANCE else 0.0, 4),
             "pending_entry_qty": round(entry_qty, 4),
             # Resting buys: if they fill, these shares join the position, and
             # this is what the stops would then leave uncovered.
@@ -314,6 +331,7 @@ def coverage_record(block: dict[str, Any] | None) -> str | None:
         "uncovered_qty",
         "excess_stop_qty",
         "take_profit_qty",
+        "tp_only_qty",
         "pending_entry_qty",
         "gtc_all",
         "cover_source",
@@ -348,10 +366,21 @@ def cover_from_broker_orders(pending_orders: list[dict[str, Any]]) -> dict[str, 
     return cover
 
 
+def take_profit_cover_from_broker_orders(pending_orders: list[dict[str, Any]]) -> dict[str, float]:
+    """Resting take-profit quantity per ticker, from the broker's own working orders."""
+    cover: dict[str, float] = {}
+    for row in pending_orders:
+        if str(row.get("source") or "") != "broker_sync" or not _is_take_profit(row):
+            continue
+        cover[_norm(row.get("ticker"))] = cover.get(_norm(row.get("ticker")), 0.0) + _quantity(row)
+    return cover
+
+
 def find_protection_gaps(
     open_trades: list[dict[str, Any]],
     recent_trades: list[dict[str, Any]],
     broker_cover: dict[str, float] | None = None,
+    broker_take_profit: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """One entry per held ticker whose resting stop does not cover it.
 
@@ -363,7 +392,10 @@ def find_protection_gaps(
     CANCELLED one is exactly the case this looks for. A take-profit is reported
     but never counted as cover: it protects nothing on the way down, and full
     stop coverage legitimately leaves it no room (a resting stop reserves its
-    shares).
+    shares). The one exception is a SPLIT: when the stop and a resting
+    take-profit between them hold every share, the take-profit's shares are
+    the designed tranche, not a gap (``coverage_by_ticker`` status ``split``).
+    That is logged, not reported.
 
     Each gap names the lots it summed and the rows it counted, so a verdict the
     next cycle disagrees with can be checked against the journal rather than
@@ -405,6 +437,21 @@ def find_protection_gaps(
         broker_known = broker_cover is not None and ticker in broker_cover
         covered = broker_cover[ticker] if broker_known else journal_cover
         disagrees = broker_known and abs(broker_cover[ticker] - journal_cover) > _QTY_TOLERANCE
+        broker_tp_known = broker_take_profit is not None and broker_cover is not None
+        tp_resting = (
+            broker_take_profit.get(ticker, 0.0) if broker_tp_known else tp_qty.get(ticker, 0.0)
+        )
+        if covered + _QTY_TOLERANCE < held and covered > _QTY_TOLERANCE:
+            if covered + tp_resting + _QTY_TOLERANCE >= held:
+                logger.info(
+                    "%s is split by design: %.4f under the stop, %.4f under a resting "
+                    "take-profit with no stop, of %.4f held.",
+                    ticker,
+                    covered,
+                    held - covered,
+                    held,
+                )
+                continue
         if covered + _QTY_TOLERANCE >= held:
             if disagrees:
                 logger.warning(
@@ -451,6 +498,7 @@ async def audit_protection(
         # then the journal remains the source — degraded, but never silently:
         # a gap reported from the journal alone says so in `cover_source`.
         broker_cover = None
+        broker_take_profit = None
         try:
             pending = await journal.get_pending_orders()
             parsed: list[dict[str, Any]] = []
@@ -461,9 +509,15 @@ async def audit_protection(
                     continue
             if any(p.get("source") == "broker_sync" for p in parsed):
                 broker_cover = cover_from_broker_orders(parsed)
+                broker_take_profit = take_profit_cover_from_broker_orders(parsed)
         except Exception as e:
             logger.debug("Could not read the broker order book: %s", e)
-        gaps = find_protection_gaps(open_trades, recent, broker_cover=broker_cover)
+        gaps = find_protection_gaps(
+            open_trades,
+            recent,
+            broker_cover=broker_cover,
+            broker_take_profit=broker_take_profit,
+        )
     except Exception as e:
         logger.warning("Protection audit failed: %s", e)
         return {"positions": 0, "gaps": [], "error": str(e)}

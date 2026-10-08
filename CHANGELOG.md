@@ -109,6 +109,16 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A stop and a take-profit that split a position are not a protection gap.**
+  A resting order reserves its shares, so a take-profit on part of a position
+  and a stop on the rest are the only way to have both. The post-cycle audit
+  counted the take-profit's shares as unprotected and reported a gap every
+  cycle, which invites the next agent to cancel the take-profit to "repair"
+  it. When the stop and resting take-profits between them hold every share,
+  `protective_coverage` now reads `split` (with `tp_only_qty`, the shares
+  that have no stop, and `no_order_qty`, the shares under neither) and the
+  audit logs it instead of reporting it. Shares under neither order, or a
+  take-profit with no stop at all, are still a gap.
 - **The signal strip under the account chart fits its card.** Its chips could
   not wrap, so the correlation chip ran past the card's edge whenever the card
   was narrow (a phone, or the account panel beside the others on a desktop);
