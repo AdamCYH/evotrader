@@ -1237,6 +1237,13 @@
         </div>
     </div>
 
+    <!-- js/api.js changed under the same name, and a browser that kept its old
+         copy ran it with the new app.js. Every module that imports it loads
+         this address instead. Needs to come before the first module script. -->
+    <script type="importmap">
+        { "imports": { "./js/api.js": "./js/api.js?v=2" } }
+    </script>
+
     <!-- Modular Application Coordinator -->
     <script type="module" src="js/app.js?v=9"></script>
 </body>

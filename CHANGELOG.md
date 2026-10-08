@@ -147,6 +147,17 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The console's files are checked for a newer version on every load.** The
+  page names its script modules by fixed paths, and the console sent no
+  caching instruction, so a browser reused files it had fetched before for
+  hours by its own estimate. After the previous update, a browser that had the
+  console open ran the new `js/app.js` with its old `js/api.js`, which dropped
+  the chosen instrument from the chart request: the market panel's picker went
+  back to the primary every time it was changed. Every console file, the page
+  included, is now sent with `Cache-Control: no-cache` (the browser asks each
+  load; an unchanged file costs a 304), and the page loads `js/api.js` under a
+  new address through an import map, so a browser holding the old copy fetches
+  the new one on an ordinary reload, even before the console is restarted.
 - **The loss streak counts decisions, not lots.** A sale of a position held as
   several lots is one broker order written as one row per lot, and the streak
   walked rows: one losing sale of four lots read as four consecutive losses,

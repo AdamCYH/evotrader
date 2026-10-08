@@ -159,6 +159,23 @@ def end_event_streams() -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """The console's files, sent so the browser checks for a newer version on every load.
+
+    With no Cache-Control header a browser picks its own freshness, and a file
+    last modified days before it was fetched is reused for hours without
+    asking. The page names its modules by fixed paths (``js/api.js``), so after
+    an update a browser could run the new ``js/app.js`` with its old
+    ``js/api.js``. With ``no-cache`` it asks every load; an unchanged file
+    costs a 304.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _permitted_tickers(config: Any) -> tuple[str, ...]:
     """Symbols the agents may trade, primary first.
 
@@ -2786,8 +2803,8 @@ def create_app(
 
     @app.get("/")
     async def get_index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
 
-    app.mount("/", StaticFiles(directory=static_dir), name="static")
+    app.mount("/", RevalidatedStaticFiles(directory=static_dir), name="static")
 
     return app
