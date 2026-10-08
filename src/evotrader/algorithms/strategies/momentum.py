@@ -70,6 +70,19 @@ class MomentumStrategy(TradingAlgorithm):
         # indicators.volume.select_relative_volume. 'daily' is every existing
         # version's behaviour.
         rvol_source: str = "daily",
+        # ── Fast dissent ─────────────────────────────────────────────
+        # The moving-average term reads the STACK (EMA 9 against 21, price
+        # against SMA 20, SMA 20 against 50), and every part of it lags a
+        # reversal by days: after a long advance it keeps reading strongly
+        # long through a fall, because it measures how far above its averages
+        # price still is, not which way it is going. When the two fastest reads
+        # both point the other way (price beyond EMA 9 by fast_dissent_min_atr
+        # daily ATRs, and the daily MACD histogram outside its neutral band),
+        # the MA term is multiplied by fast_dissent_decay before the 60/40
+        # blend: at 0 the channel's sign is the MACD's. 1.0, the default, is
+        # off: every existing version is unchanged until it sets a decay.
+        fast_dissent_decay: float = 1.0,
+        fast_dissent_min_atr: float = 0.25,
         version: str = "v001",
     ) -> None:
         self._ema_short = ema_short
@@ -84,6 +97,8 @@ class MomentumStrategy(TradingAlgorithm):
         self._divergence_window_days = divergence_window_days
         self._divergence_cum_atr = divergence_cum_atr
         self._rvol_source = rvol_source
+        self._fast_dissent_decay = fast_dissent_decay
+        self._fast_dissent_min_atr = fast_dissent_min_atr
         self._version = version
 
     @property
@@ -148,7 +163,33 @@ class MomentumStrategy(TradingAlgorithm):
             else None
         )
 
-        raw_signal = 0.6 * ma_sig + 0.4 * macd_sig
+        # Fast dissent: price on the other side of EMA 9 by a margin AND the
+        # MACD histogram outside its neutral band, both against the MA term.
+        # ``fast_dissent`` records the condition whether or not a decay is
+        # configured, so its days can be counted before anyone acts on them;
+        # ``fast_dissent_applied`` says the decay changed the value.
+        price_vs_ema9_atr = (
+            round((snapshot.quote.last - ema_9) / ind.atr_14, 4)
+            if ema_9 is not None
+            and ind.atr_14 is not None
+            and ind.atr_14 > 0
+            and snapshot.quote is not None
+            and snapshot.quote.last
+            else None
+        )
+        fast_dissent = (
+            ma_sig != 0.0
+            and price_vs_ema9_atr is not None
+            and macd_hist_atr is not None
+            and price_vs_ema9_atr * ma_sig < 0
+            and abs(price_vs_ema9_atr) >= self._fast_dissent_min_atr
+            and macd_hist_atr * ma_sig < 0
+            and abs(macd_hist_atr) >= MACD_NEUTRAL_ATR
+        )
+        fast_dissent_applied = fast_dissent and self._fast_dissent_decay < 1.0
+        ma_sig_effective = ma_sig * self._fast_dissent_decay if fast_dissent_applied else ma_sig
+
+        raw_signal = 0.6 * ma_sig_effective + 0.4 * macd_sig
 
         # Intraday-divergence dampener: daily MAs lag multi-day reversals.
         # If the daily-MA signal points one way while today's realized move
@@ -239,8 +280,16 @@ class MomentumStrategy(TradingAlgorithm):
             value=signal_value,
             weight=1.0,
             metadata={
+                # The raw MA term, as before; the term the blend used is
+                # ma_signal_effective (they differ only under a fast dissent).
                 "ma_signal": ma_sig,
+                "ma_signal_effective": ma_sig_effective,
                 "macd_signal": macd_sig,
+                "price_vs_ema9_atr": price_vs_ema9_atr,
+                "fast_dissent": fast_dissent,
+                "fast_dissent_applied": fast_dissent_applied,
+                "fast_dissent_decay": self._fast_dissent_decay,
+                "fast_dissent_min_atr": self._fast_dissent_min_atr,
                 # The daily MACD histogram in ATRs, signed, and whether it is
                 # inside the neutral band. A histogram of 0.05 ATR makes the
                 # MACD sub-signal read -0.14, small enough to be noise and
@@ -323,6 +372,8 @@ class MomentumStrategy(TradingAlgorithm):
             "divergence_window_days": self._divergence_window_days,
             "divergence_cum_atr": self._divergence_cum_atr,
             "rvol_source": self._rvol_source,
+            "fast_dissent_decay": self._fast_dissent_decay,
+            "fast_dissent_min_atr": self._fast_dissent_min_atr,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -352,6 +403,10 @@ class MomentumStrategy(TradingAlgorithm):
             self._divergence_cum_atr = None if v is None else float(v)
         if "rvol_source" in params:
             self._rvol_source = str(params["rvol_source"])
+        if "fast_dissent_decay" in params:
+            self._fast_dissent_decay = float(params["fast_dissent_decay"])
+        if "fast_dissent_min_atr" in params:
+            self._fast_dissent_min_atr = float(params["fast_dissent_min_atr"])
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -401,4 +456,12 @@ class MomentumStrategy(TradingAlgorithm):
             err = validate_rvol_source(params["rvol_source"])
             if err:
                 errors.append(err)
+        if "fast_dissent_decay" in params:
+            v = float(params["fast_dissent_decay"])
+            if not (0.0 <= v <= 1.0):
+                errors.append(f"fast_dissent_decay must be in [0, 1] (1 = off), got {v}")
+        if "fast_dissent_min_atr" in params:
+            v = float(params["fast_dissent_min_atr"])
+            if not (0.0 <= v <= 3.0):
+                errors.append(f"fast_dissent_min_atr must be in [0, 3] daily ATRs, got {v}")
         return errors

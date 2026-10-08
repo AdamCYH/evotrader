@@ -29,6 +29,13 @@ momentum:
   divergence_window_days: 1
   divergence_cum_atr: null
   rvol_source: session   # today's volume vs the same minute of the last 20 sessions; the daily ratio (labelled *_fallback) until 10:30 ET
+  # Fast dissent: when price is beyond EMA 9 by at least fast_dissent_min_atr
+  # daily ATRs AND the daily MACD histogram is outside its neutral band, both
+  # against the moving-average read, that read is multiplied by this decay
+  # (0 = the MACD alone sets the sign). Off here (1.0); the condition is
+  # recorded as `fast_dissent` either way.
+  fast_dissent_decay: 1.0
+  fast_dissent_min_atr: 0.25   # 0.25 daily ATR
 mean_reversion:
   rsi_period: 14
   rsi_oversold: 28

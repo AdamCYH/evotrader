@@ -58,6 +58,17 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`momentum.fast_dissent_decay` and `fast_dissent_min_atr`.** The momentum
+  channel's moving-average term reads the stack, which lags a reversal by days:
+  after a long advance it keeps reading long through a fall. With a decay below
+  1, when price is beyond EMA 9 by at least `fast_dissent_min_atr` daily ATRs
+  and the daily MACD histogram is outside its neutral band, both against the
+  moving-average read, that read is multiplied by the decay before the 60/40
+  blend; at 0 the channel takes the MACD's sign. The default, 1.0, is off. The
+  condition is recorded on every momentum vote (`fast_dissent`, and
+  `fast_dissent_applied` when a decay changed the value), and the attribution
+  record keeps it with the vote, beside `divergence_applied`, so the calls can
+  be split by it.
 - **A `vwap_reclaim_fade` channel, in shadow.** `vwap_reclaim_continuation`
   votes with the daily trend after an intraday dip through session VWAP is
   reclaimed. The new channel reads the same reclaim the other way: when it
