@@ -134,6 +134,23 @@ class PerformanceAnalyser:
             if (t.get("order_status") or "FILLED") == "FILLED"
             and not self._is_unverified_protective_fill(t)
         ]
+        # ── AND ONLY ONCE PER BROKER ORDER ─────────────────────────────
+        # A broker order journaled twice against the same lot, both FILLED,
+        # carried its full realized P&L on each copy: one losing trim read as
+        # two losses. The later copy stands; the others are counted and
+        # reported, like the unverified fills, not silently dropped.
+        from evotrader.db.journal import is_broker_order_id, superseded_duplicate_ids
+
+        superseded = superseded_duplicate_ids(filled_trades)
+        if superseded:
+            logger.warning(
+                "%d row(s) are second copies of a broker order already journaled "
+                "against the same lot (ids %s) — excluded from realized P&L. Repair "
+                "them to DUPLICATE in the journal.",
+                len(superseded),
+                ", ".join(str(i) for i in sorted(superseded)),
+            )
+            filled_trades = [t for t in filled_trades if t.get("id") not in superseded]
         unverified_fills = [t for t in decision_trades if self._is_unverified_protective_fill(t)]
         if unverified_fills:
             logger.warning(
@@ -159,6 +176,18 @@ class PerformanceAnalyser:
         overall_summary["trade_population"] = (
             f"{len(filled_trades)} filled decision trades within {lookback_days}d"
         )
+        # trade_count counts rows with P&L: an exit split across lots is one
+        # row per lot. This counts the broker orders behind them.
+        overall_summary["closing_orders"] = len(
+            {
+                str(t.get("order_id"))
+                if is_broker_order_id(t.get("order_id"))
+                else f"row:{t.get('id')}"
+                for t in filled_trades
+                if t.get("realized_pnl") is not None
+            }
+        )
+        overall_summary["duplicate_order_rows"] = len(superseded)
         # Keep the raw journal summary for reference, clearly namespaced.
         journal_summary = await self._journal.get_performance_summary(days=lookback_days)
         overall_summary["journal_summary_unfiltered"] = (
@@ -187,6 +216,7 @@ class PerformanceAnalyser:
             },
             "order_lifecycle": {
                 "filled_count": len(filled_trades),
+                "duplicate_order_row_ids": sorted(superseded),
                 "pending_count": len(pending_trades),
                 "rejected_count": len(rejected_trades),
                 "cancelled_count": len(cancelled_trades),

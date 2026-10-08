@@ -849,6 +849,17 @@ class PositionSizingConfig(BaseModel):
     default_stop_loss_atr_multiplier: float = Field(
         2.0, ge=0.5, le=10.0, description="Stop-loss distance as ATR multiplier."
     )
+    target_atr_multiplier: float | None = Field(
+        None,
+        ge=0.1,
+        le=10.0,
+        description=(
+            "The first profit target (T1) as a multiple of the daily ATR above each "
+            "lot's entry: the number the strategy instruction states. When set, every "
+            "held lot in the market-data snapshot reports how far it is from that "
+            "target (t1_distance_atr). Unset, nothing is reported."
+        ),
+    )
 
 
 class DryRunConfig(BaseModel):

@@ -44,6 +44,17 @@ folder layout; each entry says what you need to do.
   the moment it was recorded, in a new `coverage_at_record` column written by
   the code, never by an agent; the agent's reasoning text is not edited. The
   column is added automatically at the next start (migration 0026).
+- **Where the upside stands, computed.** `get_open_positions` and the
+  `gather_market_data` snapshot carry `take_profit_coverage` per ticker:
+  whether a take-profit rests (`status`), its quantity, the shares without one,
+  and each level (in the snapshot, also its distance in daily ATRs from the
+  blended entry and from the price). Each held lot in the snapshot reports
+  `gain_atr` (where it stands against its entry), `mfe_atr` (the best move
+  since the entry: the sessions after it, plus today's bars after it when it
+  was bought today) and, when a target is set, `t1_distance_atr`. The target is
+  a new setting, `position_sizing.target_atr_multiplier`: set it to the first
+  target your strategy instruction states (the starter settings use 1.5, as the
+  starter instruction does). Unset, no target distance is reported.
 
 ### Added — off unless an algorithm version sets them
 
@@ -87,6 +98,25 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **One broker order is one journal entry, however often it is recorded.** The
+  executor records an order when it places it and again after re-checking it,
+  and each call wrote rows: a sale of part of a lot became two exits, a later
+  status update made both FILLED with the sale's full realized P&L, the reports
+  counted one loss twice, the lot read below zero, and reconciliation added
+  shares at the broker's average cost to make up the difference. A second
+  `record_trade` for an order already in the journal now updates it instead: a
+  fill with its price promotes the waiting row, a cancellation ends it, anything
+  else changes nothing, and the tool's response says `deduplicated`. Copies
+  written before this are left out of every realized-P&L figure (the daily-loss
+  and losing-streak limits included); `get_performance_summary` and the
+  performance analysis report how many (`duplicate_order_rows`), and the app
+  names them in its log at every start (`JOURNAL DUPLICATE`) until they are
+  repaired to the status `DUPLICATE`. `get_performance_summary` also reports
+  `closing_orders`, the broker orders behind its rows.
+- **A fill confirmed for an order split across lots keeps each lot's
+  quantity.** The status update wrote the order's whole quantity onto every row
+  sharing its id, so a sale confirmed after it was recorded could close its
+  quantity once per lot.
 - **The protection audit compares whole positions, not lots.** After every
   cycle the audit checks that each held position is covered by a resting stop.
   It compared each purchase lot on its own with the ticker's whole stop, so a

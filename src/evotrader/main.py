@@ -479,6 +479,10 @@ async def start(
 
         # ── Initialise trade journal and metrics ────────────────
         journal = TradeJournal(db)
+        # A broker order journaled twice is left out of every P&L figure, but
+        # the journal itself stays wrong until someone repairs it: say so at
+        # every start rather than leave it to be found in a report.
+        await journal.warn_on_duplicate_orders()
         metrics = MetricsStore(db)
         from evotrader.db.thought_log import ThoughtLogger
 

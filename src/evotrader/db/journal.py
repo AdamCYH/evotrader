@@ -35,6 +35,62 @@ SYNC_ALGO_VERSION = "system_sync"
 # Reusable SQL predicate (append to WHERE clauses).
 EXCLUDE_RECONCILIATION_SQL = " AND regime != 'reconciliation' AND algo_version != 'system_sync' "
 
+#: A row a data repair marked as a second copy of another row's broker order.
+#: It records nothing that happened: no position, no P&L, no status updates.
+DUPLICATE_STATUS = "DUPLICATE"
+
+# ── ONE BROKER ORDER, ONE JOURNAL FACT ───────────────────────────────────
+# Rows written for the same broker order against the same lot, both FILLED:
+# every one but the latest is a second copy. record_trade no longer writes
+# them (a re-record promotes the existing row), but a journal written before
+# that can hold them, and each copy carried the order's full realized P&L, so
+# one losing trim read as two losses. Every P&L figure below leaves the
+# earlier copies out; repair them to DUPLICATE_STATUS. "Same order" means a
+# real broker id: one with a digit in it, so the words an agent typed when it
+# had no id ("PENDING", "N/A", "FAILED_...") never match each other. Kept
+# free of references to the outer query, so it reads the same everywhere it
+# is appended (and on every SQLite version).
+SUPERSEDED_DUPLICATE_IDS_SQL = """
+    SELECT d.id FROM trades d
+    JOIN trades k
+      ON k.order_id = d.order_id
+     AND k.action = d.action
+     AND COALESCE(k.related_trade_id, 0) = COALESCE(d.related_trade_id, 0)
+     AND k.id > d.id
+    WHERE d.order_id GLOB '*[0-9]*'
+      AND COALESCE(d.order_status, 'FILLED') = 'FILLED'
+      AND COALESCE(k.order_status, 'FILLED') = 'FILLED'
+"""
+EXCLUDE_SUPERSEDED_DUPLICATES_SQL = f" AND id NOT IN ({SUPERSEDED_DUPLICATE_IDS_SQL}) "
+
+
+def superseded_duplicate_ids(trades: list[dict[str, Any]]) -> set[int]:
+    """``SUPERSEDED_DUPLICATE_IDS_SQL`` over rows already in memory.
+
+    For readers that work on a list of rows rather than a query.
+    """
+    groups: dict[tuple[str, str, int], list[int]] = {}
+    for t in trades:
+        if (t.get("order_status") or "FILLED") != "FILLED" or t.get("id") is None:
+            continue
+        if not is_broker_order_id(t.get("order_id")):
+            continue
+        key = (str(t["order_id"]), str(t.get("action")), int(t.get("related_trade_id") or 0))
+        groups.setdefault(key, []).append(int(t["id"]))
+    return {i for ids in groups.values() if len(ids) > 1 for i in sorted(ids)[:-1]}
+
+
+def is_broker_order_id(order_id: object) -> bool:
+    """Whether *order_id* is an id a broker issued, not a placeholder.
+
+    Broker ids (``3f2a91c0-…``, the practice broker's ``sim_1a2b3c4d``) always
+    carry a digit; the placeholders agents have written instead
+    (``PENDING``, ``N/A``, ``FAILED_MAX_SHARES_EXCEEDED``) do not. Two rows that
+    share a placeholder are not the same order.
+    """
+    text = str(order_id or "").strip()
+    return bool(text) and any(ch.isdigit() for ch in text)
+
 
 def _warn_on_exit_row_shape(
     proposal: TradeProposal,
@@ -215,6 +271,27 @@ class TradeJournal:
                 proposal.ticker,
             )
             proposal.action = TradeAction.CLOSE
+
+        # ── ONE BROKER ORDER, ONE JOURNAL FACT ───────────────────────────
+        # The executor records an order when it places it and again after it
+        # re-checks it by id, and each call used to write rows: one 10-share
+        # sell became two exits against the same lot, both later FILLED with
+        # the sale's full realized P&L. The lot read below zero, the position
+        # came out short of the broker's, and reconciliation wrote shares at
+        # the broker's average cost to make up the difference. A second record
+        # of the same order moves the existing rows forward instead.
+        if is_broker_order_id(order_id):
+            existing = await self.rows_for_order(str(order_id), proposal.action)
+            if existing:
+                return await self._rerecord(
+                    existing,
+                    str(order_id),
+                    order_status,
+                    fill_price,
+                    proposal.quantity,
+                    broker_status_reason,
+                    fill_source,
+                )
 
         if proposal.action not in (
             TradeAction.CLOSE,
@@ -621,6 +698,130 @@ class TradeJournal:
                 recorded_ids.append(trade_id)
         return recorded_ids
 
+    async def rows_for_order(
+        self, order_id: str, action: TradeAction | str
+    ) -> list[dict[str, Any]]:
+        """The rows already journaled for one broker order and action, oldest first.
+
+        Rows a repair marked DUPLICATE are left out: they record nothing.
+        """
+        action_value = action.value if isinstance(action, TradeAction) else str(action)
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id, order_status, realized_pnl, related_trade_id, quantity, "
+                "fill_price, fill_source FROM trades "
+                "WHERE order_id = ? AND action = ? AND COALESCE(order_status, '') != ? "
+                "ORDER BY id",
+                (order_id, action_value, DUPLICATE_STATUS),
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def _rerecord(
+        self,
+        existing: list[dict[str, Any]],
+        order_id: str,
+        order_status: str | None,
+        fill_price: float | None,
+        quantity: float | None,
+        broker_status_reason: str | None,
+        fill_source: str | None,
+    ) -> list[int]:
+        """A second record of an order already journaled: update, never insert.
+
+        * FILLED with a fill price promotes rows that are not yet a confirmed
+          fill, so realized P&L is computed once, at that price.
+        * FILLED with no price changes nothing: reconciliation asks the broker
+          and promotes the rows with the broker's own price. Promoting here
+          would compute P&L from whatever placeholder price the row holds.
+        * A terminal non-fill (CANCELLED, REJECTED, FAILED, EXPIRED) ends rows
+          that are still waiting.
+        * Anything else, a repeat of what is already recorded included, leaves
+          the rows as they are.
+
+        Returns the existing ids, as a fresh record would return its own.
+        """
+        ids = [int(r["id"]) for r in existing]
+        new = (order_status or "FILLED").upper()
+        statuses = {str(r.get("order_status") or "FILLED").upper() for r in existing}
+        waiting = statuses - {"FILLED", "CANCELLED", "REJECTED", "FAILED", "EXPIRED", "UNMATCHED"}
+        unconfirmed = any(
+            str(r.get("order_status") or "FILLED").upper() != "FILLED"
+            or r.get("fill_price") is None
+            or r.get("fill_source") == "executor_claim"
+            for r in existing
+        )
+        if new == "FILLED" and fill_price is not None and unconfirmed:
+            await self.update_order_status(
+                order_id,
+                "FILLED",
+                fill_price=fill_price,
+                # One row: the broker's quantity is that row's. Several rows
+                # are lots of one order and already split its quantity.
+                filled_quantity=quantity if len(existing) == 1 else None,
+                fill_source=fill_source or "broker",
+            )
+            outcome = "promoted to FILLED"
+        elif new in ("CANCELLED", "REJECTED", "FAILED", "EXPIRED") and waiting:
+            await self.update_order_status(order_id, new, broker_status_reason=broker_status_reason)
+            outcome = f"ended as {new}"
+        else:
+            outcome = "left as recorded"
+        logger.info(
+            "record_trade: order %s already journaled (rows %s, %s); this %s record is not "
+            "a new trade — %s.",
+            order_id,
+            ", ".join(str(i) for i in ids),
+            "/".join(sorted(statuses)),
+            new,
+            outcome,
+        )
+        return ids
+
+    async def duplicate_order_groups(self) -> list[dict[str, Any]]:
+        """Broker orders journaled more than once against the same lot, both FILLED.
+
+        Each group lists its row ids; every id but the last is a second copy
+        (see ``SUPERSEDED_DUPLICATE_IDS_SQL``).
+        """
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT order_id, action, related_trade_id,
+                       GROUP_CONCAT(id) AS ids, COUNT(*) AS n
+                FROM trades
+                WHERE order_id GLOB '*[0-9]*'
+                  AND COALESCE(order_status, 'FILLED') = 'FILLED'
+                GROUP BY order_id, action, COALESCE(related_trade_id, 0)
+                HAVING COUNT(*) > 1
+                ORDER BY MIN(id)
+                """
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+        for row in rows:
+            row["ids"] = sorted(int(i) for i in str(row["ids"]).split(","))
+        return rows
+
+    async def warn_on_duplicate_orders(self) -> list[dict[str, Any]]:
+        """Log every duplicated order once at start-up, so it is repaired, not missed."""
+        try:
+            groups = await self.duplicate_order_groups()
+        except Exception as e:
+            logger.debug("Could not check the journal for duplicated orders: %s", e)
+            return []
+        for g in groups:
+            logger.warning(
+                "JOURNAL DUPLICATE: order %s (%s, lot %s) is journaled %d times as FILLED "
+                "(rows %s). P&L figures count only row %s; mark the others %s.",
+                g["order_id"],
+                g["action"],
+                g["related_trade_id"],
+                g["n"],
+                ", ".join(str(i) for i in g["ids"]),
+                g["ids"][-1],
+                DUPLICATE_STATUS,
+            )
+        return groups
+
     async def _audit_position_after_open(
         self,
         ticker: str,
@@ -908,6 +1109,7 @@ class TradeJournal:
                 FROM trades
                 WHERE ({conditions}) AND realized_pnl IS NOT NULL
                 AND (order_status = 'FILLED' OR order_status IS NULL)
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 """,
                 params,
             )
@@ -921,6 +1123,7 @@ class TradeJournal:
 
         where_clause = (
             "realized_pnl IS NOT NULL AND (order_status = 'FILLED' OR order_status IS NULL)"
+            + EXCLUDE_SUPERSEDED_DUPLICATES_SQL
         )
 
         from evotrader.utils import get_period_cutoff_utc_str
@@ -947,12 +1150,13 @@ class TradeJournal:
         """Count the current streak of consecutive losing trades."""
         async with self._db.connection() as conn:
             cursor = await conn.execute(
-                """
+                f"""
                 SELECT realized_pnl FROM trades
                 WHERE realized_pnl IS NOT NULL
                 AND (order_status = 'FILLED' OR order_status IS NULL)
                 AND regime != 'reconciliation'
                 AND algo_version != 'system_sync'
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 ORDER BY timestamp DESC
                 LIMIT 100
                 """
@@ -1006,6 +1210,7 @@ class TradeJournal:
                 AND regime != 'reconciliation'
                 AND algo_version != 'system_sync'
                 AND ({conditions})
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 ORDER BY timestamp DESC
                 LIMIT 100
                 """,
@@ -1026,12 +1231,13 @@ class TradeJournal:
         """Return the timestamp of the most recent losing trade, or None."""
         async with self._db.connection() as conn:
             cursor = await conn.execute(
-                """
+                f"""
                 SELECT timestamp FROM trades
                 WHERE realized_pnl IS NOT NULL
                 AND realized_pnl < 0
                 AND regime != 'reconciliation'
                 AND algo_version != 'system_sync'
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """
@@ -1079,6 +1285,7 @@ class TradeJournal:
                     COALESCE(SUM(CASE WHEN realized_pnl < 0 AND (order_status = 'FILLED' OR order_status IS NULL) THEN 1 ELSE 0 END), 0) as losses
                 FROM trades
                 WHERE {where_clause}
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 """,
                 params,
             )
@@ -1098,6 +1305,7 @@ class TradeJournal:
 
         where_clause = (
             "realized_pnl IS NOT NULL AND (order_status = 'FILLED' OR order_status IS NULL)"
+            + EXCLUDE_SUPERSEDED_DUPLICATES_SQL
         )
         params = []
 
@@ -1249,11 +1457,23 @@ class TradeJournal:
         """Compute performance summary over the last N days.
 
         Returns a dictionary with win_rate, avg_win, avg_loss, profit_factor,
-        total_pnl, and trade_count.
+        total_pnl, and trade_count (rows with realized P&L: an exit split
+        across lots is one row per lot), plus ``closing_orders`` (the distinct
+        broker orders behind them) and ``duplicate_order_rows`` (second copies
+        of an order left out of every figure here; repair them).
+        """
+        window = (f"-{days} days",)
+        population = """
+                FROM trades
+                WHERE realized_pnl IS NOT NULL
+                AND (order_status = 'FILLED' OR order_status IS NULL)
+                AND regime != 'reconciliation'
+                AND algo_version != 'system_sync'
+                AND timestamp >= datetime('now', ?)
         """
         async with self._db.connection() as conn:
             cursor = await conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
@@ -1262,55 +1482,60 @@ class TradeJournal:
                     AVG(CASE WHEN realized_pnl < 0 THEN realized_pnl END) as avg_loss,
                     SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END) as gross_profit,
                     SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END) as gross_loss,
-                    SUM(COALESCE(realized_pnl, 0)) as total_pnl
-                FROM trades
-                WHERE realized_pnl IS NOT NULL
-                AND (order_status = 'FILLED' OR order_status IS NULL)
-                AND regime != 'reconciliation'
-                AND algo_version != 'system_sync'
-                AND timestamp >= datetime('now', ?)
+                    SUM(COALESCE(realized_pnl, 0)) as total_pnl,
+                    COUNT(DISTINCT CASE WHEN order_id GLOB '*[0-9]*' THEN order_id
+                                        ELSE 'row:' || id END) as closing_orders
+                {population}
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 """,
-                (f"-{days} days",),
+                window,
             )
             row = await cursor.fetchone()
-            if not row:
-                return {
-                    "trade_count": 0,
-                    "win_rate": 0.0,
-                    "avg_win": 0.0,
-                    "avg_loss": 0.0,
-                    "profit_factor": 0.0,
-                    "total_pnl": 0.0,
-                }
-
-            total = row["total"]
-            if total == 0:
-                return {
-                    "trade_count": 0,
-                    "win_rate": 0.0,
-                    "avg_win": 0.0,
-                    "avg_loss": 0.0,
-                    "profit_factor": 0.0,
-                    "total_pnl": 0.0,
-                }
-
-            wins = row["wins"]
-            avg_win = row["avg_win"]
-            avg_loss = row["avg_loss"]
-            gross_profit = row["gross_profit"]
-            gross_loss = row["gross_loss"]
-            total_pnl = row["total_pnl"]
-            win_rate = (wins or 0) / total if total > 0 else 0.0
-            profit_factor = (gross_profit / gross_loss) if gross_loss and gross_loss > 0 else 0.0
-
+            dup_cursor = await conn.execute(
+                f"SELECT COUNT(*) AS n {population} AND id IN ({SUPERSEDED_DUPLICATE_IDS_SQL})",
+                window,
+            )
+            dup_row = await dup_cursor.fetchone()
+        duplicate_rows = int(dup_row["n"] or 0) if dup_row else 0
+        if duplicate_rows:
+            logger.warning(
+                "get_performance_summary: %d duplicated order row(s) left out of the "
+                "%d-day figures — repair the journal (see warn_on_duplicate_orders).",
+                duplicate_rows,
+                days,
+            )
+        total = row["total"] if row else 0
+        if not total:
             return {
-                "trade_count": total,
-                "win_rate": win_rate,
-                "avg_win": avg_win or 0.0,
-                "avg_loss": avg_loss or 0.0,
-                "profit_factor": profit_factor,
-                "total_pnl": total_pnl or 0.0,
+                "trade_count": 0,
+                "win_rate": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "profit_factor": 0.0,
+                "total_pnl": 0.0,
+                "closing_orders": 0,
+                "duplicate_order_rows": duplicate_rows,
             }
+
+        wins = row["wins"]
+        avg_win = row["avg_win"]
+        avg_loss = row["avg_loss"]
+        gross_profit = row["gross_profit"]
+        gross_loss = row["gross_loss"]
+        total_pnl = row["total_pnl"]
+        win_rate = (wins or 0) / total if total > 0 else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss and gross_loss > 0 else 0.0
+
+        return {
+            "trade_count": total,
+            "win_rate": win_rate,
+            "avg_win": avg_win or 0.0,
+            "avg_loss": avg_loss or 0.0,
+            "profit_factor": profit_factor,
+            "total_pnl": total_pnl or 0.0,
+            "closing_orders": int(row["closing_orders"] or 0),
+            "duplicate_order_rows": duplicate_rows,
+        }
 
     async def delete_trade(self, trade_id: int) -> None:
         """Delete a trade from the journal by its ID."""
@@ -1333,11 +1558,12 @@ class TradeJournal:
         """Get all trades with realized PnL, chronologically ordered."""
         async with self._db.connection() as conn:
             cursor = await conn.execute(
-                """
+                f"""
                 SELECT timestamp, realized_pnl
                 FROM trades
                 WHERE realized_pnl IS NOT NULL
                 AND (order_status = 'FILLED' OR order_status IS NULL)
+                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 ORDER BY timestamp ASC
                 """
             )
@@ -1628,6 +1854,17 @@ class TradeJournal:
         if new_status.upper() in ("REJECTED", "CANCELLED", "FAILED", "PENDING", "EXPIRED"):
             updates.append("realized_pnl = NULL")
 
+        where = "order_id = ?"
+        if only_if_claimed_fill:
+            where += " AND order_status = 'FILLED' AND fill_source = 'executor_claim'"
+        where += (
+            " AND NOT (COALESCE(order_status, '') IN ('CANCELLED', 'FAILED', 'EXPIRED',"
+            " 'REJECTED') AND substr(COALESCE(broker_status_reason, ''), 1, 9) = 'REPAIRED_')"
+            # A row repaired as a second copy of the order records nothing;
+            # news about the order is about the row that stayed.
+            f" AND COALESCE(order_status, '') != '{DUPLICATE_STATUS}'"
+        )
+
         if fill_price is not None:
             updates.append("fill_price = ?")
             params.append(fill_price)
@@ -1637,8 +1874,32 @@ class TradeJournal:
             updates.append("price = ?")
             params.append(fill_price)
         if filled_quantity is not None:
-            updates.append("quantity = ?")
-            params.append(filled_quantity)
+            # The broker's quantity is the ORDER's. An order split across
+            # several lots has one row per lot, and writing the order's
+            # quantity onto each would close it once per lot. Only a row that
+            # is the whole order takes it.
+            async with self._db.connection() as conn:
+                cursor = await conn.execute(
+                    f"SELECT COUNT(*) AS n, COALESCE(SUM(quantity), 0) AS qty "
+                    f"FROM trades WHERE {where}",
+                    (order_id,),
+                )
+                found = await cursor.fetchone()
+            n_rows = int(found["n"]) if found else 0
+            if n_rows <= 1:
+                updates.append("quantity = ?")
+                params.append(filled_quantity)
+            elif abs(float(found["qty"]) - float(filled_quantity)) > 1e-4:
+                logger.warning(
+                    "update_order_status: order %s is %d lot rows totalling %.4f, and the "
+                    "broker reports %.4f %s. Quantities left as journaled; reconciliation "
+                    "measures the position against the broker.",
+                    order_id,
+                    n_rows,
+                    float(found["qty"]),
+                    float(filled_quantity),
+                    new_status.lower(),
+                )
         if broker_status_reason is not None:
             updates.append("broker_status_reason = ?")
             params.append(broker_status_reason)
@@ -1651,13 +1912,6 @@ class TradeJournal:
         params.append(fill_source)
 
         params.append(order_id)
-        where = "order_id = ?"
-        if only_if_claimed_fill:
-            where += " AND order_status = 'FILLED' AND fill_source = 'executor_claim'"
-        where += (
-            " AND NOT (COALESCE(order_status, '') IN ('CANCELLED', 'FAILED', 'EXPIRED',"
-            " 'REJECTED') AND substr(COALESCE(broker_status_reason, ''), 1, 9) = 'REPAIRED_')"
-        )
         set_clause = ", ".join(updates)
 
         async with self._db.transaction() as conn:
@@ -1691,7 +1945,9 @@ class TradeJournal:
                 try:
                     async with self._db.connection() as conn:
                         cursor = await conn.execute(
-                            "SELECT id, action, direction, quantity, price, fill_price, option_id, related_trade_id, timestamp, realized_pnl, holding_period_s FROM trades WHERE order_id = ?",
+                            # Only the rows this update made FILLED: a row a
+                            # repair closed out, or a second copy, keeps no P&L.
+                            "SELECT id, action, direction, quantity, price, fill_price, option_id, related_trade_id, timestamp, realized_pnl, holding_period_s FROM trades WHERE order_id = ? AND order_status = 'FILLED'",
                             (order_id,),
                         )
                         close_rows = [dict(r) for r in await cursor.fetchall()]

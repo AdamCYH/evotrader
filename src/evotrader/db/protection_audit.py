@@ -233,6 +233,76 @@ def coverage_by_ticker(
     return out
 
 
+def take_profit_coverage(
+    block: dict[str, Any] | None,
+    open_trades: list[dict[str, Any]],
+    ticker: str,
+    atr: float | None = None,
+    mark: float | None = None,
+) -> dict[str, Any] | None:
+    """The upside half of the book for one ticker: which take-profits rest, and where.
+
+    ``coverage_by_ticker`` answers "is every share under a stop"; this answers
+    "is any share under a resting take-profit, and how far away is it". The
+    levels are in daily ATRs from the position's blended entry and from the
+    current mark when those are known (the market-data snapshot passes them;
+    the positions tool, which reads only the journal, does not).
+    """
+    if not block:
+        return None
+    ticker = _norm(ticker)
+    lots = [
+        t
+        for t in open_trades
+        if _norm(t.get("ticker")) == ticker
+        and not t.get("option_id")
+        and _norm(t.get("direction")) != "SHORT"
+    ]
+    qty_sum = 0.0
+    cost_sum = 0.0
+    for lot in lots:
+        try:
+            qty = float(lot.get("remaining_quantity") or lot.get("quantity") or 0.0)
+            entry = float(lot.get("fill_price") or lot.get("price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty > _QTY_TOLERANCE and entry > 0:
+            qty_sum += qty
+            cost_sum += qty * entry
+    blended = cost_sum / qty_sum if qty_sum > _QTY_TOLERANCE else None
+    atr_ok = atr is not None and atr > 0
+
+    def _in_atr(level: float | None, base: float | None) -> float | None:
+        if level is None or base is None or not atr_ok:
+            return None
+        return round((float(level) - base) / float(atr), 4)
+
+    levels = []
+    for order in block.get("orders") or []:
+        if order.get("role") != "take_profit":
+            continue
+        limit = order.get("limit_price")
+        levels.append(
+            {
+                "order_id": order.get("order_id"),
+                "qty": order.get("quantity"),
+                "limit_price": limit,
+                "atr_from_entry": _in_atr(limit, blended),
+                "atr_from_mark": _in_atr(limit, mark),
+                "time_in_force": order.get("time_in_force"),
+            }
+        )
+    tp_qty = float(block.get("take_profit_qty") or 0.0)
+    held = float(block.get("held_qty") or 0.0)
+    return {
+        "status": "resting" if tp_qty > _QTY_TOLERANCE else "none",
+        "tp_qty": round(tp_qty, 4),
+        "tp_qty_uncovered": round(max(0.0, held - tp_qty), 4),
+        "blended_entry": round(blended, 4) if blended is not None else None,
+        "levels": levels,
+    }
+
+
 def coverage_record(block: dict[str, Any] | None) -> str | None:
     """One ticker's coverage as the compact JSON the journal keeps on a row."""
     if not block:

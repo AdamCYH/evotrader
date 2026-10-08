@@ -1378,17 +1378,48 @@ async def gather_market_data(ticker: str) -> dict:
                                 else ((entry_price - last) / entry_price) * 100,
                                 1,
                             )
+                        # Gain, best move since entry and distance to T1, in
+                        # ATRs (tools/position_telemetry.py).
+                        from evotrader.tools.position_telemetry import lot_excursion
+
+                        pos.update(
+                            lot_excursion(
+                                direction=t.get("direction"),
+                                entry_price=entry_price,
+                                entry_time=t.get("timestamp") or t.get("created_at"),
+                                daily_bars=candles,
+                                session_bars=session_bars,
+                                mark=last,
+                                atr=_safe_float(indicators.get("atr_14")),
+                                now=now,
+                                target_atr=_target_atr_multiplier(),
+                            )
+                        )
 
                 open_positions.append(pos)
     except Exception as e:
         errors.append(f"Failed to fetch open positions with live marks: {e}")
 
     # ── 6c. Protective coverage for this ticker ────────────────
-    # The same block get_open_positions carries, so the snapshot the strategy
-    # agent reads states the stop arithmetic instead of leaving it to be redone.
+    # The same blocks get_open_positions carries, so the snapshot the strategy
+    # agent reads states the stop arithmetic instead of leaving it to be redone,
+    # and, here with the day's ATR and mark, where any take-profit rests.
     protective_coverage: dict | None = None
+    take_profit: dict | None = None
     try:
-        protective_coverage = (await _protective_coverage()).get(ticker.upper())
+        from evotrader.db.protection_audit import coverage_by_ticker, take_profit_coverage
+
+        if _journal is not None:
+            lots_now = await _journal.get_open_trades()
+            book_now = [_pending_order_view(r) for r in await _journal.get_pending_orders()]
+            protective_coverage = coverage_by_ticker(lots_now, book_now).get(ticker.upper())
+            take_profit = take_profit_coverage(
+                protective_coverage,
+                lots_now,
+                ticker,
+                atr=_safe_float(indicators.get("atr_14")),
+                mark=_safe_float((quote_data or {}).get("last")),
+            )
     except Exception as e:
         errors.append(f"Protective coverage unavailable (non-fatal): {e}")
 
@@ -1441,6 +1472,8 @@ async def gather_market_data(ticker: str) -> dict:
         "open_positions": open_positions if open_positions else None,
         # Shares held vs shares under a resting stop (see get_open_positions).
         "protective_coverage": protective_coverage,
+        # Resting take-profits and their distance in ATRs.
+        "take_profit_coverage": take_profit,
         "level_ii": level_ii_data,
         # These were both len(candles) — the DAILY count — while the snapshot's
         # recent_candles is the INTRADAY list. 09-18 10:34 reported 62 against
@@ -3422,8 +3455,25 @@ async def record_trade(trade_json: str) -> dict:
                     order_id,
                 )
 
+    # ── A second record of an order already in the journal ───────────────
+    # The executor records an order when it places it and again once it has
+    # re-checked it by id. The journal moves the existing rows forward (see
+    # TradeJournal._rerecord) instead of writing the order a second time; the
+    # response says so, so a re-check is never mistaken for a new trade.
+    rerecord_of: list[dict] = []
+    if order_id and action is not None:
+        from evotrader.db.journal import is_broker_order_id
+
+        if is_broker_order_id(order_id):
+            try:
+                rerecord_of = await _journal.rows_for_order(str(order_id), action)
+            except Exception as e:
+                logger.debug("Could not look up order %s before recording: %s", order_id, e)
+    already_filled = any(str(r.get("order_status") or "").upper() == "FILLED" for r in rerecord_of)
+
     # Also save to pending_orders table as an audit trail for PENDING orders
-    if resolved_order_status == "PENDING" and order_id:
+    # (not for a late "pending" record of an order already filled).
+    if resolved_order_status == "PENDING" and order_id and not already_filled:
         try:
             await _journal.save_pending_order(order_id, json.dumps(data), _current_session_id)
             logger.info("Order %s is pending — saved to pending_orders audit trail.", order_id)
@@ -3496,7 +3546,8 @@ async def record_trade(trade_json: str) -> dict:
     )
 
     # ── Populate ChromaDB trade_experiences for semantic recall ──
-    if _memory and trade_ids:
+    # (once per trade: a re-record stored nothing new)
+    if _memory and trade_ids and not rerecord_of:
         try:
             for tid in trade_ids if isinstance(trade_ids, list) else [trade_ids]:
                 trade_row = None
@@ -3590,12 +3641,29 @@ async def record_trade(trade_json: str) -> dict:
         except Exception as e:  # never fail a recorded trade over the flag
             logger.warning("coverage_after unavailable for %s: %s", ticker, e)
 
-    return {
+    response = {
         "trade_ids": trade_ids,
         "status": "recorded",
         "order_status": resolved_order_status,
         "coverage_after": coverage_after,
     }
+    if rerecord_of:
+        now_rows = rerecord_of
+        try:
+            now_rows = await _journal.rows_for_order(str(order_id), action)
+        except Exception:
+            pass
+        response["deduplicated"] = True
+        response["journal_order_status"] = "/".join(
+            sorted({str(r.get("order_status") or "FILLED") for r in now_rows})
+        )
+        response["note"] = (
+            f"Order {order_id} was already in the journal (rows "
+            f"{', '.join(str(r['id']) for r in now_rows)}); no new trade was written. "
+            "A FILLED record with a fill price promotes the existing rows; any other "
+            "repeat leaves them as they are."
+        )
+    return response
 
 
 async def get_trade_history(limit: int = 20) -> dict:
@@ -3666,6 +3734,14 @@ def _pending_order_view(row: dict) -> dict:
     }
 
 
+def _target_atr_multiplier() -> float | None:
+    """The configured first profit target in ATRs (position_sizing), or None."""
+    try:
+        return _config.settings.position_sizing.target_atr_multiplier if _config else None
+    except AttributeError:
+        return None
+
+
 async def _protective_coverage() -> dict[str, dict]:
     """Per-ticker protective coverage, read from the journal now (no cache)."""
     from evotrader.db.protection_audit import coverage_by_ticker
@@ -3690,6 +3766,12 @@ async def get_open_positions() -> dict:
     instead of working it out. A take-profit is listed but does not count as
     cover, and ``unknown`` means a stop lacks its trigger price or time in
     force: treat it as unverified, not as protected.
+
+    ``take_profit_coverage`` is the upside half per ticker: ``status``
+    (resting or none), ``tp_qty``, ``tp_qty_uncovered`` and each resting
+    level. The levels' distance in ATRs, and each lot's gain, best move since
+    entry (``mfe_atr``) and distance to the first target, are in
+    gather_market_data's snapshot, which has the day's ATR and price.
 
     Uses a short TTL cache (30s) to avoid redundant queries within the same
     trading cycle when multiple agents call this tool in quick succession.
@@ -3724,9 +3806,15 @@ async def get_open_positions() -> dict:
     # shortfall used to surface only when an agent redid this arithmetic by
     # hand, a cycle later.
     try:
-        from evotrader.db.protection_audit import coverage_by_ticker
+        from evotrader.db.protection_audit import coverage_by_ticker, take_profit_coverage
 
-        result["protective_coverage"] = coverage_by_ticker(positions, pending_orders)
+        coverage = coverage_by_ticker(positions, pending_orders)
+        result["protective_coverage"] = coverage
+        # The upside half: resting take-profits per ticker. Distances in ATRs
+        # need the day's ATR and mark, so they are in gather_market_data.
+        result["take_profit_coverage"] = {
+            tk: take_profit_coverage(block, positions, tk) for tk, block in coverage.items()
+        }
     except Exception as e:  # never break the positions tool over it
         logger.warning("protective coverage skipped in get_open_positions: %s", e)
     # The account against the constitution's limits (daily and weekly loss,

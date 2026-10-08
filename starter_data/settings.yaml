@@ -56,6 +56,7 @@ asset:
 # invested in a broad index ETF.
 position_sizing:
   volatility_target_annual: 0.15   # other instrument? set it to (share of capital to hold) × its realised annual volatility
+  target_atr_multiplier: 1.5       # the first profit target, in daily ATRs above each lot's entry: keep it equal to the target the strategy instruction states
 
 
 # ── 2 ── SCHEDULE ──────────────────────────────────────────────────

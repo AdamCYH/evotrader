@@ -122,12 +122,25 @@ class TestRowsARepairClosedOut:
         [live] = await journal.record_trade(
             _proposal(TradeAction.STOP_LOSS, 10, 90.0), order_status="PENDING", order_id="stop-1"
         )
-        [a] = await journal.record_trade(
-            _proposal(TradeAction.STOP_LOSS, 4, 90.0), order_status="PENDING", order_id="stop-1"
-        )
-        [b] = await journal.record_trade(
-            _proposal(TradeAction.STOP_LOSS, 6, 90.0), order_status="PENDING", order_id="stop-1"
-        )
+        # The two older rows sharing the order's id, as a journal written
+        # before record_trade became idempotent holds them (record_trade now
+        # returns the existing row instead of writing another).
+        a, b = [
+            await journal._insert_single_trade(
+                _proposal(TradeAction.STOP_LOSS, qty, 90.0),
+                90.0,
+                qty,
+                None,
+                None,
+                "{}",
+                None,
+                None,
+                None,
+                order_status="PENDING",
+                order_id="stop-1",
+            )
+            for qty in (4, 6)
+        ]
         async with journal._db.transaction() as conn:  # what a data repair writes
             await conn.execute(
                 "UPDATE trades SET order_status = 'CANCELLED', "
