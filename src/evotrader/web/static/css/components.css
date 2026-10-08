@@ -4084,25 +4084,36 @@ input:checked + .slider:before {
     flex-wrap: wrap;
     gap: 0.4rem 0.5rem;
     align-items: center;
+    min-width: 0;
 }
 
+/* One line where there is room; on a narrow screen the words wrap inside the
+   chip instead of running past the card's edge. */
 .insight-chip {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    padding: 0.18rem 0.55rem 0.18rem 0.45rem;
-    border-radius: 999px;
+    padding: 0.18rem 0.6rem 0.18rem 0.45rem;
+    border-radius: 0.85rem;
     font-size: 0.74rem;
+    line-height: 1.35;
     color: var(--text-secondary);
     background: var(--bg-input);
     border: 1px solid var(--border-color);
-    white-space: nowrap;
+    max-width: 100%;
+    min-width: 0;
 }
 
 .insight-chip b {
     font-family: var(--font-mono);
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.insight-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .insight-dot {

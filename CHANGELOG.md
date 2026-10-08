@@ -109,6 +109,10 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The signal strip under the account chart fits its card.** Its chips could
+  not wrap, so the correlation chip ran past the card's edge whenever the card
+  was narrow (a phone, or the account panel beside the others on a desktop);
+  the words now wrap inside the chip.
 - **One broker order is one journal entry, however often it is recorded.** The
   executor records an order when it places it and again after re-checking it,
   and each call wrote rows: a sale of part of a lot became two exits, a later

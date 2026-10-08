@@ -980,7 +980,10 @@ function renderSignalInsight(history, signalDays, failed = false) {
         dot.className = "insight-dot";
         const b = document.createElement("b");
         b.textContent = strong;
-        span.append(dot, b, document.createTextNode(" " + text));
+        const words = document.createElement("span");
+        words.className = "insight-text";
+        words.textContent = text;
+        span.append(dot, b, words);
         if (title) span.title = title;
         body.append(span);
     };
