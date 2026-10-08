@@ -109,6 +109,27 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **An inverse fund's readings no longer mix into the primary's.** When the
+  strategy agent expresses a bearish view through the primary's inverse fund,
+  it runs the market-data tool on the fund too, which stores a snapshot with
+  the fund's own signal, read on the fund's prices: roughly the mirror image of
+  the primary's. Trading decisions never read stored snapshots, but the console
+  did: the market panel's chart drew both in one line and zigzagged between a
+  reading and its mirror image. The panel now shows one instrument, picked from
+  a list beside its title (the primary first and by default, then every other
+  instrument with readings), and another instrument's live reading no longer
+  lands on it. The account chart's daily signal uses the primary on any day it
+  was read. The attribution backfills take the channel votes and participation
+  from the row's own instrument, and a cycle with no row gets the primary's
+  snapshot. `log_signal_attribution` refuses a row under the primary's inverse
+  fund (`asset.inverse_ticker`, or a negative `leverage` in
+  `asset.instruments`) and says how to log it under the primary: the scorer
+  measures a row on its own ticker's next-day move, so a right bearish call
+  logged under the fund reads as wrong. Rows already logged under the fund are
+  not changed; to correct one, move it to the primary at the primary's price,
+  with its directions in the primary's terms, and clear its forward returns.
+  `/api/chart/tech` takes `ticker` and answers with `ticker` and `tickers`;
+  `scenarios.from_history.load_snapshots` takes `ticker`.
 - **A stop and a take-profit that split a position are not a protection gap.**
   A resting order reserves its shares, so a take-profit on part of a position
   and a stop on the rest are the only way to have both. The post-cycle audit

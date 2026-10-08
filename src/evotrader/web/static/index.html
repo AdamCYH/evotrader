@@ -23,7 +23,7 @@
     <!-- Marked for Markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
 </head>
 
 <body>
@@ -272,7 +272,10 @@
                             <div class="panel-header technicals-panel-header">
                                 <div class="technicals-header-left">
                                     <h2><i class="fa-solid fa-gauge-high text-cyan"></i> Market Technicals</h2>
-                                    <span id="tech-ticker-badge" class="badge badge-outline text-dim font-mono">—</span>
+                                    <select id="tech-ticker-select" class="tech-ticker-select font-mono" disabled
+                                        title="Which instrument's readings the panel shows. Each instrument's signal is read on its own prices, so an inverse fund's reads roughly opposite to the stock it tracks." aria-label="Instrument">
+                                        <option>—</option>
+                                    </select>
                                 </div>
                                 <div class="technicals-header-right">
                                     <span id="market-regime-badge" class="badge badge-emerald" title="Current Market Regime" style="display: none;">
@@ -1235,7 +1238,7 @@
     </div>
 
     <!-- Modular Application Coordinator -->
-    <script type="module" src="js/app.js?v=8"></script>
+    <script type="module" src="js/app.js?v=9"></script>
 </body>
 
 </html>

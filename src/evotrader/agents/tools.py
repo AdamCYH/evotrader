@@ -2451,7 +2451,9 @@ async def log_signal_attribution(attribution_json: str) -> dict:
 
     Args:
         attribution_json: JSON object with any of these keys —
-            ``ticker`` (required),
+            ``ticker`` (required): the instrument the signal is read on, the
+            primary — also on a cycle that trades its inverse fund, which is a
+            bearish call on the primary (-1, at the primary's price),
             ``algo_direction``, ``algo_strength``, ``algo_author``,
             ``participation_ratio``,
             ``news_direction``, ``news_strength``, ``catalyst``,
@@ -2487,6 +2489,21 @@ async def log_signal_attribution(attribution_json: str) -> dict:
     ticker = str(data.get("ticker") or "").strip()
     if not ticker:
         return {"status": "error", "error": "ticker is required"}
+    # A row under the inverse fund is scored on the fund's price, which moves
+    # against the primary's: a bearish call that was right reads as wrong.
+    primary = _primary_behind_inverse(ticker)
+    if primary:
+        fund = ticker.upper()
+        return {
+            "status": "error",
+            "error": (
+                f"{fund} is the inverse fund of {primary}. The signal, its directions "
+                f"and the forward return that scores them are all read on {primary}, so "
+                f"log this cycle under ticker {primary}: price_at_decision is {primary}'s "
+                f"price and every direction is in {primary} terms (buying or holding "
+                f"{fund} is a bearish {primary} call, -1). Nothing was written."
+            ),
+        }
 
     allowed = {
         "algo_direction",
@@ -3732,6 +3749,26 @@ def _pending_order_view(row: dict) -> dict:
         "option_id": trade_json.get("option_id"),
         "created_at": row.get("created_at", "?"),
     }
+
+
+def _primary_behind_inverse(ticker: str) -> str | None:
+    """The primary ticker when ``ticker`` is its inverse fund, else None.
+
+    Inverse means configured as ``asset.inverse_ticker`` or with a negative
+    ``leverage`` in ``asset.instruments``.
+    """
+    try:
+        asset = _config.settings.asset if _config else None
+        primary = str(asset.primary_ticker or "").upper() if asset else ""
+        symbol = ticker.strip().upper()
+        if not primary or symbol == primary:
+            return None
+        info = (asset.instruments or {}).get(symbol)
+        if symbol == str(asset.inverse_ticker or "").upper() or (info and info.leverage < 0):
+            return primary
+    except AttributeError:
+        pass
+    return None
 
 
 def _target_atr_multiplier() -> float | None:

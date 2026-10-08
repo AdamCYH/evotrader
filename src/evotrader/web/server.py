@@ -824,13 +824,32 @@ def create_app(
         }
 
     @app.get("/api/chart/tech", dependencies=[Depends(verify_auth)])
-    async def get_tech_chart(limit: int = 500, period: str = "all") -> dict[str, Any]:
-        """Fetch the most recent technical indicators and algorithm signals from the market_snapshots table."""
+    async def get_tech_chart(
+        limit: int = 500, period: str = "all", ticker: str | None = None
+    ) -> dict[str, Any]:
+        """One instrument's recent snapshots (indicators and the algorithm's signal).
+
+        ``ticker`` picks the instrument; without it, the configured primary.
+        Each instrument's signal is read on its own prices, so a chart of two
+        (a stock and its inverse fund) zigzagged between a reading and its
+        mirror image. ``tickers`` lists the instruments to choose from: the
+        primary first, then every other one with snapshots, newest first.
+        """
         logger_db = app.state.thought_logger
         points = []
         latest = None
+        primary = (config.settings.asset.primary_ticker or "").strip().upper()
+        tickers = [primary] if primary else []
         try:
-            all_points = await logger_db.get_market_snapshots(limit=limit)
+            for row in await logger_db.snapshot_tickers():
+                symbol = str(row["ticker"]).upper()
+                if symbol not in tickers:
+                    tickers.append(symbol)
+        except Exception as e:
+            logger.error("Failed to list the instruments with snapshots: %s", e)
+        chosen = (ticker or "").strip().upper() or (tickers[0] if tickers else None)
+        try:
+            all_points = await logger_db.get_market_snapshots(limit=limit, ticker=chosen)
             if all_points:
                 latest = all_points[0]  # Most recent snapshot in DB
 
@@ -857,11 +876,14 @@ def create_app(
                     if isinstance(raw_snap, dict):
                         raw_snap.setdefault("timestamp", trades[0].get("timestamp"))
                         raw_snap.setdefault("ticker", trades[0].get("ticker") or primary_ticker())
-                        latest = normalize_snapshot_payload(raw_snap)
+                        # Only the chosen instrument's: another's would put its
+                        # price and signal under this one's name.
+                        if not chosen or str(raw_snap.get("ticker") or "").upper() == chosen:
+                            latest = normalize_snapshot_payload(raw_snap)
             except Exception:
                 pass
 
-        return {"points": points, "latest": latest}
+        return {"points": points, "latest": latest, "ticker": chosen, "tickers": tickers}
 
     @app.get("/api/chart/signal-daily", dependencies=[Depends(verify_auth)])
     async def get_signal_daily(period: str = "all") -> dict[str, Any]:
@@ -881,7 +903,8 @@ def create_app(
         except Exception as e:
             logger.error("Failed to read the signal history: %s", e)
             return {"days": [], "error": "signal history unavailable"}
-        days = daily_signal_summary(readings)
+        primary = (config.settings.asset.primary_ticker or "").strip().upper() or None
+        days = daily_signal_summary(readings, preferred=primary)
         if cutoff:
             first = cutoff.strftime("%Y-%m-%d")
             days = [d for d in days if d["date"] >= first]

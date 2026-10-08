@@ -102,10 +102,13 @@ export async function fetchThoughts(sessionId = null) {
 }
 
 /**
- * Fetch dedicated timeseries data for the Technical Chart
+ * One instrument's recent snapshots for the market panel and its chart.
+ * Without a ticker, the server answers with the configured primary's; the
+ * answer names the instrument it is for and lists the ones to choose from.
  */
-export async function fetchTechChart(limit = 500, period = "all") {
-    return apiFetch(`/api/chart/tech?limit=${limit}&period=${encodeURIComponent(period)}`);
+export async function fetchTechChart(limit = 500, period = "all", ticker = null) {
+    const pick = ticker ? `&ticker=${encodeURIComponent(ticker)}` : "";
+    return apiFetch(`/api/chart/tech?limit=${limit}&period=${encodeURIComponent(period)}${pick}`);
 }
 
 /**

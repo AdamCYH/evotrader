@@ -221,13 +221,16 @@ class SignalAttributionStore:
 
         Picks the latest snapshot at or before the attribution row (a session
         can run the market-data tool more than once), falling back to the
-        session's latest if clocks disagree. Idempotent: only rows still NULL
-        are touched. Returns the number of rows filled.
+        session's latest if clocks disagree. Only the row's own instrument's
+        snapshot: a session that also read another one (an inverse fund) holds
+        that one's channels too, read on its own prices, roughly the mirror
+        image. Idempotent: only rows still NULL are touched. Returns the number
+        of rows filled.
         """
         try:
             async with self._db.transaction() as conn:
                 cur = await conn.execute(
-                    "SELECT id, timestamp, session_id FROM signal_attribution "
+                    "SELECT id, timestamp, session_id, ticker FROM signal_attribution "
                     "WHERE channel_votes IS NULL AND session_id IS NOT NULL "
                     "ORDER BY timestamp LIMIT ?",
                     (limit,),
@@ -238,8 +241,9 @@ class SignalAttributionStore:
                     snap = await conn.execute(
                         "SELECT timestamp, sub_signals_json FROM market_snapshots "
                         "WHERE session_id = ? AND sub_signals_json IS NOT NULL "
+                        "AND (? IS NULL OR UPPER(ticker) = UPPER(?)) "
                         "ORDER BY (timestamp <= ?) DESC, timestamp DESC LIMIT 1",
-                        (row["session_id"], row["timestamp"]),
+                        (row["session_id"], row["ticker"], row["ticker"], row["timestamp"]),
                     )
                     found = await snap.fetchone()
                     if not found:
@@ -270,15 +274,16 @@ class SignalAttributionStore:
         rows too (the counts exist only from 2026-10-05).
 
         Uses the session's market-data response at or before the row (the
-        latest one if clocks disagree). Fills only rows whose scale is still
-        empty and never overwrites a value already written. Returns the number
-        of rows filled.
+        latest one if clocks disagree), for the row's own instrument: a session
+        that also read an inverse fund has that one's response too. Fills only
+        rows whose scale is still empty and never overwrites a value already
+        written. Returns the number of rows filled.
         """
         path = "$.response.algo_signal."
         try:
             async with self._db.transaction() as conn:
                 cur = await conn.execute(
-                    "SELECT id, timestamp, session_id FROM signal_attribution "
+                    "SELECT id, timestamp, session_id, ticker FROM signal_attribution "
                     "WHERE participation_scale IS NULL AND session_id IS NOT NULL "
                     "ORDER BY timestamp DESC LIMIT ?",
                     (limit,),
@@ -304,10 +309,13 @@ class SignalAttributionStore:
                               AND event_type = 'tool_response'
                               AND content = 'gather_market_data'
                               AND json_valid(meta)
+                              AND (? IS NULL
+                                   OR json_extract(meta, '$.response.ticker') IS NULL
+                                   OR UPPER(json_extract(meta, '$.response.ticker')) = UPPER(?))
                             ORDER BY (timestamp <= ?) DESC, timestamp DESC
                             LIMIT 1
                             """,
-                            (row["session_id"], row["timestamp"]),
+                            (row["session_id"], row["ticker"], row["ticker"], row["timestamp"]),
                         )
                     ).fetchone()
                     if not found or found["scale"] is None:
@@ -333,7 +341,7 @@ class SignalAttributionStore:
             logger.error("Failed to backfill participation: %s", e)
             return 0
 
-    async def backfill_algo_only_rows(self, limit: int = 200) -> int:
+    async def backfill_algo_only_rows(self, limit: int = 200, primary: str | None = None) -> int:
         """Write the algorithm's call for trading cycles that left no row.
 
         The strategy agent writes each cycle's row, so a cycle that never
@@ -353,15 +361,25 @@ class SignalAttributionStore:
         a snapshot are not cycles), no earlier than the first row the agent
         wrote — cycles before the record existed were never part of it.
         Idempotent. Returns the number of rows written.
+
+        A session that read two instruments (the primary and its inverse fund)
+        has a snapshot of each; ``primary``'s is the call, else the session's
+        latest, as before there was a choice.
         """
         try:
             async with self._db.transaction() as conn:
                 cur = await conn.execute(
                     """
                     SELECT c.session_id,
-                           (SELECT MAX(t.id) FROM market_snapshots t
-                             WHERE t.session_id = c.session_id
-                               AND t.composite_signal IS NOT NULL) AS snapshot_id
+                           COALESCE(
+                               (SELECT MAX(t.id) FROM market_snapshots t
+                                 WHERE t.session_id = c.session_id
+                                   AND t.composite_signal IS NOT NULL
+                                   AND UPPER(t.ticker) = UPPER(?)),
+                               (SELECT MAX(t.id) FROM market_snapshots t
+                                 WHERE t.session_id = c.session_id
+                                   AND t.composite_signal IS NOT NULL)
+                           ) AS snapshot_id
                     FROM cycle_runs c
                     WHERE c.cycle_type = 'TRADING'
                       AND c.timestamp >= (SELECT MIN(timestamp) FROM signal_attribution
@@ -371,7 +389,7 @@ class SignalAttributionStore:
                     ORDER BY c.timestamp
                     LIMIT ?
                     """,
-                    (limit,),
+                    (primary, limit),
                 )
                 todo = [dict(r) for r in await cur.fetchall() if r["snapshot_id"] is not None]
                 written = 0

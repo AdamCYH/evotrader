@@ -327,22 +327,46 @@ class ThoughtLogger:
         async with self._db.connection() as conn, conn.execute(query, params) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
-    async def get_market_snapshots(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Fetch the most recent technical indicators and algorithm signals from the market_snapshots table."""
+    async def snapshot_tickers(self) -> list[dict[str, Any]]:
+        """Each instrument with stored snapshots: ticker, count, last timestamp.
+
+        Newest first. The market panel offers these as its instrument choice.
+        """
+        query = (
+            "SELECT ticker, COUNT(*) AS count, MAX(timestamp) AS last FROM market_snapshots "
+            "WHERE ticker IS NOT NULL AND ticker != '' GROUP BY ticker ORDER BY last DESC"
+        )
+        async with self._db.connection() as conn, conn.execute(query) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_market_snapshots(
+        self, limit: int = 20, ticker: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The most recent snapshots (indicators and the algorithm's signal), newest first.
+
+        ``ticker`` keeps one instrument's. Every snapshot carries its own
+        instrument's signal, read on that instrument's prices: an inverse fund's
+        reads roughly opposite to the stock it tracks, so a list holding both
+        zigzags between the two.
+        """
+        where, params = "", (limit,)
+        if ticker:
+            where, params = "WHERE ticker = ?", (ticker, limit)
         points = []
         async with self._db.connection() as conn:
             async with conn.execute(
-                """
+                f"""
                 SELECT
                     timestamp, ticker, session_id, rsi_14, bollinger_upper, bollinger_middle,
                     bollinger_lower, bollinger_width, vwap, vwap_dist, close_price,
                     composite_signal, regime, regime_confidence, sub_signals_json, indicators_json,
                     algo_version, daily_change_pct, gap_pct
                 FROM market_snapshots
+                {where}
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
 

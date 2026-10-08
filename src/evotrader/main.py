@@ -1167,7 +1167,9 @@ async def start(
                         # provider outage, a crash) still computed and stored
                         # the algorithm's call. Record it, flagged agent_absent,
                         # so the control group has no infra-shaped holes.
-                        await store.backfill_algo_only_rows()
+                        await store.backfill_algo_only_rows(
+                            primary=config.settings.asset.primary_ticker
+                        )
                         # Every channel's vote, from the snapshot this cycle
                         # stored — so the calibration report can score each
                         # channel on its own calls, not only the one that led.

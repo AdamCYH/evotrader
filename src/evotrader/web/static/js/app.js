@@ -10,6 +10,7 @@ import {
     signalLean, vwapDistance,
 } from "./components/signal_display.js";
 import { alignSignalDays, equityValues, nextDayFollowThrough } from "./components/equity_overlay.js";
+import { pickerTickers, readingIsShown } from "./components/instrument_picker.js";
 import { initMemoryController } from "./memory_controller.js";
 import {
     openDetailDrawer, closeDetailDrawer, switchDrawerTab,
@@ -72,6 +73,10 @@ const state = {
     // The combined signal drawn under the account / P&L curve (remembered).
     signalOverlay: localStorage.getItem("gd_perf_signal_overlay") === "true",
     techChartMode: "signals", // 'signals' | 'strategies' | 'technicals'
+    // The instrument the market panel shows (null until the first answer names
+    // the primary), and the ones its picker offers.
+    techTicker: null,
+    techTickers: [],
     performancePeriod: "week",
     latestTechPoints: [],
     latestMarketSnapshot: null,
@@ -700,6 +705,14 @@ function setupEventHandlers() {
     if (tabStrategies) tabStrategies.addEventListener("click", () => setTechChartTab("strategies"));
     if (tabTechnicals) tabTechnicals.addEventListener("click", () => setTechChartTab("technicals"));
 
+    const techTickerSelect = document.getElementById("tech-ticker-select");
+    if (techTickerSelect) {
+        techTickerSelect.addEventListener("change", () => {
+            state.techTicker = techTickerSelect.value || null;
+            refreshTechChart();
+        });
+    }
+
     // Cash adjustment modal
     if (btnLogDeposit) {
         btnLogDeposit.addEventListener("click", () => showCashAdjustmentModal());
@@ -1017,22 +1030,61 @@ function renderSignalInsight(history, signalDays, failed = false) {
     );
 }
 
+/**
+ * Whether a reading belongs to the instrument the market panel shows (before
+ * the first answer names it, the configured primary). Readings of another
+ * instrument are its own signal on its own prices (instrument_picker.js).
+ */
+function isShownTicker(ticker) {
+    return readingIsShown(ticker, state.techTicker || ui.getDisplayTicker(null));
+}
+
+/** The market panel's instrument picker: the primary first, then the rest with readings. */
+function renderTechTickers() {
+    const select = document.getElementById("tech-ticker-select");
+    const list = pickerTickers(state.techTickers, state.techTicker);
+    if (!select || list.length === 0) return;
+    if ([...select.options].map(o => o.value).join(",") !== list.join(",")) {
+        select.replaceChildren(...list.map(t => new Option(t, t)));
+    }
+    if (state.techTicker) select.value = state.techTicker;
+    // One instrument is a label, not a choice.
+    select.disabled = list.length < 2;
+}
+
+/** Another instrument's live reading: offer it in the picker, leave the panel alone. */
+function noteTechTicker(ticker) {
+    const list = pickerTickers(state.techTickers, ticker);
+    if (list.length !== state.techTickers.length) {
+        state.techTickers = list;
+        renderTechTickers();
+    }
+}
+
+/** Apply one /api/chart/tech answer: the picker, the panel's latest reading, the chart. */
+function applyTechChart(techData) {
+    if (techData.ticker) state.techTicker = String(techData.ticker).toUpperCase();
+    if (Array.isArray(techData.tickers)) state.techTickers = pickerTickers(techData.tickers);
+    renderTechTickers();
+
+    state.latestTechPoints = techData.points || [];
+    const points = state.latestTechPoints;
+    const latest = techData.latest || (points.length > 0 ? points[points.length - 1] : null);
+    if (latest) {
+        updateMarketTechnicalsAndSignals(latest);
+    }
+
+    // The chart canvas is only visible on the History tab; the other tabs
+    // redraw it on switch (setTechChartTab).
+    if ((state.techChartMode || 'signals') === 'signals') {
+        techChart.showSignalsContext(points);
+    }
+}
+
 /** Refresh the technical and algorithm signals chart */
 async function refreshTechChart() {
     try {
-        const techData = await api.fetchTechChart(500, state.performancePeriod);
-        state.latestTechPoints = techData.points || [];
-
-        const latest = techData.latest || (techData.points && techData.points.length > 0 ? techData.points[techData.points.length - 1] : null);
-        if (latest) {
-            updateMarketTechnicalsAndSignals(latest);
-        }
-
-        // The chart canvas is only visible on the History tab; the other tabs
-        // redraw it on switch (setTechChartTab).
-        if ((state.techChartMode || 'signals') === 'signals') {
-            techChart.showSignalsContext(state.latestTechPoints);
-        }
+        applyTechChart(await api.fetchTechChart(500, state.performancePeriod, state.techTicker));
     } catch (err) {
         console.error("Failed to refresh tech chart:", err);
     }
@@ -1184,23 +1236,12 @@ async function loadDashboardData() {
         const tradesData = await api.fetchTrades(500, state.performancePeriod);
         ui.renderJournal(tradesData.trades, journalTableBody);
 
-        // Fetch dedicated market snapshots for the technical chart
-        // Fetch dedicated market snapshots for the technical & signals chart
-        let techPoints = [];
-        let latestSnapshot = null;
+        // The market panel: the chosen instrument's snapshots for the technical & signals chart
+        let techRes = null;
         try {
-            const techRes = await api.fetchTechChart(500, state.performancePeriod);
-            if (techRes) {
-                techPoints = techRes.points || [];
-                latestSnapshot = techRes.latest || (techPoints.length > 0 ? techPoints[techPoints.length - 1] : null);
-            }
+            techRes = await api.fetchTechChart(500, state.performancePeriod, state.techTicker);
         } catch (err) {
             console.warn("Failed to load tech chart data:", err);
-        }
-
-        state.latestTechPoints = techPoints;
-        if (latestSnapshot) {
-            updateMarketTechnicalsAndSignals(latestSnapshot);
         }
 
         // Populate the signal chart, drivers list or indicators matrix for the active tab
@@ -1212,9 +1253,7 @@ async function loadDashboardData() {
         if (subSignalsEl) subSignalsEl.style.display = (techMode === 'strategies') ? "flex" : "none";
         if (technicalsMatrixEl) technicalsMatrixEl.style.display = (techMode === 'technicals') ? "flex" : "none";
 
-        if (techMode === 'signals') {
-            techChart.showSignalsContext(techPoints);
-        }
+        applyTechChart(techRes || {});
 
         // Always populate the performance chart (left panel — period-filtered)
         try {
@@ -1671,10 +1710,14 @@ function handleIncomingEvent(event) {
                     // Update Technical & Signal panel in real-time when market data is gathered
                     if (incoming.tool_name === "gather_market_data" && incoming.response) {
                         const resp = incoming.response;
-                        updateMarketTechnicalsAndSignals(resp);
-                        const rsiVal = resp.indicators ? resp.indicators.rsi_14 : null;
-                        const compositeSig = resp.algo_signal ? resp.algo_signal.composite_signal : null;
-                        techChart.updatePoint(rsiVal, compositeSig, resp);
+                        if (isShownTicker(resp.ticker)) {
+                            updateMarketTechnicalsAndSignals(resp);
+                            const rsiVal = resp.indicators ? resp.indicators.rsi_14 : null;
+                            const compositeSig = resp.algo_signal ? resp.algo_signal.composite_signal : null;
+                            techChart.updatePoint(rsiVal, compositeSig, resp);
+                        } else {
+                            noteTechTicker(resp.ticker);
+                        }
                     }
 
                     const existingCard = thoughtsContainer.querySelector(`[data-tool-key="${incoming.agent}_${incoming.tool_name}"]`);
@@ -1715,6 +1758,10 @@ function handleIncomingEvent(event) {
             loadDashboardData();
             break;
         case "indicators":
+            if (!isShownTicker(event.data && event.data.ticker)) {
+                noteTechTicker(event.data.ticker);
+                break;
+            }
             updateMarketTechnicalsAndSignals(event.data);
             techChart.updatePoint(event.data.rsi_14, event.data.composite_signal, event.data);
             break;
@@ -1841,13 +1888,8 @@ function updateMarketTechnicalsAndSignals(data) {
     const closePrice = data.close ?? data.close_price ?? (data.quote ? data.quote.last : null);
     const panelIndicators = data.indicators || data;
 
-    // 1. Ticker badge
-    const tickerBadge = document.getElementById("tech-ticker-badge");
-    if (tickerBadge) {
-        const ticker =
-            data.ticker || (data.quote && data.quote.ticker) || ui.getDisplayTicker();
-        tickerBadge.textContent = ticker;
-    }
+    // 1. The instrument is the picker's (renderTechTickers); readings of
+    //    another one never reach this panel (isShownTicker).
 
     // 1b. Price, the day's move, and when this reading was taken — a reading
     //     from the 17:00 cycle is still on screen at 08:00 the next day.
@@ -1903,6 +1945,10 @@ function updateMarketTechnicalsAndSignals(data) {
             if (regimeConf) {
                 regimeBadge.title = `Regime: ${cleanRegime} (Confidence: ${Math.round(regimeConf * 100)}%)`;
             }
+        } else {
+            // No regime in this reading: hide the badge rather than keep the
+            // last one, which may be another instrument's.
+            regimeBadge.style.display = "none";
         }
     }
 
@@ -1955,6 +2001,19 @@ function updateMarketTechnicalsAndSignals(data) {
                 gaugeBar.style.width = `${(Math.abs(clamped) / 2.0) * 100.0}%`;
             }
         }
+    } else {
+        // No signal in this reading: back to the empty gauge rather than keep
+        // the last value, which may be another instrument's.
+        if (scoreValEl) {
+            scoreValEl.textContent = "--";
+            scoreValEl.className = "font-mono font-bold text-lg text-dim";
+        }
+        if (actionBadge) {
+            actionBadge.className = "badge badge-outline";
+            actionBadge.textContent = "Awaiting data";
+        }
+        if (gaugeMarker) gaugeMarker.style.left = "50%";
+        if (gaugeBar) gaugeBar.style.width = "0%";
     }
 
     // 4. Sub-Signals List

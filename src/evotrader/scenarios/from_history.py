@@ -93,17 +93,24 @@ def load_news(db_path: str) -> pd.DataFrame:
     return df
 
 
-def load_snapshots(db_path: str) -> pd.DataFrame:
-    """Read recorded market snapshots."""
+def load_snapshots(db_path: str, ticker: str | None = None) -> pd.DataFrame:
+    """Read recorded market snapshots, of one instrument when ``ticker`` is given.
+
+    :func:`attach_forward_returns` scores every row against one price series,
+    so a frame holding two instruments (a stock and its inverse fund) scores
+    one of them against the other's prices: pass the instrument.
+    """
+    where, params = ("WHERE ticker = ?", (ticker,)) if ticker else ("", ())
     conn = sqlite3.connect(db_path)
     try:
         df = pd.read_sql(
-            """
+            f"""
             SELECT timestamp, ticker, close_price, composite_signal, regime,
                    regime_confidence, sub_signals_json, indicators_json
-            FROM market_snapshots ORDER BY timestamp
+            FROM market_snapshots {where} ORDER BY timestamp
             """,
             conn,
+            params=params,
         )
     finally:
         conn.close()

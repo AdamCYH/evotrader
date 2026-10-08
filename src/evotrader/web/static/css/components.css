@@ -3328,8 +3328,30 @@ input:checked + .slider:before {
     flex-shrink: 0;
 }
 
-.technicals-header-left #tech-ticker-badge {
+/* The instrument picker, drawn as the badge it replaced. */
+.technicals-header-left .tech-ticker-select {
+    background: var(--bg-light);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    padding: 0.3rem 0.6rem;
     font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+}
+
+.technicals-header-left .tech-ticker-select:hover:not(:disabled),
+.technicals-header-left .tech-ticker-select:focus-visible {
+    border-color: var(--cyan);
+}
+
+/* One instrument: a label, not a choice (no arrow, normal text colour). */
+.technicals-header-left .tech-ticker-select:disabled {
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: default;
+    opacity: 1;
 }
 
 .technicals-header-right {
