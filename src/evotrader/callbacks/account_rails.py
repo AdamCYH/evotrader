@@ -226,9 +226,12 @@ def evaluate_account_rails(
     # the last loss, then lifts even if the streak is unbroken. Session-scoped
     # by the journal: a Friday streak cannot block Monday.
     pause_active = False
+    pause_expires_at = None
     if state.consecutive_losses >= breakers.consecutive_losses_pause:
         pause = timedelta(minutes=breakers.pause_duration_minutes)
         pause_active = state.last_loss_at is None or now - state.last_loss_at <= pause
+        if state.last_loss_at is not None:
+            pause_expires_at = state.last_loss_at + pause
         if pause_active and not is_exit:
             verdict.violations.append(
                 f"Circuit breaker: {state.consecutive_losses} consecutive losses "
@@ -269,7 +272,12 @@ def evaluate_account_rails(
         "week_pnl": round(state.week_pnl, 2),
         "weekly_loss_limit_usd": (round(limits.max_weekly_loss_pct * value, 2) if value else None),
         "consecutive_losses": state.consecutive_losses,
+        "loss_streak_limit": breakers.consecutive_losses_pause,
         "loss_streak_pause_active": pause_active,
+        # Whether a streak at the limit still binds, and until when: the pause
+        # lifts this long after the last loss even if the streak stands.
+        "last_loss_at": state.last_loss_at.isoformat() if state.last_loss_at else None,
+        "pause_expires_at": pause_expires_at.isoformat() if pause_expires_at else None,
         "trades_today": state.trades_today,
         "max_trades_per_day": rules.max_trades_per_day,
         "option_premium_limit_usd": (

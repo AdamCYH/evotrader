@@ -848,6 +848,9 @@ async def get_ticker_snapshot(ticker: str) -> dict:
         # the two fields above is the step most likely to be skipped.
         "atr_14": atr or None,
         "atr_pct_of_price": round(atr / last, 5) if atr and last else None,
+        # Where a stop may sit: the constitution's cap against the ATR stop.
+        # On a fund whose ATR is a large share of its price the cap binds.
+        "stop_geometry": _stop_geometry(last, atr),
         "daily_change_pct": (
             round((last / prev_close - 1) * 100, 4) if last and prev_close else None
         ),
@@ -1467,6 +1470,10 @@ async def gather_market_data(ticker: str) -> dict:
         # The same two numbers as text, for anything that summarises them.
         "daily_change_display": _pct_display(daily_change_pct),
         "gap_display": _pct_display(gap_pct),
+        # Where a stop may sit: the constitution's cap against the ATR stop.
+        "stop_geometry": _stop_geometry(
+            (quote_data or {}).get("last"), (indicators or {}).get("atr_14")
+        ),
         "algo_signal": algo_result,
         "portfolio_state": portfolio_state,
         "open_positions": open_positions if open_positions else None,
@@ -2669,12 +2676,14 @@ async def check_risk_limits(
     quantity: float,
     price: float,
     action: str = "OPEN",
+    stop_price: float | None = None,
 ) -> dict:
     """Check a proposed trade against all risk limits in the constitution.
 
     Validates the trade against maximum position size, daily loss limits,
-    trade count limits, consecutive loss circuit breakers, and allowed
-    tickers. Returns a verdict: APPROVED, MODIFIED, or REJECTED.
+    trade count limits, consecutive loss circuit breakers, allowed tickers
+    and, when ``stop_price`` is given for an entry, the widest permitted stop
+    (``max_stop_loss_pct``). Returns a verdict: APPROVED, MODIFIED, or REJECTED.
 
     Exit trades (CLOSE, STOP_LOSS, TAKE_PROFIT) are exempt from circuit
     breakers, the daily-loss limit, daily trade count, and buying power
@@ -2686,6 +2695,10 @@ async def check_risk_limits(
         quantity: Number of shares.
         price: Expected price per share.
         action: Trade action — "OPEN", "CLOSE", "STOP_LOSS", or "TAKE_PROFIT".
+        stop_price: The proposal's protective stop. Pass it for every entry
+            that carries one: its distance from ``price`` is checked against
+            the constitution's max_stop_loss_pct, and the context reports the
+            distance and the widest permitted stop (``stop_at_cap``).
     """
     if not _config or not _journal:
         return {"error": "Risk system not initialised"}
@@ -2731,6 +2744,20 @@ async def check_risk_limits(
         violations.append(
             f"Order value ${order_value:.2f} exceeds limit ${limits.max_order_value_usd:.2f}"
         )
+
+    # 3b. The stop's distance — an entry limit. The constitution caps it
+    #     (max_stop_loss_pct), and only the risk manager's reading of the
+    #     constitution enforced that: this check said APPROVED, with no
+    #     violations, to proposals the same review then refused on the stop.
+    stop_check: dict[str, Any] | None = None
+    if stop_price is not None and not is_exit and price > 0:
+        from evotrader.tools.stop_geometry import stop_cap_check
+
+        stop_problem, stop_check = stop_cap_check(
+            price, float(stop_price), direction, limits.max_stop_loss_pct
+        )
+        if stop_problem:
+            violations.append(stop_problem)
 
     # 4-6 and 8b. The account-level limits (daily and weekly loss, drawdown
     #    from the peak, the loss-streak pause, today's order count) are one
@@ -2886,6 +2913,8 @@ async def check_risk_limits(
             "buying_power": buying_power,
             "wash_sale_risk": wash_sale_risk,
             "account_rails": rails.report,
+            # The stop against the cap: its distance and the widest permitted stop.
+            "stop": stop_check,
         },
     }
 
@@ -3751,6 +3780,21 @@ def _pending_order_view(row: dict) -> dict:
     }
 
 
+def _stop_geometry(last: Any, atr: Any) -> dict | None:
+    """``tools.stop_geometry`` with the constitution's cap and the configured ATR stop."""
+    from evotrader.tools.stop_geometry import stop_geometry
+
+    try:
+        cap = _config.constitution.risk_limits.max_stop_loss_pct if _config else None
+        stop_atr = _config.settings.position_sizing.default_stop_loss_atr_multiplier
+    except AttributeError:
+        return None
+    try:
+        return stop_geometry(float(last or 0), float(atr or 0), cap, stop_atr)
+    except (TypeError, ValueError):
+        return None
+
+
 def _primary_behind_inverse(ticker: str) -> str | None:
     """The primary ticker when ``ticker`` is its inverse fund, else None.
 
@@ -3813,6 +3857,11 @@ async def get_open_positions() -> dict:
     entry (``mfe_atr``) and distance to the first target, are in
     gather_market_data's snapshot, which has the day's ATR and price.
 
+    ``last_risk_verdict`` is the risk manager's latest verdict (within 18
+    hours): ``verdict``, the ``trade`` it checked, the check's ``violations``
+    and the report's ``reasons``. REJECTED means nothing was sent to the
+    broker: resubmit with the named change rather than the same order.
+
     Uses a short TTL cache (30s) to avoid redundant queries within the same
     trading cycle when multiple agents call this tool in quick succession.
     """
@@ -3873,6 +3922,19 @@ async def get_open_positions() -> dict:
             ).report
         except Exception as e:  # never break the positions tool over it
             logger.warning("account rails skipped in get_open_positions: %s", e)
+    # The risk manager's last verdict, read back from the thought log: a
+    # refused proposal is not an order that vanished at the broker. Within the
+    # handoff's staleness window only.
+    if _db is not None:
+        try:
+            from evotrader.tools.market_hours import _resolve_now
+            from evotrader.tools.risk_verdict import latest_risk_review
+            from evotrader.tools.trading_handoff import STALE_AFTER_HOURS
+
+            since = _resolve_now().astimezone(UTC) - timedelta(hours=STALE_AFTER_HOURS)
+            result["last_risk_verdict"] = await latest_risk_review(_db, since=since.isoformat())
+        except Exception as e:  # never break the positions tool over it
+            logger.warning("last risk verdict skipped in get_open_positions: %s", e)
     # The latest broker position sync (daily, between cycles), including its
     # cost-basis check: whether the journal's lots agree with the broker's
     # average cost. A disagreement is flagged there, never corrected.

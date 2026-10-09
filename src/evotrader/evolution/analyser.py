@@ -307,22 +307,44 @@ class PerformanceAnalyser:
         }
 
     def _analyse_streaks(self, trades: list[dict]) -> dict[str, Any]:
-        """Analyse win/loss streaks."""
+        """Analyse win/loss streaks, one closing decision at a time.
+
+        A sale of a position held as several lots is one broker order written
+        as one row per lot; counted by row it was several "consecutive
+        losses". Grouped as the loss-streak breaker groups them (a real broker
+        order id, else the row), so the report and the breaker agree.
+        """
+        from evotrader.db.journal import is_broker_order_id
+
         streak = 0
         max_win_streak = 0
         max_loss_streak = 0
         current_type = None
 
-        # get_recent_trades returns newest-first; scanning that order makes
-        # 'current_streak' describe the OLDEST run in the window.
-        ordered = sorted(
-            trades,
-            key=lambda t: _parse_ts(t.get("timestamp")) or datetime.min.replace(tzinfo=UTC),
-        )
-        for t in ordered:
+        decisions: dict[str, dict[str, Any]] = {}
+        for i, t in enumerate(trades):
             pnl = t.get("realized_pnl")
             if pnl is None:
                 continue
+            order_id = t.get("order_id")
+            if is_broker_order_id(order_id):
+                key = f"order:{order_id}"
+            else:
+                key = f"row:{t['id']}" if t.get("id") is not None else f"index:{i}"
+            decision = decisions.setdefault(key, {"realized_pnl": 0.0, "timestamp": None})
+            decision["realized_pnl"] += float(pnl)
+            ts = _parse_ts(t.get("timestamp"))
+            if ts is not None and (decision["timestamp"] is None or ts > decision["timestamp"]):
+                decision["timestamp"] = ts
+
+        # get_recent_trades returns newest-first; scanning that order makes
+        # 'current_streak' describe the OLDEST run in the window.
+        ordered = sorted(
+            decisions.values(),
+            key=lambda d: d["timestamp"] or datetime.min.replace(tzinfo=UTC),
+        )
+        for t in ordered:
+            pnl = t["realized_pnl"]
 
             if pnl > 0:
                 if current_type == "win":

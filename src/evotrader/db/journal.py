@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,6 +63,11 @@ SUPERSEDED_DUPLICATE_IDS_SQL = """
       AND COALESCE(k.order_status, 'FILLED') = 'FILLED'
 """
 EXCLUDE_SUPERSEDED_DUPLICATES_SQL = f" AND id NOT IN ({SUPERSEDED_DUPLICATE_IDS_SQL}) "
+
+#: One closing decision: a real broker order (every lot it closed), else the row
+#: itself. A sale of a position held as several lots is one order written as
+#: one row per lot, and it is one decision, won or lost once.
+CLOSING_DECISION_SQL = "CASE WHEN order_id GLOB '*[0-9]*' THEN order_id ELSE 'row:' || id END"
 
 
 def superseded_duplicate_ids(trades: list[dict[str, Any]]) -> set[int]:
@@ -1146,31 +1152,47 @@ class TradeJournal:
             row = await cursor.fetchone()
             return float(row["total_pnl"]) if row else 0.0
 
-    async def get_consecutive_losses(self) -> int:
-        """Count the current streak of consecutive losing trades."""
+    async def _losing_decision_streak(self, where: str = "", params: Sequence[Any] = ()) -> int:
+        """The current run of losing closing decisions, newest first.
+
+        Counted per decision (``CLOSING_DECISION_SQL``), not per row: an exit
+        that closed four lots is four rows under one order, and counted by row
+        it read as four consecutive losses, enough with one more to trip the
+        loss-streak pause after two decisions. A decision lost when its rows
+        sum below zero.
+        """
         async with self._db.connection() as conn:
             cursor = await conn.execute(
                 f"""
-                SELECT realized_pnl FROM trades
+                SELECT {CLOSING_DECISION_SQL} AS decision, SUM(realized_pnl) AS pnl,
+                       MAX(timestamp) AS at
+                FROM trades
                 WHERE realized_pnl IS NOT NULL
                 AND (order_status = 'FILLED' OR order_status IS NULL)
                 AND regime != 'reconciliation'
                 AND algo_version != 'system_sync'
+                {where}
                 {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
-                ORDER BY timestamp DESC
+                GROUP BY decision
+                ORDER BY at DESC
                 LIMIT 100
-                """
+                """,
+                tuple(params),
             )
             rows = await cursor.fetchall()
 
         streak = 0
         for row in rows:
-            pnl = row["realized_pnl"] if isinstance(row, dict) else row[0]
+            pnl = row["pnl"] if isinstance(row, dict) else row[1]
             if pnl is not None and pnl < 0:
                 streak += 1
             else:
                 break
         return streak
+
+    async def get_consecutive_losses(self) -> int:
+        """Count the current streak of consecutive losing decisions (see _losing_decision_streak)."""
+        return await self._losing_decision_streak()
 
     async def get_session_consecutive_losses(self) -> int:
         """Count consecutive losses scoped to the current trading session.
@@ -1200,32 +1222,7 @@ class TradeJournal:
         # Build WHERE clause for today's session window(s)
         conditions = " OR ".join(["(timestamp >= ? AND timestamp <= ?)"] * len(bounds))
         params: list[str] = [val for b in bounds for val in b]
-
-        async with self._db.connection() as conn:
-            cursor = await conn.execute(
-                f"""
-                SELECT realized_pnl FROM trades
-                WHERE realized_pnl IS NOT NULL
-                AND (order_status = 'FILLED' OR order_status IS NULL)
-                AND regime != 'reconciliation'
-                AND algo_version != 'system_sync'
-                AND ({conditions})
-                {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
-                ORDER BY timestamp DESC
-                LIMIT 100
-                """,
-                params,
-            )
-            rows = await cursor.fetchall()
-
-        streak = 0
-        for row in rows:
-            pnl = row["realized_pnl"] if isinstance(row, dict) else row[0]
-            if pnl is not None and pnl < 0:
-                streak += 1
-            else:
-                break
-        return streak
+        return await self._losing_decision_streak(f"AND ({conditions})", params)
 
     async def get_last_loss_timestamp(self) -> datetime | None:
         """Return the timestamp of the most recent losing trade, or None."""
@@ -1483,8 +1480,7 @@ class TradeJournal:
                     SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END) as gross_profit,
                     SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END) as gross_loss,
                     SUM(COALESCE(realized_pnl, 0)) as total_pnl,
-                    COUNT(DISTINCT CASE WHEN order_id GLOB '*[0-9]*' THEN order_id
-                                        ELSE 'row:' || id END) as closing_orders
+                    COUNT(DISTINCT {CLOSING_DECISION_SQL}) as closing_orders
                 {population}
                 {EXCLUDE_SUPERSEDED_DUPLICATES_SQL}
                 """,

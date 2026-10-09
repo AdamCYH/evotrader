@@ -29,6 +29,36 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **Where a stop may sit, and the stop checked in code.** The constitution
+  caps a stop's distance from the entry (`max_stop_loss_pct`), and only the
+  risk manager's reading of the constitution enforced it: `check_risk_limits`
+  took no stop and answered APPROVED, with no violations, to proposals the same
+  review then refused on the stop. `check_risk_limits` now takes an optional
+  `stop_price`: for an entry, a stop further from `price` than the cap, or on
+  the wrong side of it, is a violation, and the context reports the distance
+  and the widest permitted stop (`context.stop`). `gather_market_data` and
+  `get_ticker_snapshot` report `stop_geometry` for the instrument: its ATR as a
+  percent of the price, the cap, the cap in ATRs (`cap_stop_atr`), the stop at
+  the cap and at the configured ATR multiple
+  (`position_sizing.default_stop_loss_atr_multiplier`, read for the first time)
+  for a long and a short, and `cap_binding` when the ATR stop is wider than the
+  cap. On a fund whose daily ATR is a large share of its price the cap binds:
+  the stop goes at the cap, and the size follows from that distance.
+- **A refused proposal reaches the next cycle.** The risk manager's verdict
+  lived only in its report, and the next cycle starts from a new session, so a
+  refused order read as one that had vanished at the broker and was proposed
+  again unchanged. After a cycle whose last risk review was REJECTED, a
+  `SYSTEM:` line in the trading handoff names the trade, the time, that nothing
+  was sent to the broker, and the reasons: the check's own violations, else the
+  report's required-modification section. `get_open_positions` returns
+  `last_risk_verdict` (within 18 hours): the verdict, the trade checked, the
+  check's violations and the report's reasons. Both are read back from the
+  thought log; nothing new is stored. A verdict is taken only where the report
+  labels it ("Verdict:", "Result:", "Decision:").
+- **When a loss-streak pause ends.** The account-limits report
+  (`account_rails`, in `get_open_positions` and `check_risk_limits`) adds
+  `loss_streak_limit`, `last_loss_at` and `pause_expires_at`, so an agent can
+  tell a streak at the limit that still binds from one whose pause has lapsed.
 - **Protective coverage, computed.** `get_open_positions` returns
   `protective_coverage`: per ticker, the shares held (every open lot summed)
   against the shares under resting stop orders, with `uncovered_qty` and a
@@ -109,6 +139,15 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The loss streak counts decisions, not lots.** A sale of a position held as
+  several lots is one broker order written as one row per lot, and the streak
+  walked rows: one losing sale of four lots read as four consecutive losses,
+  enough with one more loss to start the constitution's pause after two
+  decisions, and the performance analysis reported the same run. The streak
+  behind the pause (`get_consecutive_losses`, `get_session_consecutive_losses`)
+  and the analysis's `streak_analysis` now count closing decisions: a real
+  broker order with all its rows, else the row itself, lost when its rows sum
+  below zero, the grouping the closing-orders count already used.
 - **An inverse fund's readings no longer mix into the primary's.** When the
   strategy agent expresses a bearish view through the primary's inverse fund,
   it runs the market-data tool on the fund too, which stores a snapshot with

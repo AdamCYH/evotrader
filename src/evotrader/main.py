@@ -1143,6 +1143,19 @@ async def start(
                     except Exception as e:
                         logger.warning("Protection audit failed: %s", e)
 
+                    # ── A refused proposal, for the next cycle ───────────
+                    # The risk manager's verdict lived only in its report, and
+                    # the next cycle starts a new session: a refusal it cannot
+                    # see reads as an order that vanished, and is proposed
+                    # again unchanged. Written only when the cycle's LAST
+                    # review was REJECTED.
+                    try:
+                        from evotrader.tools.risk_verdict import note_rejection
+
+                        await note_rejection(db, session.id, config.data_dir)
+                    except Exception as e:
+                        logger.warning("Risk-verdict note failed: %s", e)
+
                     # ── Score the attribution record ─────────────────────
                     # Every cycle writes what each witness said; this is what
                     # writes back what the market then did. Without it the
