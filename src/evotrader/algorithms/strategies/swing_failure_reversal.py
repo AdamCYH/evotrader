@@ -16,7 +16,8 @@ Complementary to intraday_vwap_zscore:
 
 They are deliberately correlated in DIRECTION but decorrelated in TIMING.
 
-Best in: Range-Bound regime.
+Designed for a range-bound regime; it also fires inside a trending tag, at a
+session low that held, and that firing is as readable there.
 """
 
 from __future__ import annotations
@@ -32,9 +33,11 @@ from evotrader.models.signals import AlgoSignal
 class SwingFailureReversalStrategy(TradingAlgorithm):
     """Swing failure reversal with structural confirmation.
 
-    Long-only by construction: the account is structurally long-only
-    (no affordable puts on a small account), so a symmetric bearish
-    leg would be unexpressable and is deliberately omitted.
+    Long-only. The leg was left out when the account could not express a
+    bearish view; it can now (an inverse fund, ``asset.inverse_ticker``), so
+    the missing mirror (a flush HIGH, a lower high, a close back below the
+    flush bar's low) is an omission rather than a necessity, and a proposal of
+    its own once the long leg's magnitude has a record.
 
     Key features:
     - Locates the flush (lowest low in lookback window)
@@ -42,6 +45,8 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
     - Requires structural confirmation: higher low + reclaim + no new low
     - Freshness decay so stale reversals don't re-fire all session
     - Reclaim quality scales signal by how cleanly price reclaimed
+    - The stretch's magnitude is measured from ``stretch_anchor_atr``
+      (default: the gate itself, ``min_stretch_atr``)
     """
 
     def __init__(
@@ -55,6 +60,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         reclaim_scale: float = 0.5,
         base_strength: float = 0.8,
         require_current_session_anchor: bool = True,
+        stretch_anchor_atr: float | None = None,
         version: str = "v001",
     ) -> None:
         self._lookback_bars = lookback_bars
@@ -66,6 +72,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         self._reclaim_scale = reclaim_scale
         self._base_strength = base_strength
         self._require_current_session_anchor = require_current_session_anchor
+        self._stretch_anchor_atr = stretch_anchor_atr
         self._version = version
 
     @property
@@ -250,8 +257,16 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             )
 
         # ── 5. COMPUTE STRENGTH ──
-        # Deeper flush that held = stronger
-        base = math.tanh((stretch_atr - self._min_stretch_atr) / self._stretch_scale)
+        # Deeper flush that held = stronger. Measured from the anchor: by
+        # default the gate itself, so a reversal that just clears the gate
+        # passes it, joins the voting pool, and says almost nothing (the tanh
+        # of nearly zero). stretch_anchor_atr measures it from lower down
+        # instead. The gate still decides WHETHER the channel fires; the
+        # anchor only how loud.
+        anchor = (
+            self._min_stretch_atr if self._stretch_anchor_atr is None else self._stretch_anchor_atr
+        )
+        base = math.tanh(max(0.0, stretch_atr - anchor) / self._stretch_scale)
 
         # Freshness: how long the reversal has stood CONFIRMED — since the
         # first close above the flush bar's high, and never counted from
@@ -303,6 +318,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 "reclaimed": reclaimed,
                 "reclaim_quality": round(reclaim_quality, 4),
                 "freshness": round(freshness, 4),
+                "stretch_anchor_atr": round(anchor, 4),
                 "base": round(base, 4),
                 "value": round(value, 4),
             },
@@ -319,6 +335,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             "reclaim_scale": self._reclaim_scale,
             "base_strength": self._base_strength,
             "require_current_session_anchor": self._require_current_session_anchor,
+            "stretch_anchor_atr": self._stretch_anchor_atr,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -332,6 +349,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             "reclaim_scale",
             "base_strength",
             "require_current_session_anchor",
+            "stretch_anchor_atr",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])
@@ -375,4 +393,11 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             bs = float(params["base_strength"])
             if not (0.0 < bs <= 1.0):
                 errors.append(f"base_strength must be in (0, 1], got {bs}")
+        if params.get("stretch_anchor_atr") is not None:
+            anchor = float(params["stretch_anchor_atr"])
+            gate = float(params.get("min_stretch_atr", self._min_stretch_atr))
+            if not (0.0 <= anchor <= gate):
+                errors.append(
+                    f"stretch_anchor_atr must be in [0, min_stretch_atr ({gate})], got {anchor}"
+                )
         return errors

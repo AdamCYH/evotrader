@@ -88,6 +88,14 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`swing_failure_reversal.stretch_anchor_atr`.** The channel's strength was
+  measured from its gate (`tanh((stretch - min_stretch_atr) / stretch_scale)`),
+  so a confirmed reversal that just cleared the gate passed it, joined the
+  voting pool and the participation count, and said next to nothing. Lowering
+  the gate had not lowered the ramp. With the anchor set, the strength is
+  measured from it instead (from 0 at 0.0); the gate still decides whether the
+  channel fires. Unset, the anchor is the gate and every vote is unchanged.
+  Votes record `stretch_anchor_atr`. Must lie between 0 and `min_stretch_atr`.
 - **`momentum.fast_dissent_decay` and `fast_dissent_min_atr`.** The momentum
   channel's moving-average term reads the stack, which lags a reversal by days:
   after a long advance it keeps reading long through a fall. With a decay below
