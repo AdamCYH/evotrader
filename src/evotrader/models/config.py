@@ -885,6 +885,27 @@ class PositionSizingConfig(BaseModel):
     )
 
 
+class ProtectionFollowupConfig(BaseModel):
+    """Place a filled entry's approved protection when the fill comes after its cycle.
+
+    See ``tools.protection_followup``. Off unless switched on: it places real
+    orders without an agent, for the shares of an entry that carried a
+    ``protection_plan``, and only adds orders (it never cancels one).
+    """
+
+    enabled: bool = Field(
+        False,
+        description=(
+            "After a cycle that leaves a waiting protection plan, check every "
+            "interval_seconds for up to max_minutes whether the entry filled, and "
+            "place its stop and take-profit for the new shares when it has; each "
+            "cycle start checks once too, before its agents."
+        ),
+    )
+    interval_seconds: int = Field(300, ge=30, le=3600, description="Seconds between checks.")
+    max_minutes: int = Field(60, ge=5, le=390, description="How long to keep checking.")
+
+
 class DryRunConfig(BaseModel):
     """Paper-trading / dry-run configuration."""
 
@@ -1194,6 +1215,7 @@ class Settings(BaseModel):
     model: ModelConfig | DualModelConfig = Field(default_factory=ModelConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     position_sizing: PositionSizingConfig = Field(default_factory=PositionSizingConfig)
+    protection_followup: ProtectionFollowupConfig = Field(default_factory=ProtectionFollowupConfig)
     mode: TradingMode = Field(
         TradingMode.SIM, description="Trading execution mode: 'live' or 'sim'"
     )

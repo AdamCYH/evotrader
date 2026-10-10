@@ -49,7 +49,10 @@ class AccountState:
     #: Realised P&L of closed trades today, and over the trailing seven days.
     today_pnl: float = 0.0
     week_pnl: float = 0.0
+    #: The losing streak the pause reads: closing decisions in today's session.
     consecutive_losses: int = 0
+    #: The same streak without the session boundary, for reading, not for the pause.
+    consecutive_losses_all_time: int | None = None
     last_loss_at: datetime | None = None
     trades_today: int = 0
     #: Problems met while gathering, reported as warnings.
@@ -271,7 +274,12 @@ def evaluate_account_rails(
         "daily_loss_limit_usd": round(limits.max_daily_loss_pct * value, 2) if value else None,
         "week_pnl": round(state.week_pnl, 2),
         "weekly_loss_limit_usd": (round(limits.max_weekly_loss_pct * value, 2) if value else None),
+        # The pause reads today's session only, by design: a Friday streak does
+        # not block Monday. The run without that boundary is beside it, so a
+        # session streak of 0 after a losing day reads as what it is.
         "consecutive_losses": state.consecutive_losses,
+        "streak_scope": "session",
+        "consecutive_losses_all_time": state.consecutive_losses_all_time,
         "loss_streak_limit": breakers.consecutive_losses_pause,
         "loss_streak_pause_active": pause_active,
         # Whether a streak at the limit still binds, and until when: the pause

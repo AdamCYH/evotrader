@@ -725,6 +725,16 @@ async def start(
             except Exception as e:
                 logger.warning("Failed to reconcile pending orders at cycle start: %s", e)
 
+            # An entry that filled since its cycle gets its recorded protection
+            # now, before the agents read the book (tools.protection_followup,
+            # off unless switched on).
+            try:
+                from evotrader.tools.protection_followup import protect_at_cycle_start
+
+                await protect_at_cycle_start()
+            except Exception as e:
+                logger.warning("Protection follow-up at cycle start failed: %s", e)
+
             # Insert a running state record for this trading cycle
             try:
                 await thought_logger.record_run_start(session.id, "TRADING")
@@ -1182,6 +1192,18 @@ async def start(
                         await note_rejection(db, session.id, config.data_dir)
                     except Exception as e:
                         logger.warning("Risk-verdict note failed: %s", e)
+
+                    # ── An entry that fills after the cycle ──────────────
+                    # Its protection plan is placed when the fill lands, not
+                    # an hour later (tools.protection_followup; off unless
+                    # protection_followup.enabled).
+                    try:
+                        from evotrader.tools.protection_followup import start_followup
+
+                        if await start_followup():
+                            logger.info("Protection follow-up started for a waiting plan.")
+                    except Exception as e:
+                        logger.warning("Protection follow-up could not start: %s", e)
 
                     # ── Score the attribution record ─────────────────────
                     # Every cycle writes what each witness said; this is what

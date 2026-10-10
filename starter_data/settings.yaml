@@ -235,5 +235,15 @@ sim_broker:
 
 require_trade_approval: true       # each order waits for your click in the console (runs without the console are not held)
 
+# An entry that fills after its cycle ends: place the stop and take-profit it
+# was approved with (record_trade's protection_plan) when the fill lands, instead
+# of at the next cycle. Places real orders without an agent, only adds orders
+# (never cancels one), and does nothing while the console asks for approval of
+# every order (above). Off until you switch it on.
+protection_followup:
+  enabled: false
+  interval_seconds: 300            # how often it checks for the fill
+  max_minutes: 60                  # how long it keeps checking after the cycle
+
 logging:
   level: "INFO"

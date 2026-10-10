@@ -2645,12 +2645,15 @@ async def account_rails_state(portfolio: dict | None = None, *, ask_broker: bool
 
     today_pnl = week_pnl = 0.0
     losses = 0
+    losses_all_time: int | None = None
     last_loss: datetime | None = None
     trades_today = 0
     if _journal is not None:
         today_pnl = _num(await _read("get_today_pnl"))
         week_pnl = _num(await _read("get_pnl", "week"))
         losses = int(_num(await _read("get_session_consecutive_losses")))
+        all_time = await _read("get_consecutive_losses")
+        losses_all_time = int(all_time) if isinstance(all_time, (int, float)) else None
         ts = await _read("get_last_loss_timestamp")
         last_loss = ts if isinstance(ts, datetime) else None
         trades_today = int(_num(await _read("get_trade_count_today")))
@@ -2664,6 +2667,7 @@ async def account_rails_state(portfolio: dict | None = None, *, ask_broker: bool
         today_pnl=today_pnl,
         week_pnl=week_pnl,
         consecutive_losses=losses,
+        consecutive_losses_all_time=losses_all_time,
         last_loss_at=last_loss,
         trades_today=trades_today,
         gaps=tuple(gaps),
@@ -3134,6 +3138,14 @@ async def record_trade(trade_json: str) -> dict:
 
     Persists the full trade context including signals, reasoning, regime,
     and algorithm version for performance tracking and evolution analysis.
+
+    An entry (action OPEN) may carry ``protection_plan``: the protection the
+    risk manager approved with it, for the entry's own shares —
+    ``{"stop_price", "stop_qty", "tp_limit_price", "tp_qty", "time_in_force":
+    "gtc"}`` (no take-profit: ``tp_qty`` 0). It is kept as data, and when the
+    protection follow-up is switched on and the entry fills after this cycle,
+    the stop and the take-profit are placed for those shares then, instead of
+    an hour later. The response says ``plan_recorded``, or ``plan_problems``.
 
     Args:
         trade_json: JSON string of a TradeProposal object.
@@ -3693,6 +3705,39 @@ async def record_trade(trade_json: str) -> dict:
         "order_status": resolved_order_status,
         "coverage_after": coverage_after,
     }
+    # ── The entry's protection, kept as data (tools.protection_followup) ──
+    # The stop and take-profit approved with an entry lived only in prose, so
+    # an entry that filled after its cycle ended stayed unprotected until the
+    # next one. A bad plan is reported here; the trade is recorded either way.
+    if data.get("protection_plan") is not None and action == TradeAction.OPEN and order_id:
+        from evotrader.db.protection_plans import ProtectionPlanStore, plan_problems
+
+        entry_price = _safe_float(data.get("fill_price")) or limit_price
+        problems = plan_problems(
+            data["protection_plan"],
+            direction.value if direction else "LONG",
+            float(quantity or 0),
+            entry_price,
+        )
+        if problems:
+            response["plan_recorded"] = False
+            response["plan_problems"] = problems
+        elif _db is not None:
+            try:
+                await ProtectionPlanStore(_db).save(
+                    entry_order_id=str(order_id),
+                    entry_trade_id=int(trade_ids[0]) if trade_ids else None,
+                    session_id=_current_session_id,
+                    ticker=str(ticker),
+                    direction=direction.value if direction else "LONG",
+                    entry_quantity=float(quantity or 0),
+                    plan=data["protection_plan"],
+                )
+                response["plan_recorded"] = True
+            except Exception as e:  # never fail a recorded trade over its plan
+                logger.warning("protection plan for %s not kept: %s", order_id, e)
+                response["plan_recorded"] = False
+                response["plan_problems"] = [f"could not be kept: {e}"]
     if rerecord_of:
         now_rows = rerecord_of
         try:

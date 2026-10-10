@@ -29,6 +29,18 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **A limit's distance from the market, at the order review.** The executor
+  reviews every order with `review_equity_order`, whose answer carried the
+  quote but said nothing about the limit's distance from it, so an empty
+  `order_checks` read as clean while a buy limit sat well under the ask and
+  filled only when the price came back down. The review now also carries
+  `limit_vs_market`: the distance in basis points from the ask for a buy (the
+  bid for a sell), and whether the order is marketable. Nothing is refused.
+- **The loss streak names its scope.** The account limits' `consecutive_losses`
+  is today's session only, by design (a Friday streak does not block Monday),
+  while the performance analysis counts across days, so the morning after a
+  losing day the two disagreed and read like a bug. The limits now say
+  `streak_scope: "session"` and carry `consecutive_losses_all_time` beside it.
 - **Where a stop may sit, and the stop checked in code.** The constitution
   caps a stop's distance from the entry (`max_stop_loss_pct`), and only the
   risk manager's reading of the constitution enforced it: `check_risk_limits`
@@ -85,6 +97,30 @@ folder layout; each entry says what you need to do.
   a new setting, `position_sizing.target_atr_multiplier`: set it to the first
   target your strategy instruction states (the starter settings use 1.5, as the
   starter instruction does). Unset, no target distance is reported.
+
+### Added — off until you switch it on
+
+- **Protection for an entry that fills after its cycle.** The executor places
+  an entry and its protection in one turn; an entry accepted but not yet filled
+  when the turn ended left its approved stop and take-profit in prose, and the
+  new shares sat unprotected until the next cycle. An entry's `record_trade` may
+  now carry `protection_plan` (`stop_price`, `stop_qty`, `tp_limit_price`,
+  `tp_qty`, gtc), kept in a new `protection_plans` table (migration 0028); the
+  response says `plan_recorded` or `plan_problems`. With
+  `protection_followup.enabled`, after a cycle that leaves a plan waiting, a
+  follow-up checks every `interval_seconds` (300) for up to `max_minutes` (60)
+  and, once the entry has filled, places its stop and take-profit for the
+  shares still under no order. It only adds orders, never cancels one (a
+  resting sell reserves its shares, and cancelling first leaves the position
+  with no stop); it waits while a cycle runs and outside regular hours; it
+  refuses, with a SYSTEM line in the trading handoff, when the stop breaks the
+  constitution's cap from the fill, when the price is already through the
+  stop, when every order needs approval in the console, or when the risk gate
+  objects; it journals both orders against the entry. It also runs once at
+  the start of every cycle, before the agents read the book, so an entry that
+  filled before the open (a stop cannot rest then) is protected as the first
+  regular-hours cycle starts; the two take turns, so a plan is placed once.
+  Off by default: it places real orders without an agent.
 
 ### Added — off unless an algorithm version sets them
 

@@ -1277,7 +1277,11 @@ def create_execution_agent(
         return None
 
     async def after_tool_callback(tool, args, tool_context, tool_response):
-        """Capture reviewed option_ids from review_option_order responses."""
+        """Capture reviewed option_ids; add a limit's distance from the market to a review."""
+        if tool.name == "review_equity_order":
+            from evotrader.callbacks.order_review import annotate_review
+
+            return annotate_review(args or {}, tool_response)
         if tool.name == "review_option_order":
             # Extract option_ids from the review request legs so we can
             # validate that the subsequent place_option_order uses the same ones.
