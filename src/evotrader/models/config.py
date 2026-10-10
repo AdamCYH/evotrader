@@ -738,6 +738,29 @@ class ScheduleConfig(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _warn_on_shared_minute(self) -> Self:
+        """Say when the evolution run and a trading cycle can fall on one minute.
+
+        The scheduler starts the cycle and holds the evolution run until it
+        ends, but a minute of its own keeps the evolution run on time.
+        """
+        import logging as _logging
+
+        from evotrader.cron import crons_can_coincide, iter_cron_expressions
+
+        for evolution in iter_cron_expressions(self.evolution_cron):
+            for cycle in iter_cron_expressions(self.cycle_cron):
+                if crons_can_coincide(cycle, evolution):
+                    _logging.getLogger(__name__).warning(
+                        "schedule: evolution_cron %r and cycle_cron %r can fall on the same "
+                        "minute; the cycle runs first and the evolution run waits for it. "
+                        "Give the evolution run a minute of its own (e.g. 15 past).",
+                        evolution,
+                        cycle,
+                    )
+        return self
+
 
 class ModelConfig(BaseModel):
     """LLM model selection per agent. ``None`` means use SDK default."""

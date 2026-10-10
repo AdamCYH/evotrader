@@ -1731,6 +1731,12 @@
     border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
+.cycle-status-badge.status-skipped {
+    background: rgba(148, 144, 128, 0.14);
+    color: var(--text-dim);
+    border: 1px solid rgba(148, 144, 128, 0.32);
+}
+
 .btn-continue-cycle {
     padding: 0.1rem 0.4rem;
     border-radius: 3px;

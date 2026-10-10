@@ -197,7 +197,10 @@ class ThoughtLogger:
                        MAX(CASE
                            WHEN r.status = 'SUCCESS' THEN 'complete'
                            WHEN r.status = 'FAILED' THEN 'error'
+                           WHEN r.status = 'TIMED_OUT' THEN 'error'
                            WHEN r.status = 'RUNNING' THEN 'running'
+                           WHEN r.status = 'SKIPPED' THEN 'skipped'
+                           WHEN r.status = 'CANCELLED' THEN 'cancelled'
                            ELSE NULL
                        END)
                    ) as cycle_status,
@@ -258,6 +261,31 @@ class ThoughtLogger:
                 (session_id, datetime.now(UTC).isoformat(), cycle_type),
             )
         logger.info("Cycle run start recorded: session_id=%s, type=%s", session_id, cycle_type)
+
+    async def record_skipped_run(self, cycle_type: str, due_at: datetime, reason: str) -> str:
+        """A scheduled run that never started, kept where the run history shows it.
+
+        One ``cycle_runs`` row (status SKIPPED, stamped with the minute it was
+        due) and one runtime event, so the gap reads with its cause instead of
+        as a missing hour. Returns the row's session id.
+        """
+        due_utc = due_at.astimezone(UTC)
+        session_id = f"skipped-{cycle_type.lower()}-{due_utc:%Y%m%dT%H%MZ}"
+        summary = f"Scheduled run due {due_at:%Y-%m-%d %H:%M} ET did not start: {reason}."
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "INSERT OR IGNORE INTO cycle_runs (session_id, timestamp, cycle_type, status, "
+                "summary) VALUES (?, ?, ?, 'SKIPPED', ?)",
+                (session_id, due_utc.isoformat(), cycle_type, summary),
+            )
+        await self.record_event(
+            session_id=session_id,
+            agent_name="evolution" if cycle_type == "EVOLUTION" else "orchestrator",
+            event_type="runtime",
+            content=f"[scheduler] {summary}",
+            meta={"status": "SKIPPED", "due_at": due_utc.isoformat(), "reason": reason},
+        )
+        return session_id
 
     async def record_run_completion(
         self,

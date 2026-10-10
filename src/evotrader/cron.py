@@ -71,6 +71,28 @@ def iter_cron_expressions(value: object) -> list[str]:
     return out
 
 
+def crons_can_coincide(first: str, second: str) -> bool:
+    """Whether two cron expressions can fire on the same minute.
+
+    Every field must share a value (this module ANDs the five fields).
+    Unparseable expressions are reported as not coinciding.
+    """
+    try:
+        a, b = CronTrigger(first), CronTrigger(second)
+    except ValueError:
+        return False
+    return all(
+        x & y
+        for x, y in (
+            (a.minutes, b.minutes),
+            (a.hours, b.hours),
+            (a.days, b.days),
+            (a.months, b.months),
+            (a.dows, b.dows),
+        )
+    )
+
+
 class CronTrigger:
     """Parses a standard 5-field cron expression and calculates matching datetimes."""
 

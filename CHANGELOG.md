@@ -147,6 +147,29 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A scheduled run waits instead of vanishing.** The scheduler marked a
+  minute done before checking whether another task was running, so a cycle
+  due while the evolution run was still running was logged "skipped" and
+  never retried, and a cycle and the evolution run due at the same minute
+  both started, side by side; and it matched only the current minute, so a
+  minute the loop never saw (a stalled loop, a host asleep across it) never
+  fired at all. Now a due run waits for the running task and starts inside a
+  grace window (20 minutes for a cycle, 2 hours for the evolution run, 6 for
+  the metrics job), a missed minute starts late, and after a long gap only the
+  latest due minute starts, never a backlog. At a shared minute the trading
+  cycle goes first and the evolution run follows it; a scheduled cycle is
+  claimed before it is started, so two cannot start in one poll. A cycle or an
+  evolution run that cannot start inside its grace (another task ran too
+  long, or the app was stalled or asleep past it) is recorded as a SKIPPED run
+  with the reason, and shows in the run history; a late cycle records in its
+  own log when it was due and why it was late. The settings warn when
+  `evolution_cron` can fall on a cycle's minute.
+- **Runs that time out, are cancelled or are skipped keep that status.** The
+  run table accepted RUNNING, SUCCESS and FAILED only, so an evolution run
+  that timed out, was cancelled or was skipped for an exhausted subscription
+  quota failed its final update and stayed RUNNING. The table is rebuilt with
+  every row kept (migration 0027) and also takes SKIPPED, CANCELLED and
+  TIMED_OUT; the console shows Skipped and Cancelled badges.
 - **The console's files are checked for a newer version on every load.** The
   page names its script modules by fixed paths, and the console sent no
   caching instruction, so a browser reused files it had fetched before for

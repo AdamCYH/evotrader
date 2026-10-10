@@ -738,6 +738,33 @@ async def start(
                 _active_app.state.thoughts = []
                 broadcast_sse_event("clear_thoughts", {})
 
+                # A scheduled cycle that starts after its minute says so in its
+                # own record (web.schedule_slot): why it was late.
+                due = getattr(_active_app.state, "cycle_due", None)
+                _active_app.state.cycle_due = None
+                if due and due.get("late_reason"):
+                    from evotrader.tools.market_hours import ET as _ET
+
+                    started = datetime.now(_ET)
+                    try:
+                        await thought_logger.record_event(
+                            session_id=session.id,
+                            agent_name="orchestrator",
+                            event_type="runtime",
+                            content=(
+                                f"[scheduler] scheduled cycle due "
+                                f"{due['due_at']:%H:%M} ET started {started:%H:%M} ET: "
+                                f"{due['late_reason']}"
+                            ),
+                            meta={
+                                "due_at": due["due_at"].isoformat(),
+                                "started_at": started.isoformat(),
+                                "late_reason": due["late_reason"],
+                            },
+                        )
+                    except Exception as db_err:
+                        logger.warning("Could not record the late start: %s", db_err)
+
             cycle_start_time = time.monotonic()
             stages_seen = set()
             last_strategy_text = ""

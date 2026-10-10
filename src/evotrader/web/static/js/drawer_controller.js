@@ -339,6 +339,10 @@ export async function openSessionDrawer(sessionId) {
                 statusBadge = `<span class="cycle-status-badge status-error"><i class="fa-solid fa-circle-xmark"></i> Error</span>`;
             } else if (status === "running") {
                 statusBadge = `<span class="cycle-status-badge status-running"><i class="fa-solid fa-spinner fa-spin"></i> Running</span>`;
+            } else if (status === "skipped") {
+                statusBadge = `<span class="cycle-status-badge status-skipped"><i class="fa-solid fa-forward"></i> Skipped</span>`;
+            } else if (status === "cancelled") {
+                statusBadge = `<span class="cycle-status-badge status-skipped"><i class="fa-solid fa-ban"></i> Cancelled</span>`;
             } else if (logs.length > 0) {
                 statusBadge = `<span class="cycle-status-badge status-complete"><i class="fa-solid fa-circle-check"></i> Recorded</span>`;
             } else {

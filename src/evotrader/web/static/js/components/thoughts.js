@@ -45,6 +45,10 @@ export function renderCycleList(cycles, activeSessionId, containerEl, onSelect, 
                 statusBadgeHtml = '<span class="cycle-status-badge status-error"><i class="fa-solid fa-circle-xmark"></i> Error</span>';
             } else if (c.cycle_status === "running") {
                 statusBadgeHtml = '<span class="cycle-status-badge status-running"><i class="fa-solid fa-spinner fa-spin"></i> Running</span>';
+            } else if (c.cycle_status === "skipped") {
+                statusBadgeHtml = '<span class="cycle-status-badge status-skipped" title="A scheduled run that could not start"><i class="fa-solid fa-forward"></i> Skipped</span>';
+            } else if (c.cycle_status === "cancelled") {
+                statusBadgeHtml = '<span class="cycle-status-badge status-skipped"><i class="fa-solid fa-ban"></i> Cancelled</span>';
             }
         }
 

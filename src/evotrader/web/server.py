@@ -374,82 +374,91 @@ def create_app(
         task.add_done_callback(background_tasks.discard)
         return task
 
+    async def _record_skip(skip: Any) -> None:
+        """A due trigger that could not start: logged, and a cycle or an
+        evolution run kept in the run history (the metrics job is not a run)."""
+        logger.warning(
+            "Cron %s due %s ET skipped: %s.", skip.job, skip.due_at.strftime("%H:%M"), skip.reason
+        )
+        if skip.job not in ("cycle", "evolution"):
+            return
+        try:
+            await app.state.thought_logger.record_skipped_run(
+                "EVOLUTION" if skip.job == "evolution" else "TRADING", skip.due_at, skip.reason
+            )
+        except Exception as e:  # never let bookkeeping stop the scheduler
+            logger.warning("Could not record the skipped %s run: %s", skip.job, e)
+
+    from evotrader.web.schedule_slot import CronScheduler
+
+    scheduler = CronScheduler()
+    reported_deferrals: set[tuple[str, datetime]] = set()
+
+    async def _scheduler_poll(now: datetime) -> None:
+        """One poll of the scheduled jobs (see web.schedule_slot).
+
+        A due trigger waits while another agent task runs and starts when it
+        can, inside its grace window; a minute the loop did not see still
+        starts late. A trigger that cannot start in time is recorded as a
+        SKIPPED run instead of vanishing.
+        """
+        from evotrader.cron import iter_cron_expressions
+
+        schedule_config = app.state.config.settings.schedule
+        schedules = {
+            "cycle": iter_cron_expressions(schedule_config.cycle_cron)
+            if getattr(app.state, "cycle_cron_enabled", False)
+            else [],
+            "evolution": iter_cron_expressions(schedule_config.evolution_cron)
+            if getattr(app.state, "evolution_cron_enabled", False)
+            else [],
+            "metrics": iter_cron_expressions(schedule_config.metrics_cron),
+        }
+        busy = bool(app.state.is_running) or bool(
+            app.state.evolution_service and app.state.evolution_service.is_running()
+        )
+        tick = scheduler.tick(now, schedules, busy=busy)
+
+        for skip in tick.skipped:
+            _spawn(_record_skip(skip))
+        for job, due in tick.deferred:
+            if (job, due) not in reported_deferrals:
+                reported_deferrals.add((job, due))
+                logger.warning(
+                    "Cron %s due %s ET waits: another task is running.", job, due.strftime("%H:%M")
+                )
+        for start in tick.start:
+            if start.late_reason:
+                logger.warning(
+                    "Cron %s due %s ET starts late (%s): %s.",
+                    start.job,
+                    start.due_at.strftime("%H:%M"),
+                    now.strftime("%H:%M"),
+                    start.late_reason,
+                )
+            if start.job == "cycle":
+                # Claimed now, not when the task first runs, so nothing else
+                # can start in between.
+                app.state.is_running = True
+                app.state.cycle_due = {"due_at": start.due_at, "late_reason": start.late_reason}
+                try:
+                    _spawn(_execute_cycle("scheduled automated"))
+                except Exception:
+                    app.state.is_running = False
+                    app.state.cycle_due = None
+                    raise
+            elif start.job == "evolution":
+                _spawn(_execute_evolution("scheduled automated"))
+            else:
+                _spawn(_execute_metrics("scheduled automated"))
+
     async def scheduler_loop(app: FastAPI) -> None:
-        last_cycle_run: datetime | None = None
-        last_evolution_run: datetime | None = None
-        last_metrics_run: datetime | None = None
+        from evotrader.tools.market_hours import _resolve_now
 
         while True:
             try:
                 await asyncio.sleep(10)
-
-                from evotrader.tools.market_hours import _resolve_now
-
-                now = _resolve_now()
-                current_minute = now.replace(second=0, microsecond=0)
-
-                schedule_config = app.state.config.settings.schedule
-
-                # Check cycle schedule
-                if getattr(app.state, "cycle_cron_enabled", False) and schedule_config.cycle_cron:
-                    try:
-                        from evotrader.cron import CronTrigger, iter_cron_expressions
-
-                        if any(
-                            CronTrigger(expr).matches(current_minute)
-                            for expr in iter_cron_expressions(schedule_config.cycle_cron)
-                        ):
-                            if last_cycle_run is None or last_cycle_run < current_minute:
-                                last_cycle_run = current_minute
-                                if not app.state.is_running and not (
-                                    app.state.evolution_service
-                                    and app.state.evolution_service.is_running()
-                                ):
-                                    _spawn(_execute_cycle("scheduled automated"))
-                                else:
-                                    logger.warning(
-                                        "Cron cycle trigger skipped: another task is already running."
-                                    )
-                    except Exception as ex:
-                        logger.error("Error checking cron cycle: %s", ex, exc_info=True)
-
-                # Check evolution schedule
-                if (
-                    getattr(app.state, "evolution_cron_enabled", False)
-                    and schedule_config.evolution_cron
-                ):
-                    try:
-                        from evotrader.cron import CronTrigger
-
-                        trigger = CronTrigger(schedule_config.evolution_cron)
-                        if trigger.matches(current_minute):
-                            if last_evolution_run is None or last_evolution_run < current_minute:
-                                last_evolution_run = current_minute
-                                if not app.state.is_running and not (
-                                    app.state.evolution_service
-                                    and app.state.evolution_service.is_running()
-                                ):
-                                    _spawn(_execute_evolution("scheduled automated"))
-                                else:
-                                    logger.warning(
-                                        "Cron evolution trigger skipped: another task is already running."
-                                    )
-                    except Exception as ex:
-                        logger.error("Error checking cron evolution: %s", ex, exc_info=True)
-
-                # Check metrics schedule
-                if schedule_config.metrics_cron:
-                    try:
-                        from evotrader.cron import CronTrigger
-
-                        trigger = CronTrigger(schedule_config.metrics_cron)
-                        if trigger.matches(current_minute):
-                            if last_metrics_run is None or last_metrics_run < current_minute:
-                                last_metrics_run = current_minute
-                                _spawn(_execute_metrics("scheduled automated"))
-                    except Exception as ex:
-                        logger.error("Error checking cron metrics: %s", ex, exc_info=True)
-
+                await _scheduler_poll(_resolve_now())
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -540,6 +549,11 @@ def create_app(
 
     # State tracking
     app.state.is_running = False
+    # The scheduled cycle starting now: its due minute and why it is late, if
+    # it is (read once by the cycle, which records it).
+    app.state.cycle_due = None
+    # One poll of the scheduled jobs; the loop calls it every ten seconds.
+    app.state.scheduler_poll = _scheduler_poll
     app.state.cycle_cron_enabled = getattr(config.settings.schedule, "cycle_cron_enabled", False)
     app.state.evolution_cron_enabled = getattr(
         config.settings.schedule, "evolution_cron_enabled", False
