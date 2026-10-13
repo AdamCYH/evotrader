@@ -981,6 +981,33 @@ def create_execution_agent(
     # checked by before_tool_callback (place_option_order calls).
     _reviewed_option_ids: set[str] = set()
 
+    # The agentic account's number, read once and handed to the executor: it
+    # once called the broker with an account number it made up.
+    _account: dict[str, str | None] = {"number": None}
+
+    async def _agentic_account() -> str | None:
+        if _account["number"] is None:
+            from evotrader.agents import tools as _tools_mod
+
+            try:
+                _account["number"] = await _tools_mod._agentic_account_number()
+            except Exception:
+                logger.warning("Could not read the agentic account number", exc_info=True)
+        return _account["number"]
+
+    async def _executor_dynamic_context(ctx) -> str:
+        number = await _agentic_account()
+        if number:
+            return (
+                f"The broker account for every call: account_number {number} (the "
+                "agentic account). Use it as written here; never write an account "
+                "number from memory."
+            )
+        return (
+            "The agentic account number could not be read: take it from get_accounts "
+            "before any other broker call; never write an account number from memory."
+        )
+
     async def _broker_held_quantity(ticker: str | None, option_id: str | None) -> float | None:
         """Held units according to the BROKER, or None if it could not say.
 
@@ -1138,6 +1165,28 @@ def create_execution_agent(
                 ],
             }
         if tool.name in _GATED_TOOLS:
+            # ── The agents trade in the agentic account only ─────────────
+            given = str(args.get("account_number") or "")
+            if given and not config.settings.dry_run.enabled:
+                expected = await _agentic_account()
+                if expected and given != expected:
+                    logger.error(
+                        "[RISK GATE] BLOCKED %s: account_number %s is not the agentic account",
+                        gate.summarise_order(args),
+                        given,
+                    )
+                    return {
+                        "allowed": False,
+                        "action": "WRONG_ACCOUNT",
+                        "violations": [
+                            f"account_number {given} is not the agentic account the agents "
+                            f"trade in ({expected})."
+                        ],
+                        "retryable": True,
+                        "error_class": "POLICY",
+                        "fix": f"Resubmit the identical order with account_number {expected}.",
+                    }
+
             # ── Option-ID consistency check ──────────────────────────────
             # If the agent is placing an option order, verify the option_id
             # was previously reviewed. A mismatch typically means the agent
@@ -1277,11 +1326,33 @@ def create_execution_agent(
         return None
 
     async def after_tool_callback(tool, args, tool_context, tool_response):
-        """Capture reviewed option_ids; add a limit's distance from the market to a review."""
+        """Capture reviewed option_ids; add a limit's distance from the market to a
+        review; name the orders holding the shares beside a refused sell."""
         if tool.name == "review_equity_order":
             from evotrader.callbacks.order_review import annotate_review
 
             return annotate_review(args or {}, tool_response)
+        if tool.name == "place_equity_order":
+            from evotrader.callbacks.reserved_shares import (
+                annotate_refusal,
+                is_reserved_shares_refusal,
+                reserving_orders,
+            )
+
+            if is_reserved_shares_refusal(args, tool_response):
+                from evotrader.agents import tools as _tools_mod
+
+                symbol = str(args.get("symbol") or args.get("ticker") or "").upper()
+                account = str(args.get("account_number") or "") or await _agentic_account()
+                orders = (
+                    await _tools_mod._list_broker_orders(account, symbol)
+                    if account and symbol
+                    else None
+                )
+                return annotate_refusal(
+                    tool_response, None if orders is None else reserving_orders(orders)
+                )
+            return tool_response
         if tool.name == "review_option_order":
             # Extract option_ids from the review request legs so we can
             # validate that the subsequent place_option_order uses the same ones.
@@ -1296,7 +1367,8 @@ def create_execution_agent(
     return LlmAgent(
         model=_resolve_model(config, "executor_agent"),
         name="execution",
-        instruction=_load_instructions("executor", config),
+        static_instruction=_load_instructions("executor", config),
+        instruction=_executor_dynamic_context,
         tools=tools,
         before_tool_callback=before_tool_callback,
         after_tool_callback=after_tool_callback,

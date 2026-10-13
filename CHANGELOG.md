@@ -29,6 +29,16 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **A sell refused for want of shares names the orders holding them.** The
+  broker refuses a sell with "Not enough shares to sell" when the shares are
+  held for working sell orders, a stop or a take-profit: the refusal says the
+  protection is there. The executor's `place_equity_order` answer now carries
+  those working orders (`reserved_by`) and a note to read the book again
+  rather than cancel them to make room.
+- **The executor is handed its account number.** It reads the agentic
+  account's number with its instructions instead of recalling one, and an
+  order sent for any other account is refused by the order gate
+  (`WRONG_ACCOUNT`, with the right number in the fix).
 - **A limit's distance from the market, at the order review.** The executor
   reviews every order with `review_equity_order`, whose answer carried the
   quote but said nothing about the limit's distance from it, so an empty
@@ -183,6 +193,19 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A failed read of the broker's orders is no longer taken for their
+  absence.** Reconciliation marked an order CANCELLED ("not found on broker")
+  whenever no lookup returned it, and a lookup that failed returned nothing,
+  the same as one that found nothing: working protective orders were written
+  off, the coverage read `none`, and the agents cancelled the real orders to
+  repair a gap that did not exist. Now an order is gone only when a broker
+  list that answered, holds orders and reaches back to the order's placement
+  does not have it; the whole account's list is asked once when a symbol's
+  list fails or comes back empty. Anything less leaves the order PENDING and
+  counted as resting: reconciliation reports it in `unverified`, and the
+  coverage block reads `unverified` (never `none`) with the order ids and a
+  note. `order_book.listing_status` says per ticker whether the list
+  answered, and a broker error is logged with its text.
 - **A scheduled run waits instead of vanishing.** The scheduler marked a
   minute done before checking whether another task was running, so a cycle
   due while the evolution run was still running was logged "skipped" and

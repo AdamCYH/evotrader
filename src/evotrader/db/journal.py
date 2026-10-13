@@ -7,6 +7,7 @@ every trade decision, execution, and outcome. All operations are async.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -1637,6 +1638,61 @@ class TradeJournal:
                 (f"-{_CLAIM_RECHECK_DAYS} days",),
             )
             return [{"order_id": r["order_id"]} for r in await cursor.fetchall()]
+
+    async def describe_awaited_orders(self, order_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """The ticker, the placement time and the kind of each order, as recorded.
+
+        Reconciliation needs them to weigh a broker list that lacks an order:
+        absence is evidence only from a list of the order's symbol, or of the
+        whole account, that reaches back to when the order was placed.
+        ``placed_at`` is the earliest time on record, an ISO string.
+        """
+        ids = sorted({str(i) for i in order_ids if i})
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        found: dict[str, dict[str, Any]] = {}
+        times: dict[str, list[datetime]] = {}
+
+        def note_time(order_id: str, value: object) -> None:
+            if not value:
+                return
+            try:
+                when = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+            except ValueError:
+                return
+            times.setdefault(order_id, []).append(when if when.tzinfo else when.replace(tzinfo=UTC))
+
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                f"SELECT order_id, ticker, timestamp, option_id FROM trades "
+                f"WHERE order_id IN ({marks})",
+                ids,
+            )
+            for r in await cursor.fetchall():
+                info = found.setdefault(r["order_id"], {"ticker": None, "is_option": False})
+                info["ticker"] = info["ticker"] or r["ticker"]
+                info["is_option"] = info["is_option"] or bool(r["option_id"])
+                note_time(r["order_id"], r["timestamp"])
+            cursor = await conn.execute(
+                f"SELECT order_id, trade_json, created_at FROM pending_orders "
+                f"WHERE order_id IN ({marks})",
+                ids,
+            )
+            for r in await cursor.fetchall():
+                info = found.setdefault(r["order_id"], {"ticker": None, "is_option": False})
+                try:
+                    trade = json.loads(r["trade_json"] or "{}")
+                except (TypeError, ValueError):
+                    trade = {}
+                if isinstance(trade, dict):
+                    info["ticker"] = info["ticker"] or trade.get("ticker")
+                    info["is_option"] = info["is_option"] or bool(trade.get("option_id"))
+                note_time(r["order_id"], r["created_at"])
+        for order_id, info in found.items():
+            stamps = times.get(order_id)
+            info["placed_at"] = min(stamps).isoformat() if stamps else None
+        return found
 
     async def get_pending_orders(self) -> list[dict]:
         """Retrieve all orders still in PENDING status.

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,9 @@ def held_by_ticker(open_trades: list[dict[str, Any]]) -> dict[str, tuple[float, 
 
 
 def coverage_by_ticker(
-    open_trades: list[dict[str, Any]], book: list[dict[str, Any]]
+    open_trades: list[dict[str, Any]],
+    book: list[dict[str, Any]],
+    unconfirmed: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Shares held against shares a resting stop would sell, per ticker.
 
@@ -149,6 +152,13 @@ def coverage_by_ticker(
       protection).
     * ``flat``: nothing held. A stop still resting here is a leftover
       (``excess_stop_qty``).
+    * ``unverified``: the orders cover the position as the journal has them,
+      but the broker did not confirm one or more of them at the last check
+      (``unconfirmed``: order id to why, from reconciliation; listed in
+      ``unverified_order_ids``). They count as resting. A failed read, not a
+      gap: one was once taken for a gap, and the agents cancelled the
+      working protection to repair it. A shortfall still reads ``partial``
+      or ``none``.
     """
     by_id: dict[str, dict[str, Any]] = {}
     unnamed: list[dict[str, Any]] = []
@@ -196,6 +206,13 @@ def coverage_by_ticker(
         unverified = any(
             not _positive(r.get("stop_price")) or not r.get("time_in_force") for r in stops
         )
+        unconfirmed_ids = sorted(
+            {
+                str(r.get("order_id"))
+                for r in (*stops, *take_profits, *entries)
+                if unconfirmed and str(r.get("order_id") or "") in unconfirmed
+            }
+        )
         if held_qty <= _QTY_TOLERANCE:
             status = "flat"
         elif covered <= _QTY_TOLERANCE:
@@ -208,6 +225,8 @@ def coverage_by_ticker(
             status = "split"
         else:
             status = "full"
+        if unconfirmed_ids and status in ("full", "split"):
+            status = "unverified"
         sources = {"broker" if r.get("source") == "broker_sync" else "journal" for r in stops}
 
         out[ticker] = {
@@ -247,6 +266,13 @@ def coverage_by_ticker(
                 for r in rows
             ],
         }
+        if unconfirmed_ids:
+            out[ticker]["unverified_order_ids"] = unconfirmed_ids
+            out[ticker]["unverified_note"] = (
+                "The broker did not confirm these orders at the last check; they are "
+                "counted as resting. A failed read, not a gap: read the broker's order "
+                "list again before any repair, and never cancel an order to make room."
+            )
     return out
 
 

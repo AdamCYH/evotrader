@@ -722,6 +722,15 @@ async def start(
                         recon_result["reconciled_count"],
                         recon_result.get("still_pending_count", 0),
                     )
+                if recon_result.get("unverified"):
+                    logger.warning(
+                        "Cycle start: the broker did not confirm %d order(s); kept as "
+                        "resting, coverage reads unverified: %s",
+                        len(recon_result["unverified"]),
+                        "; ".join(
+                            f"{u['order_id']} ({u['reason']})" for u in recon_result["unverified"]
+                        ),
+                    )
             except Exception as e:
                 logger.warning("Failed to reconcile pending orders at cycle start: %s", e)
 

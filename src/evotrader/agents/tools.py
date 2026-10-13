@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -242,7 +243,12 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict | None:
         result = await session.call_tool(tool_name, arguments=arguments)
 
         if getattr(result, "isError", False) or not result.content:
-            logger.error("MCP tool '%s' returned error or empty content", tool_name)
+            detail = str(getattr(result.content[0], "text", "") or "") if result.content else ""
+            logger.error(
+                "MCP tool '%s' returned an error or nothing: %s",
+                tool_name,
+                detail[:300] or "(empty)",
+            )
             return None
 
         return safe_parse_json(result.content[0].text)
@@ -1415,7 +1421,9 @@ async def gather_market_data(ticker: str) -> dict:
         if _journal is not None:
             lots_now = await _journal.get_open_trades()
             book_now = [_pending_order_view(r) for r in await _journal.get_pending_orders()]
-            protective_coverage = coverage_by_ticker(lots_now, book_now).get(ticker.upper())
+            protective_coverage = coverage_by_ticker(
+                lots_now, book_now, unconfirmed=_unconfirmed_orders
+            ).get(ticker.upper())
             take_profit = take_profit_coverage(
                 protective_coverage,
                 lots_now,
@@ -3876,7 +3884,7 @@ async def _protective_coverage() -> dict[str, dict]:
         return {}
     positions = await _journal.get_open_trades()
     book = [_pending_order_view(row) for row in await _journal.get_pending_orders()]
-    return coverage_by_ticker(positions, book)
+    return coverage_by_ticker(positions, book, unconfirmed=_unconfirmed_orders)
 
 
 async def get_open_positions() -> dict:
@@ -3942,7 +3950,7 @@ async def get_open_positions() -> dict:
     try:
         from evotrader.db.protection_audit import coverage_by_ticker, take_profit_coverage
 
-        coverage = coverage_by_ticker(positions, pending_orders)
+        coverage = coverage_by_ticker(positions, pending_orders, unconfirmed=_unconfirmed_orders)
         result["protective_coverage"] = coverage
         # The upside half: resting take-profits per ticker. Distances in ATRs
         # need the day's ATR and mark, so they are in gather_market_data.
@@ -4280,7 +4288,145 @@ def _to_float(value: object) -> float | None:
         return None
 
 
-async def sync_open_orders_from_broker(account_number: str) -> dict:
+#: Absence from a broker listing is evidence only if the listing also holds an
+#: order placed at least this long before the one looked for.
+_LISTING_REACH_MARGIN = timedelta(minutes=10)
+
+#: Orders the last reconciliation could not confirm with the broker, by id,
+#: with why. They stay PENDING and count as resting, and the coverage block
+#: names them (status ``unverified``): a failed read is never taken for a gap.
+_unconfirmed_orders: dict[str, str] = {}
+
+
+def _parse_when(value: object) -> datetime | None:
+    """An ISO time from the journal or the broker, naive ones read as UTC."""
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+def _order_id_of(order: dict) -> str:
+    return str(order.get("id") or order.get("order_id") or "")
+
+
+async def _list_broker_orders(
+    account_number: str, symbol: str | None = None, *, tool: str = "get_equity_orders"
+) -> list[dict] | None:
+    """The broker's orders in every state, for one symbol or the whole account.
+
+    None when the broker gave no usable answer: an error, a timeout, a reply of
+    an unexpected shape. That is not an empty list, and nothing may be
+    concluded from it about any order.
+    """
+    arguments = {"account_number": account_number}
+    if symbol:
+        arguments["symbol"] = symbol
+    try:
+        raw = await _call_mcp_tool(tool, arguments)
+    except Exception as e:
+        logger.warning("[ORDERBOOK] %s for %s raised: %s", tool, symbol or "the account", e)
+        return None
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if not isinstance(data, dict):
+        return None
+    orders = data["orders"] if "orders" in data else data.get("results")
+    if not isinstance(orders, list):
+        return None
+    return [o for o in orders if isinstance(o, dict)]
+
+
+@dataclass(frozen=True)
+class _BrokerListing:
+    """One answered listing of the broker's orders, in every state."""
+
+    scope: str  # a symbol, or "account"
+    orders: tuple[dict, ...]
+
+    def find(self, order_id: str) -> dict | None:
+        return next((o for o in self.orders if _order_id_of(o) == order_id), None)
+
+    def oldest(self) -> datetime | None:
+        created = [t for t in (_parse_when(o.get("created_at")) for o in self.orders) if t]
+        return min(created) if created else None
+
+    def vouches_for_absence(self, placed_at: datetime | None) -> bool:
+        """Whether this listing would hold the order if the broker still had it.
+
+        It must hold orders, one of them placed before the order looked for:
+        an empty answer, or one that does not reach back that far (a capped
+        page), says nothing about an older order.
+        """
+        oldest = self.oldest()
+        return bool(placed_at and oldest and oldest <= placed_at - _LISTING_REACH_MARGIN)
+
+    def why_not_evidence(self, placed_at: datetime | None) -> str:
+        name = "the account's" if self.scope == "account" else f"the {self.scope}"
+        if not self.orders:
+            return f"{name} order list answered empty"
+        if placed_at is None:
+            return f"when it was placed is not on record, so {name} order list cannot vouch"
+        return f"{name} order list does not reach back to {placed_at:%Y-%m-%d %H:%M}Z"
+
+    def describe(self) -> str:
+        name = "account" if self.scope == "account" else self.scope
+        oldest = self.oldest()
+        back = f", back to {oldest:%Y-%m-%d}" if oldest else ""
+        return f"{name} order list ({len(self.orders)} orders{back})"
+
+
+async def _record_working_orders(
+    orders: list[dict] | tuple[dict, ...],
+    symbols: set[str] | None,
+    synced: list[str],
+    book: list[dict],
+    errors: list[str],
+    ticker: str | None = None,
+) -> None:
+    """Give each order the broker is still working a ``pending_orders`` row.
+
+    ``ticker`` names the symbol a symbol-filtered listing was asked for;
+    without it, the order's own symbol is used, kept only if in ``symbols``.
+    """
+    for order in orders:
+        if str(order.get("state") or "").lower() not in _BROKER_OPEN_STATES:
+            continue
+        order_id = _order_id_of(order)
+        if not order_id or order_id in synced:
+            continue
+        symbol = ticker or str(order.get("symbol") or "").upper()
+        if not symbol or (ticker is None and symbols is not None and symbol not in symbols):
+            continue
+        row = _pending_row_from_broker_order(order, symbol)
+        try:
+            await _journal.save_pending_order(order_id, json.dumps(row), _current_session_id)
+            synced.append(order_id)
+            book.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "order_id",
+                        "ticker",
+                        "action",
+                        "quantity",
+                        "stop_price",
+                        "limit_price",
+                        "time_in_force",
+                        "state",
+                    )
+                }
+            )
+        except Exception as e:
+            errors.append(f"{order_id}: {e}")
+            logger.warning("[ORDERBOOK] Could not record broker order %s: %s", order_id, e)
+
+
+async def sync_open_orders_from_broker(
+    account_number: str, *, listings: dict[str, _BrokerListing] | None = None
+) -> dict:
     """Make ``pending_orders`` reflect the broker's working orders.
 
     Runs once per cycle in live mode, before reconciliation reads the list.
@@ -4288,6 +4434,13 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
     journal knows about it; a row the broker no longer lists is left for
     ``reconcile_pending_orders`` to resolve against the broker's answer, which
     is the only thing allowed to declare it terminal.
+
+    ``listing_status`` says per ticker whether the broker's list answered
+    (``ok``), how many orders it held in every state (``count``) and how many
+    are working. A list that did not answer is not an empty book: one that
+    did not answer was once read as one, and working protective orders were
+    written off as gone. Pass ``listings`` to receive
+    each answered listing (reconciliation judges absence from them).
 
     Observes and records only. It places nothing and cancels nothing.
     """
@@ -4301,53 +4454,23 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
     # (the orchestrator's cycle summary) can state quantities and levels.
     book: list[dict] = []
     errors: list[str] = []
+    listing_status: dict[str, dict] = {}
     for ticker in allowed_tickers():
-        try:
-            raw = await _call_mcp_tool(
-                "get_equity_orders",
-                {
-                    "account_number": account_number,
-                    "symbol": ticker,
-                },
-            )
-        except Exception as e:
-            errors.append(f"{ticker}: {e}")
-            logger.warning("[ORDERBOOK] Could not list %s orders: %s", ticker, e)
+        orders = await _list_broker_orders(account_number, ticker)
+        if orders is None:
+            errors.append(f"{ticker}: the broker's order list did not answer")
+            listing_status[ticker] = {"ok": False}
+            logger.warning("[ORDERBOOK] The broker's %s order list did not answer.", ticker)
             continue
-        if not raw:
-            continue
-        data = raw.get("data", {}) or {}
-        orders = data.get("orders") or data.get("results") or []
-        for order in orders:
-            if str(order.get("state") or "").lower() not in _BROKER_OPEN_STATES:
-                continue
-            order_id = order.get("id") or order.get("order_id")
-            if not order_id:
-                continue
-            row = _pending_row_from_broker_order(order, ticker)
-            try:
-                await _journal.save_pending_order(
-                    str(order_id), json.dumps(row), _current_session_id
-                )
-                synced.append(str(order_id))
-                book.append(
-                    {
-                        key: row.get(key)
-                        for key in (
-                            "order_id",
-                            "ticker",
-                            "action",
-                            "quantity",
-                            "stop_price",
-                            "limit_price",
-                            "time_in_force",
-                            "state",
-                        )
-                    }
-                )
-            except Exception as e:
-                errors.append(f"{order_id}: {e}")
-                logger.warning("[ORDERBOOK] Could not record broker order %s: %s", order_id, e)
+        if listings is not None:
+            listings[ticker] = _BrokerListing(ticker, tuple(orders))
+        before = len(synced)
+        await _record_working_orders(orders, None, synced, book, errors, ticker=ticker)
+        listing_status[ticker] = {
+            "ok": True,
+            "count": len(orders),
+            "working": len(synced) - before,
+        }
 
     if synced:
         logger.info(
@@ -4361,20 +4484,66 @@ async def sync_open_orders_from_broker(account_number: str) -> dict:
         "synced": len(synced),
         "order_ids": synced,
         "orders": book,
+        "listing_status": listing_status,
         "errors": errors if errors else None,
     }
+
+
+async def _lookup_broker_order(account_number: str, order_id: str) -> dict | None:
+    """The broker's record of one order, asked for by id; None unless an answer names it.
+
+    An answer about another order is not this order's: one that carries an
+    id must carry this one.
+    """
+    for tool_name in ("get_option_orders", "get_equity_orders"):
+        try:
+            raw = await _call_mcp_tool(
+                tool_name, {"account_number": account_number, "order_id": order_id}
+            )
+        except Exception as e:
+            logger.warning("[RECONCILE] %s lookup failed for %s: %s", tool_name, order_id, e)
+            continue
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if not isinstance(data, dict):
+            continue
+        orders = [
+            o for o in (data.get("orders") or data.get("results") or []) if isinstance(o, dict)
+        ]
+        named = next((o for o in orders if _order_id_of(o) == order_id), None)
+        if named is not None:
+            return named
+        if orders and not _order_id_of(orders[0]):
+            return orders[0]  # an answer without ids, to a question about one order
+    return None
+
+
+def _set_unconfirmed(orders: dict[str, str]) -> None:
+    global _unconfirmed_orders, _open_positions_cache
+    if orders != _unconfirmed_orders:
+        _unconfirmed_orders = dict(orders)
+        _open_positions_cache = None
 
 
 async def reconcile_pending_orders() -> dict:
     """Reconcile pending live orders against Robinhood's actual order state.
 
     Reads pending orders from the ``pending_orders`` database table (persisted
-    across restarts) and checks each order's status via the Robinhood MCP
-    ``get_equity_orders`` / ``get_option_orders`` tools. If the order has
-    reached a terminal state (filled, rejected, cancelled, failed), updates
-    the existing trade in the ``trades`` table (which was journaled at
+    across restarts) and checks each order's status with the broker. If the
+    order has reached a terminal state (filled, rejected, cancelled, failed),
+    updates the existing trade in the ``trades`` table (which was journaled at
     submission time with order_status='PENDING') and marks the pending_orders
     row resolved.
+
+    Where an order's state comes from, in order: the broker's list for its
+    symbol, a lookup by its id, the broker's list for the whole account (asked
+    at most once a pass). An order none of them returns is gone only when a
+    list that answered, holds orders and reaches back to the order's placement
+    does not have it. Anything less (a list that failed or answered empty, a
+    lookup that failed) proves nothing: the order stays PENDING, counts as
+    resting, and is reported in ``unverified`` and in the coverage block
+    (status ``unverified``). A failed read was once taken for "not found" and
+    working protective orders were marked cancelled; the agents then
+    cancelled the real ones to repair a gap that did not exist.
 
     Should be called at the start of each trading cycle.
 
@@ -4416,13 +4585,15 @@ async def reconcile_pending_orders() -> dict:
     # recorded — or recorded as filled by mistake — is on the list below and in
     # the order book the agents read. Before this, the list was journal-only and
     # a journal that was wrong could not be corrected by it.
-    order_book = await sync_open_orders_from_broker(account_number)
+    listings: dict[str, _BrokerListing] = {}
+    order_book = await sync_open_orders_from_broker(account_number, listings=listings)
 
     # Every order the journal believes is live — the watch list (now including
     # the broker's working orders), any PENDING journal row with a broker id,
     # and any recent row marked FILLED on the executor's word alone.
     pending_rows = await _journal.get_order_ids_awaiting_broker()
     if not pending_rows:
+        _set_unconfirmed({})
         return {
             "reconciled": [],
             "pending_count": 0,
@@ -4431,49 +4602,96 @@ async def reconcile_pending_orders() -> dict:
             "message": "No pending orders to reconcile",
         }
 
+    details = await _journal.describe_awaited_orders([r["order_id"] for r in pending_rows])
+    awaited_tickers = {str(d.get("ticker") or "").upper() for d in details.values()} - {""}
+    account_lists: dict[str, _BrokerListing | None] = {}
+
+    async def _account_list(tool: str) -> _BrokerListing | None:
+        """The whole account's list from *tool*, asked for at most once a pass."""
+        if tool not in account_lists:
+            orders = await _list_broker_orders(account_number, tool=tool)
+            account_lists[tool] = (
+                None if orders is None else _BrokerListing("account", tuple(orders))
+            )
+            if orders is not None and tool == "get_equity_orders" and isinstance(order_book, dict):
+                # Working orders a failed or empty symbol list did not show join the book.
+                synced = order_book.setdefault("order_ids", [])
+                book = order_book.setdefault("orders", [])
+                before = len(synced)
+                await _record_working_orders(orders, awaited_tickers, synced, book, [])
+                if len(synced) > before:
+                    order_book["synced"] = len(synced)
+                    logger.warning(
+                        "[ORDERBOOK] The account's order list showed %d working order(s) "
+                        "its symbol lists did not: %s",
+                        len(synced) - before,
+                        ", ".join(synced[before:]),
+                    )
+            if orders is None:
+                logger.warning("[RECONCILE] The account's order list (%s) did not answer.", tool)
+        return account_lists[tool]
+
     reconciled: list[dict] = []
+    unconfirmed: dict[str, str] = {}
+    unverified: list[dict] = []
     errors: list[str] = []
 
     for row in pending_rows:
         order_id = row["order_id"]
+        detail = details.get(order_id) or {}
+        ticker = str(detail.get("ticker") or "").upper()
+        is_option = bool(detail.get("is_option"))
+        placed_at = _parse_when(detail.get("placed_at"))
 
         try:
-            # Direct lookup by order_id — Robinhood supports this natively.
-            # Try both equity and option order endpoints since we don't
-            # always know the asset type from the pending_orders table.
-            order_data = None
-            for tool_name in ("get_option_orders", "get_equity_orders"):
-                try:
-                    raw = await _call_mcp_tool(
-                        tool_name,
-                        {
-                            "account_number": account_number,
-                            "order_id": order_id,
-                        },
-                    )
-                    if raw:
-                        orders = raw.get("data", {}).get("orders", [])
-                        if not orders:
-                            orders = raw.get("data", {}).get("results", [])
-                        if orders:
-                            order_data = orders[0]
-                            break
-                except Exception as e:
-                    logger.debug("[RECONCILE] %s lookup failed for %s: %s", tool_name, order_id, e)
+            own = None if is_option else listings.get(ticker)
+            order_data = own.find(order_id) if own else None
+            if order_data is None:
+                order_data = await _lookup_broker_order(account_number, order_id)
+            wide = None
+            if order_data is None:
+                wide = await _account_list(
+                    "get_option_orders" if is_option else "get_equity_orders"
+                )
+                order_data = wide.find(order_id) if wide else None
 
             if not order_data:
-                # Order not found on Robinhood at all — it was either never
-                # actually placed, rejected at submission, or already purged
-                # after cancellation. Mark as CANCELLED.
-                logger.warning(
-                    "[RECONCILE] Order %s not found on Robinhood — marking as CANCELLED",
-                    order_id,
+                evidence = next(
+                    (lst for lst in (own, wide) if lst and lst.vouches_for_absence(placed_at)),
+                    None,
                 )
+                if evidence is None:
+                    # Nothing the broker said shows the order is gone. It stays
+                    # PENDING and counts as resting; the coverage names it.
+                    why = []
+                    if not is_option:
+                        why.append(
+                            own.why_not_evidence(placed_at)
+                            if own
+                            else f"the {ticker or 'symbol'} order list did not answer"
+                        )
+                    why.append("the lookup by id did not return it")
+                    why.append(
+                        wide.why_not_evidence(placed_at)
+                        if wide
+                        else "the account's order list did not answer"
+                    )
+                    reason = "the broker did not confirm it: " + "; ".join(why)
+                    unconfirmed[order_id] = reason
+                    unverified.append({"order_id": order_id, "ticker": ticker, "reason": reason})
+                    logger.warning("[RECONCILE] Order %s unverified: %s", order_id, reason)
+                    continue
+
+                # Order not on the broker at all — it was either never actually
+                # placed, rejected at submission, or already purged after
+                # cancellation, and a list that would hold it says so.
+                reason = f"Not on the broker: its {evidence.describe()} answered without it"
+                logger.warning("[RECONCILE] Order %s marked CANCELLED: %s", order_id, reason)
                 try:
                     rows_updated = await _journal.update_order_status(
                         order_id=order_id,
                         new_status="CANCELLED",
-                        broker_status_reason="Order not found on broker — cancelled or never placed",
+                        broker_status_reason=reason,
                     )
                     reconciled.append(
                         {
@@ -4602,17 +4820,20 @@ async def reconcile_pending_orders() -> dict:
         except Exception as e:
             errors.append(f"Error checking order {order_id}: {e}")
             logger.error("[RECONCILE] Error checking order %s: %s", order_id, e)
+            unconfirmed.setdefault(order_id, f"the check failed: {e}")
 
     # Invalidate positions cache since state may have changed
     if reconciled:
         global _open_positions_cache
         _open_positions_cache = None
+    _set_unconfirmed(unconfirmed)
 
     still_pending = len(pending_rows) - len(reconciled)
     return {
         "reconciled": reconciled,
         "reconciled_count": len(reconciled),
         "still_pending_count": max(0, still_pending),
+        "unverified": unverified or None,
         "order_book": order_book,
         "protective_coverage": await _coverage(),
         "errors": errors if errors else None,
