@@ -21,6 +21,10 @@ from evotrader.db.connection import Database
 
 logger = logging.getLogger(__name__)
 
+#: The forward-return columns, in percent: the next session's close, the fifth
+#: session's, and the decision's own session's close.
+_HORIZON_COLUMNS = ("forward_return_1d", "forward_return_5d", "forward_return_close")
+
 
 class SignalAttributionStore:
     """Repository for the ``signal_attribution`` table."""
@@ -183,6 +187,52 @@ class SignalAttributionStore:
         except Exception as e:
             logger.error("Failed to fetch long-horizon attribution rows: %s", e)
             return []
+
+    async def pending_close_horizon(
+        self, limit: int = 500, now: datetime | None = None, window_days: int = 85
+    ) -> list[dict[str, Any]]:
+        """Rows without a same-session close return, decided within the window.
+
+        Kept apart from ``pending_scoring``: the close resolves a session
+        before the 1-day horizon and must not touch ``scored_at``. Rows decided
+        after their session's close never get one, which is why the window
+        bounds the query. It stays inside the scorer's daily bars, which reach
+        back 90 days (``agents.tools._fetch_daily_candles``): an older row's
+        bar is not among them, and it would wait forever.
+        """
+        try:
+            async with self._db.connection() as conn:
+                # UTC like the stored timestamps: the comparison is between strings.
+                now = (now or datetime.now(UTC)).astimezone(UTC)
+                since = (now - timedelta(days=window_days)).isoformat()
+                cur = await conn.execute(
+                    """
+                    SELECT id, timestamp, ticker, price_at_decision
+                    FROM signal_attribution
+                    WHERE forward_return_close IS NULL
+                      AND price_at_decision IS NOT NULL
+                      AND timestamp >= ?
+                      AND timestamp <= ?
+                    ORDER BY timestamp
+                    LIMIT ?
+                    """,
+                    (since, now.isoformat(), limit),
+                )
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as e:
+            logger.error("Failed to fetch close-horizon attribution rows: %s", e)
+            return []
+
+    async def score_close(self, row_id: int, forward_return_close: float) -> None:
+        """Write the same-session close return of one row (percent). ``scored_at`` is left alone."""
+        try:
+            async with self._db.transaction() as conn:
+                await conn.execute(
+                    "UPDATE signal_attribution SET forward_return_close = ? WHERE id = ?",
+                    (forward_return_close, row_id),
+                )
+        except Exception as e:
+            logger.error("Failed to write the close horizon of attribution row %s: %s", row_id, e)
 
     async def score(
         self, row_id: int, forward_return_1d: float | None, forward_return_5d: float | None
@@ -443,8 +493,15 @@ class SignalAttributionStore:
             logger.error("Failed to backfill algo-only attribution rows: %s", e)
             return 0
 
-    async def scored_rows(self, limit: int = 5000) -> list[dict[str, Any]]:
-        """Scored rows, newest first, ready for :mod:`evotrader.backtest.attribution`."""
+    async def scored_rows(
+        self, limit: int = 5000, horizon_column: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Scored rows, newest first, ready for :mod:`evotrader.backtest.attribution`.
+
+        By default a row is scored once its 1-day horizon resolved (``scored_at``).
+        With ``horizon_column``, it is scored once that column is filled: the
+        same-session close resolves a session earlier than ``scored_at``.
+        """
         cols = [
             "id",
             "timestamp",
@@ -466,6 +523,8 @@ class SignalAttributionStore:
             "traded",
             "forward_return_1d",
             "forward_return_5d",
+            # The decision's own session close (migration 0029).
+            "forward_return_close",
             # Dislocation depth (migration 0017). Selected here so realised
             # forward returns can be bucketed by how far price actually sat
             # from VWAP, in ATRs, rather than by a z-score whose units move
@@ -482,11 +541,17 @@ class SignalAttributionStore:
             # the cycle (migration 0021): algorithm only, agent fields NULL.
             "agent_absent",
         ]
+        if horizon_column is None:
+            scored = "scored_at IS NOT NULL"
+        elif horizon_column in _HORIZON_COLUMNS:
+            scored = f"{horizon_column} IS NOT NULL"
+        else:
+            raise ValueError(f"not a horizon column: {horizon_column!r}")
         try:
             async with self._db.connection() as conn:
                 cur = await conn.execute(
                     f"SELECT {', '.join(cols)} FROM signal_attribution "
-                    "WHERE scored_at IS NOT NULL ORDER BY timestamp DESC LIMIT ?",
+                    f"WHERE {scored} ORDER BY timestamp DESC LIMIT ?",
                     (limit,),
                 )
                 return [dict(r) for r in await cur.fetchall()]

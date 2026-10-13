@@ -39,6 +39,15 @@ folder layout; each entry says what you need to do.
   account's number with its instructions instead of recalling one, and an
   order sent for any other account is refused by the order gate
   (`WRONG_ACCOUNT`, with the right number in the fix).
+- **Calls scored at their own session's close.** The evolution agent's
+  calibration record measured every call at the next session's close and the
+  fifth's, which suits the daily channels; the intraday ones aim at the same
+  day's close and, measured a day later, read the next session's move. A
+  third horizon, `forward_return_close` (migration 0029), is the return from
+  the decision's price to the close of its own session, written once that
+  session's daily bar is out (a session before the 1-day horizon, and never
+  for a decision made after the close). `get_signal_calibration` takes
+  `horizon="close"`.
 - **A limit's distance from the market, at the order review.** The executor
   reviews every order with `review_equity_order`, whose answer carried the
   quote but said nothing about the limit's distance from it, so an empty

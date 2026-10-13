@@ -1249,12 +1249,17 @@ async def start(
                         # market-data response this cycle kept.
                         await store.backfill_participation()
                         scored = await AttributionScorer(store, _fetch_daily_candles).run()
-                        if scored.get("scored") or scored.get("backfilled_5d"):
+                        if (
+                            scored.get("scored")
+                            or scored.get("backfilled_5d")
+                            or scored.get("close_filled")
+                        ):
                             logger.info(
                                 "Post-cycle: scored %d attribution row(s), "
-                                "backfilled the 5-day horizon on %d",
+                                "backfilled the 5-day horizon on %d, the session close on %d",
                                 scored["scored"],
                                 scored["backfilled_5d"],
+                                scored.get("close_filled", 0),
                             )
                     except Exception as e:
                         logger.warning("Attribution scoring failed: %s", e)

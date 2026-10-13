@@ -29,14 +29,26 @@ that is a complete measurement of the 1-day question. The 5-day column is
 backfilled later by :meth:`AttributionScorer.backfill_long_horizon`. Waiting for
 the 5-day horizon before recording anything would leave the most recent week —
 which, for a system this young, is most of the data — invisible to evolution.
+
+``forward_return_close`` is the third horizon: from ``price_at_decision`` to
+the close of the decision's OWN session, the one the intraday channels are
+built for (their targets resolve or fail by that close; measured a day later
+they read the next session's move instead). It resolves once that session's
+daily bar is published, a session before the 1-day horizon, and is written by
+:meth:`AttributionScorer.backfill_close_horizon` without touching
+``scored_at``. A decision at or after its session's close (the after-hours
+cycle), or on a day the market is shut, has no close ahead of it and stays
+NULL.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+
+from evotrader.tools.market_hours import ET, is_trading_day, regular_close
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +95,52 @@ def forward_closes(candles: Sequence[dict[str, Any]], decision_date: date) -> li
         if close_f > 0:
             out.append(close_f)
     return out
+
+
+#: A session's daily bar is taken for its close only this long after the close,
+#: so a bar still forming is never read as the close.
+_CLOSE_SETTLED = timedelta(hours=1)
+
+
+def close_horizon_session(timestamp: Any) -> date | None:
+    """The session whose close a decision at *timestamp* is measured to.
+
+    Its own US Eastern date, when the market opens that day and the decision
+    came before that day's regular close (pre-market counts: the close is still
+    ahead). None otherwise: after the close, or on a weekend or holiday.
+    """
+    if isinstance(timestamp, datetime):
+        when = timestamp
+    else:
+        try:
+            when = datetime.fromisoformat(str(timestamp).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    local = when.astimezone(ET)
+    day = local.date()
+    if not is_trading_day(day) or local.time() >= regular_close(day):
+        return None
+    return day
+
+
+def same_session_close(
+    candles: Sequence[dict[str, Any]], session: date, now: datetime
+) -> float | None:
+    """The close of *session* from the daily bars, once that session is over."""
+    closed_at = datetime.combine(session, regular_close(session), tzinfo=ET)
+    if now < closed_at + _CLOSE_SETTLED:
+        return None
+    for candle in candles:
+        if _as_date(candle.get("timestamp")) != session:
+            continue
+        try:
+            close = float(candle.get("close"))
+        except (TypeError, ValueError):
+            return None
+        return close if close > 0 else None
+    return None
 
 
 def returns_for(
@@ -198,8 +256,43 @@ class AttributionScorer:
             logger.info("Attribution scoring: filled the 5-day horizon on %d row(s)", filled)
         return {"examined": len(rows), "filled": filled}
 
+    async def backfill_close_horizon(
+        self, limit: int = 500, now: datetime | None = None
+    ) -> dict[str, int]:
+        """Fill ``forward_return_close`` where the decision's own session has closed.
+
+        ``no_close``: rows decided after their session's close (or on a day the
+        market was shut), which never get one; ``waiting``: the session's bar is
+        not published yet.
+        """
+        now = (now or datetime.now(UTC)).astimezone(UTC)
+        rows = await self._store.pending_close_horizon(limit=limit, now=now)
+        if not rows:
+            return {"examined": 0, "filled": 0, "waiting": 0, "no_close": 0}
+
+        candles = await self._candles_by_ticker([r.get("ticker") for r in rows], now)
+        filled = waiting = no_close = 0
+        for row in rows:
+            session = close_horizon_session(row.get("timestamp"))
+            base = row.get("price_at_decision")
+            if session is None or not base or float(base) <= 0:
+                no_close += 1
+                continue
+            close = same_session_close(candles.get(row.get("ticker"), []), session, now)
+            if close is None:
+                waiting += 1
+                continue
+            await self._store.score_close(row["id"], round((close / float(base) - 1.0) * 100.0, 4))
+            filled += 1
+
+        if filled:
+            logger.info("Attribution scoring: same-session close on %d row(s)", filled)
+        return {"examined": len(rows), "filled": filled, "waiting": waiting, "no_close": no_close}
+
     async def run(self, limit: int = 500, now: datetime | None = None) -> dict[str, int]:
-        """Both passes. Safe to call every cycle; usually a no-op."""
+        """Every pass: the session close, the next session, the fifth. Safe to call
+        every cycle; usually a no-op."""
+        close = await self.backfill_close_horizon(limit=limit, now=now)
         short = await self.score_pending(limit=limit, now=now)
         long = await self.backfill_long_horizon(limit=limit, now=now)
-        return {**short, "backfilled_5d": long["filled"]}
+        return {**short, "backfilled_5d": long["filled"], "close_filled": close["filled"]}

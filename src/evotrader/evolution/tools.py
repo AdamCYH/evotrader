@@ -215,7 +215,10 @@ async def get_signal_calibration(
             predate the current instrument or the current instructions.
         ticker: Restrict to one instrument (empty = all). A lesson from one
             instrument is a hypothesis on the next, not a base rate.
-        horizon: ``"1d"`` (next session's close) or ``"5d"`` (fifth session).
+        horizon: ``"1d"`` (next session's close), ``"5d"`` (fifth session) or
+            ``"close"`` (the decision's own session close: the horizon the
+            intraday channels are built for, resolved a session sooner than
+            ``"1d"``; decisions after the close have none).
     """
     import json
     import math
@@ -225,26 +228,39 @@ async def get_signal_calibration(
     if not _attribution_store:
         return {"error": "Attribution store not initialised"}
 
-    column = "forward_return_5d" if str(horizon).lower().startswith("5") else "forward_return_1d"
+    wanted = str(horizon).strip().lower()
+    if wanted == "close":
+        column = "forward_return_close"
+    elif wanted.startswith("5"):
+        column = "forward_return_5d"
+    else:
+        column = "forward_return_1d"
     cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
     want = str(ticker or "").strip().upper()
 
     rows = [
         r
-        for r in await _attribution_store.scored_rows(limit=5000)
+        for r in await _attribution_store.scored_rows(
+            limit=5000, horizon_column=column if column == "forward_return_close" else None
+        )
         if r.get(column) is not None
         and str(r.get("timestamp", "")) >= cutoff.isoformat()
         and (not want or str(r.get("ticker", "")).upper() == want)
     ]
     # Scoped to the same instrument, or the count answers a different question
     # than the table above it.
-    waiting = len(
-        [
+    if column == "forward_return_close":
+        from evotrader.evolution.attribution_scorer import close_horizon_session
+
+        # Only rows that will get a close: one decided after it never does.
+        pending = [
             r
-            for r in await _attribution_store.pending_scoring(horizon_days=1, limit=5000)
-            if not want or str(r.get("ticker", "")).upper() == want
+            for r in await _attribution_store.pending_close_horizon(limit=5000)
+            if close_horizon_session(r.get("timestamp")) is not None
         ]
-    )
+    else:
+        pending = await _attribution_store.pending_scoring(horizon_days=1, limit=5000)
+    waiting = len([r for r in pending if not want or str(r.get("ticker", "")).upper() == want])
 
     if len(rows) < 3:
         return {

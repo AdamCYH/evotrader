@@ -121,7 +121,15 @@ class TestScoringWritesBackToTheTable:
         # A full day on, so the row IS eligible — but the feed still ends at the
         # decision's own session, so there is nothing to measure against.
         stats = await AttributionScorer(store, fetch).run(now=datetime(2026, 9, 19, tzinfo=UTC))
-        assert stats == {"examined": 1, "scored": 0, "waiting": 1, "backfilled_5d": 0}
+        # The decision's own session has closed, so its same-session horizon is
+        # measured (migration 0029); the next session's is not there yet.
+        assert stats == {
+            "examined": 1,
+            "scored": 0,
+            "waiting": 1,
+            "backfilled_5d": 0,
+            "close_filled": 1,
+        }
         assert await store.scored_rows() == []
 
     async def test_the_five_day_column_is_backfilled_without_erasing_the_one_day(
@@ -165,6 +173,7 @@ class TestScoringWritesBackToTheTable:
             "scored": 0,
             "waiting": 0,
             "backfilled_5d": 0,
+            "close_filled": 0,
         }
 
     async def test_a_data_outage_does_not_raise(self, store: SignalAttributionStore) -> None:
