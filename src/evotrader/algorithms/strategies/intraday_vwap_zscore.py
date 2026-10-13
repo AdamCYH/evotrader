@@ -39,6 +39,25 @@ Two parameters now make the claim true, both IDENTITY NO-OPS at 1.0:
 
 Neither engages without a stack, so ``range_bound`` behaviour is bit-identical.
 
+SESSION-EXTREME DAMPENER
+------------------------
+Nothing above asks where in the session's range the price sits. On a day that
+grinds lower, the price is below VWAP AND at the session low every hour, and
+the buy leg fires each cycle while the dip is still extending; without a stack
+no dampener engages at all, so the channel can author a bullish composite hour
+after hour into a falling close. A fade at the session low (or high) is the
+extension still in progress, not yet a reversal.
+
+``session_extreme_ibs`` (a band, 0.0 = off) and ``session_extreme_dampener``
+(1.0 = identity) scale the emission when the buy leg fires with the session's
+IBS at or below the band, or the sell leg at or above one minus it. A dampener,
+not a kill: a sell faded from the session high can still be right by the
+close. On the counter-trend leg it stacks with ``countertrend_dampener``, on
+purpose: a fade against the stack at the extreme is the worst case of both.
+IBS is today's bar on any cycle this channel fires (the daily series ends with
+today's bar on a trading day); a missing reading means no gate, and readings
+past 0..1 are clamped.
+
 Best in: Range-Bound regime. In trending regimes it now votes with the stack
 more readily than against it, but its trending record remains unproven.
 """
@@ -121,6 +140,10 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # only rewrites active.yaml, so it could never undo it.
         countertrend_dampener: float = 1.0,
         with_trend_trigger_scale: float = 1.0,
+        # Identity as well (0.0 = no band, 1.0 = no scaling): see the class
+        # docstring, SESSION-EXTREME DAMPENER.
+        session_extreme_ibs: float = 0.0,
+        session_extreme_dampener: float = 1.0,
         # Which relative-volume reading gates this channel — see
         # indicators.volume.select_relative_volume. 'daily' is every existing
         # version's behaviour.
@@ -145,6 +168,8 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # Both are identity no-ops at 1.0 — the audit and rollback path.
         self._countertrend_dampener = countertrend_dampener
         self._with_trend_trigger_scale = with_trend_trigger_scale
+        self._session_extreme_ibs = session_extreme_ibs
+        self._session_extreme_dampener = session_extreme_dampener
         self._rvol_source = rvol_source
         self._version = version
 
@@ -346,7 +371,18 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # composite author in trending regimes, against 2-for-2 in range_bound.
         # Identity no-op at 1.0, and never engages without a stack.
         trend_factor = self._countertrend_dampener if leg == "counter_trend" else 1.0
-        value = max(-1.0, min(1.0, raw * freshness * vol_factor * trend_factor))
+        # Fading from the session's own extreme: the buy leg at the low, the sell
+        # leg at the high. Identity at the defaults; no reading, no gate.
+        ibs_raw = snapshot.indicators.ibs
+        ibs = None if ibs_raw is None else max(0.0, min(1.0, float(ibs_raw)))
+        band = self._session_extreme_ibs
+        at_extreme = (
+            ibs is not None
+            and band > 0.0
+            and ((z < 0 and ibs <= band) or (z > 0 and ibs >= 1.0 - band))
+        )
+        extreme_factor = self._session_extreme_dampener if at_extreme else 1.0
+        value = max(-1.0, min(1.0, raw * freshness * vol_factor * trend_factor * extreme_factor))
 
         return AlgoSignal(
             name=self.name,
@@ -370,6 +406,10 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
                 "rvol": round(rvol, 4),
                 "rvol_source": rvol_source,
                 "vol_factor": round(vol_factor, 4),
+                "ibs_at_compute": None if ibs is None else round(ibs, 4),
+                "session_extreme_band": band,
+                "session_extreme_applied": at_extreme,
+                "extreme_factor": round(extreme_factor, 4),
                 "raw_signal": round(raw, 4),
                 "vwap_anchor": vwap_anchor,
             },
@@ -413,6 +453,8 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
             "high_vol_dampener": self._high_vol_dampener,
             "countertrend_dampener": self._countertrend_dampener,
             "with_trend_trigger_scale": self._with_trend_trigger_scale,
+            "session_extreme_ibs": self._session_extreme_ibs,
+            "session_extreme_dampener": self._session_extreme_dampener,
             "rvol_source": self._rvol_source,
         }
 
@@ -429,6 +471,8 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
             "high_vol_dampener",
             "countertrend_dampener",
             "with_trend_trigger_scale",
+            "session_extreme_ibs",
+            "session_extreme_dampener",
             "rvol_source",
         ):
             if key in params:
@@ -477,6 +521,19 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
                     f"with_trend_trigger_scale must be in (0, 1] (1.0 = identity "
                     f"no-op; above 1.0 would RAISE the with-trend bar, which "
                     f"inverts the intent), got {ws}"
+                )
+        if "session_extreme_ibs" in params:
+            band = float(params["session_extreme_ibs"])
+            if not (0.0 <= band <= 0.5):
+                errors.append(
+                    f"session_extreme_ibs must be in [0, 0.5] (0.0 = off; a band past 0.5 "
+                    f"would put the middle of the range at both extremes), got {band}"
+                )
+        if "session_extreme_dampener" in params:
+            sed = float(params["session_extreme_dampener"])
+            if not (0.0 <= sed <= 1.0):
+                errors.append(
+                    f"session_extreme_dampener must be in [0, 1] (1.0 = identity no-op), got {sed}"
                 )
         if "rvol_source" in params:
             err = validate_rvol_source(params["rvol_source"])

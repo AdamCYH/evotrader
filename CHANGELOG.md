@@ -143,6 +143,15 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`intraday_vwap_zscore.session_extreme_ibs` and
+  `session_extreme_dampener`.** The channel fades the distance from session
+  VWAP and never asked where in the session's range the price sat: on a day
+  that grinds lower it is below VWAP and at the session low every hour, and
+  the buy leg fired each cycle while the dip was still extending. With a
+  band set, the emission is scaled by the dampener when the buy leg fires
+  with the session's IBS at or below the band, or the sell leg at or above
+  one minus it. Votes record `ibs_at_compute`, `session_extreme_applied` and
+  `extreme_factor`. Unset (band 0.0, dampener 1.0), every vote is unchanged.
 - **`swing_failure_reversal.stretch_anchor_atr`.** The channel's strength was
   measured from its gate (`tanh((stretch - min_stretch_atr) / stretch_scale)`),
   so a confirmed reversal that just cleared the gate passed it, joined the
