@@ -93,3 +93,12 @@ strategies:
     # opposite thesis. At most one of the two can be promoted, on its record.
     status: active
     added_in: v001
+
+  btc_lead_residual:
+    module: evotrader.algorithms.strategies.btc_lead_residual
+    class: BtcLeadResidualStrategy
+    description: "Primary vs its bitcoin proxy since the prior close, toward convergence"
+    # Shadow mode: recorded at weight 0 in every regime; it abstains until
+    # asset.reference_ticker is set in settings.yaml.
+    status: active
+    added_in: v001

@@ -413,6 +413,17 @@ class AssetConfig(BaseModel):
         ),
     )
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
+    reference_ticker: str | None = Field(
+        None,
+        description=(
+            "A second instrument the primary is read against, e.g. a spot bitcoin "
+            "fund for a bitcoin-holding stock. Its quote and daily closes are put on "
+            "the market snapshot (``reference``) for the btc_lead_residual channel. "
+            "Pick one that trades in the primary's sessions, so both prior closes are "
+            "the same moment. Null (the default) fetches nothing, and the channel "
+            "abstains."
+        ),
+    )
 
     def describe(self, ticker: str) -> str:
         """Ticker with its short description, e.g. ``MSTR (traded instrument)``."""

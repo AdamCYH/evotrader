@@ -35,6 +35,12 @@ asset:
   # must track the traded ticker exactly, be listed in constitution.yaml's
   # allowed_tickers, and have an entry under `instruments` with its leverage.
   inverse_ticker: null
+  # A second instrument the traded ticker is read against, for the
+  # btc_lead_residual channel (for a bitcoin-holding stock, a spot bitcoin
+  # fund). Its quote and daily closes are fetched each cycle; it is not traded
+  # and need not be in allowed_tickers. null = none: nothing is fetched and the
+  # channel abstains. Pick one that trades in the same sessions.
+  reference_ticker: null
   # What each permitted symbol is, shown to the agents beside the ticker.
   # `leverage` goes into their sizing guidance for a leveraged fund (-2.0 for a
   # fund that moves -2x the traded ticker).

@@ -758,6 +758,42 @@ async def _fetch_quote(ticker: str, now: datetime) -> tuple[dict, list[str]]:
     }, errors
 
 
+async def _reference_reading(ticker: str, now: datetime) -> dict | None:
+    """The reference instrument's quote and completed daily closes (``asset.reference_ticker``).
+
+    For the btc_lead_residual channel, which reads the primary against it. None
+    when the broker gives no usable price; the channel then abstains.
+    """
+    try:
+        quote, _ = await _fetch_quote(ticker, now)
+        candles = await _fetch_daily_candles(ticker, now)
+    except Exception as e:
+        logger.warning("Reference %s unavailable: %s", ticker, e)
+        return None
+    price = float(quote.get("last") or 0)
+    prior = float(quote.get("previous_close") or quote.get("adjusted_previous_close") or 0)
+    if price <= 0 or prior <= 0:
+        return None
+    from evotrader.tools.market_hours import ET
+
+    stamp = _parse_when(quote.get("timestamp"))
+    today = now.astimezone(ET).date().isoformat()
+    return {
+        "ticker": ticker.upper(),
+        "price": price,
+        "previous_close": prior,
+        "quote_age_minutes": (
+            round(max(0.0, (now - stamp).total_seconds()) / 60.0, 1) if stamp else None
+        ),
+        # Completed sessions only: today's bar is still forming.
+        "daily_closes": [
+            {"date": str(c.get("timestamp"))[:10], "close": float(c["close"])}
+            for c in candles
+            if str(c.get("timestamp") or "")[:10] < today and float(c.get("close") or 0) > 0
+        ],
+    }
+
+
 async def _fetch_daily_candles(ticker: str, now: datetime, days: int = 90) -> list[dict]:
     """Daily OHLCV for *ticker* over the trailing *days*."""
     start_time = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1225,9 +1261,16 @@ async def gather_market_data(ticker: str) -> dict:
                 "reasoning": re_regime.reasoning,
             }
 
+    # The second instrument the primary is read against (btc_lead_residual).
+    reference = None
+    reference_ticker = _config.settings.asset.reference_ticker if _config else None
+    if reference_ticker and ticker.upper() == primary_ticker().upper():
+        reference = await _reference_reading(reference_ticker, now)
+
     snapshot_dict = {
         "ticker": ticker,
         "timestamp": now.isoformat(),
+        "reference": reference,
         "quote": quote_data,
         "indicators": indicators,
         "regime": regime_dict,
@@ -1976,6 +2019,33 @@ def _indicator_field_kinds() -> dict[str, type]:
     return kinds
 
 
+def _normalized_reference(raw: Any) -> dict | None:
+    """The reference reading (``_reference_reading``) with its types checked, or None."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        price = float(raw.get("price") or 0)
+        prior = float(raw.get("previous_close") or 0)
+        age = raw.get("quote_age_minutes")
+        age = float(age) if age is not None else None
+        closes = [
+            {"date": str(c["date"])[:10], "close": float(c["close"])}
+            for c in raw.get("daily_closes") or []
+            if isinstance(c, dict) and c.get("date") and c.get("close")
+        ]
+    except (TypeError, ValueError):
+        return None
+    if price <= 0 or prior <= 0:
+        return None
+    return {
+        "ticker": str(raw.get("ticker") or ""),
+        "price": price,
+        "previous_close": prior,
+        "quote_age_minutes": age,
+        "daily_closes": closes,
+    }
+
+
 def normalize_market_snapshot(data: dict) -> dict:
     """Normalize a raw dictionary into input for ``MarketSnapshot.model_validate``.
 
@@ -2211,6 +2281,7 @@ def normalize_market_snapshot(data: dict) -> dict:
         "daily_change_pct": daily_change_pct,
         "gap_pct": gap_pct,
         "options_context": normalized_opt,
+        "reference": _normalized_reference(data.get("reference")),
         "recent_candles": [
             {
                 "timestamp": c.get("timestamp") or c.get("begins_at") or timestamp,

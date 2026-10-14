@@ -142,6 +142,18 @@ folder layout; each entry says what you need to do.
 
 ### Added — off until you switch it on
 
+- **A bitcoin-proxy channel, recording only.** `btc_lead_residual` reads the
+  traded ticker against a second instrument named in `asset.reference_ticker`
+  (for a bitcoin-holding stock, a spot bitcoin fund): the ticker's return
+  since its prior close minus beta times the reference's over the same
+  interval, in the ticker's ATR, with beta from 20 sessions of daily returns
+  (clamped to 1..3; it abstains when R squared is under 0.3). Past 0.35 ATR it
+  votes toward convergence, long when the ticker lags and short when it
+  leads, halved at the session's extremes. It has weight 0 in every regime:
+  it is recorded and scored, and moves nothing. With a reference set, the
+  market-data tool fetches its quote and daily closes each cycle; without
+  one, the channel abstains (`no_reference_feed`).
+
 - **Protection for an entry that fills after its cycle.** The executor places
   an entry and its protection in one turn; an entry accepted but not yet filled
   when the turn ended left its approved stop and take-profit in prose, and the
