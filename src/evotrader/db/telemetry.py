@@ -248,3 +248,35 @@ class TelemetryReader:
         except Exception as e:
             logger.error("Failed to read telemetry database summary: %s", e)
             return {}
+
+
+def prune_spans(db_path: Path, keep_days: int, now: float | None = None) -> int:
+    """Delete telemetry records older than ``keep_days``. Returns how many.
+
+    Telemetry stores the full text of every model call, so it grows by far the
+    fastest of anything in the data folder, and nothing removed it.
+
+    Runs at startup, before the exporter opens the file. It does not compact the
+    file (that needs every connection closed); SQLite reuses the freed pages, so
+    the file stops growing instead of shrinking. ``keep_days`` 0 keeps
+    everything. A missing file or table is not an error: there is nothing to
+    remove.
+    """
+    import sqlite3
+    import time
+
+    if keep_days <= 0 or not Path(db_path).is_file():
+        return 0
+    cutoff_ns = int(((now if now is not None else time.time()) - keep_days * 86400) * 1e9)
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spans'"
+        ).fetchone()
+        if not exists:
+            return 0
+        cur = conn.execute("DELETE FROM spans WHERE start_time_unix_nano < ?", (cutoff_ns,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

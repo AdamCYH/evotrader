@@ -475,6 +475,14 @@ folder layout; each entry says what you need to do.
 
 ### Changed
 
+- **Telemetry keeps 30 days by default** (`logging.telemetry_retention_days`;
+  0 keeps everything). `telemetry.db` holds the full text of every model call
+  and nothing ever removed it, so it grew without limit. Older records are
+  now deleted at each start. The file is not compacted then (that needs the app stopped), so it
+  stops growing rather than shrinking; to reclaim space now, run SQLite's
+  `VACUUM` on it with the app stopped. The console's all-time token view covers
+  the retained days only.
+
 - **The momentum vote says when its MACD reading is noise.** It now reports the
   daily MACD histogram in ATRs (`macd_hist_atr`) and whether it is inside a
   neutral band of 0.10 ATR (`macd_neutral`, with the band as

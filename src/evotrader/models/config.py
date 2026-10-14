@@ -929,6 +929,15 @@ class LoggingConfig(BaseModel):
 
     level: str = "INFO"
     trade_journal_verbose: bool = True
+    telemetry_retention_days: int = Field(
+        30,
+        ge=0,
+        description=(
+            "Days of telemetry to keep (one record per model call, in "
+            "telemetry.db). Older records are removed at each start. 0 keeps "
+            "everything."
+        ),
+    )
 
 
 class CachingConfig(BaseModel):

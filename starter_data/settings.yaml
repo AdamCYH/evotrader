@@ -253,3 +253,4 @@ protection_followup:
 
 logging:
   level: "INFO"
+  telemetry_retention_days: 30   # days of model-call records kept in telemetry.db; 0 = all

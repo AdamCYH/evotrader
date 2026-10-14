@@ -109,7 +109,7 @@ def _stage_for_call(tool_name: str, args: dict | None) -> str | None:
     return None
 
 
-def _init_telemetry(db_dir: Path) -> None:
+def _init_telemetry(db_dir: Path, retention_days: int = 30) -> None:
     """Initialise OpenTelemetry with SQLite exporter for local model logging.
 
     Configures:
@@ -131,6 +131,18 @@ def _init_telemetry(db_dir: Path) -> None:
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
     telemetry_db_path = db_dir / "telemetry.db"
+    # Keep it bounded: older records are removed before the exporter opens the
+    # file. See logging.telemetry_retention_days.
+    try:
+        from evotrader.db.telemetry import prune_spans
+
+        removed = prune_spans(telemetry_db_path, retention_days)
+        if removed:
+            logger.info(
+                "Telemetry: removed %d record(s) older than %d days", removed, retention_days
+            )
+    except Exception as e:
+        logger.warning("Telemetry cleanup skipped: %s", e)
     exporter = SqliteSpanExporter(db_path=str(telemetry_db_path))
 
     # Set up global OpenTelemetry TracerProvider if not already configured
@@ -320,7 +332,7 @@ async def start(
     config = AppConfig(mode_override=mode_override)
 
     # ── Initialize telemetry ──────────────────────────────────
-    _init_telemetry(config.db_dir)
+    _init_telemetry(config.db_dir, config.settings.logging.telemetry_retention_days)
 
     # ── Configure logging ───────────────────────────────────────
     logging.basicConfig(
