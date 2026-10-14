@@ -262,6 +262,16 @@ class ThoughtLogger:
             )
         logger.info("Cycle run start recorded: session_id=%s, type=%s", session_id, cycle_type)
 
+    async def has_run_since(self, cycle_type: str, since: datetime) -> bool:
+        """Whether a run of ``cycle_type`` started at or after ``since`` (SKIPPED ones aside)."""
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT 1 FROM cycle_runs WHERE cycle_type = ? AND timestamp >= ? "
+                "AND status != 'SKIPPED' LIMIT 1",
+                (cycle_type, since.astimezone(UTC).isoformat()),
+            )
+            return await cursor.fetchone() is not None
+
     async def record_skipped_run(self, cycle_type: str, due_at: datetime, reason: str) -> str:
         """A scheduled run that never started, kept where the run history shows it.
 

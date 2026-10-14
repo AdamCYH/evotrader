@@ -256,6 +256,7 @@ def coverage_by_ticker(
                     "stop_price": r.get("stop_price"),
                     "limit_price": r.get("limit_price"),
                     "time_in_force": r.get("time_in_force"),
+                    "extended_hours": r.get("extended_hours"),
                     "source": r.get("source"),
                 }
                 for role, rows in (

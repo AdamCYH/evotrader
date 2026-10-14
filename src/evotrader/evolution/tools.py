@@ -276,6 +276,9 @@ async def get_signal_calibration(
 
     returns = [float(r[column]) for r in rows]
     stamps = [r["timestamp"] for r in rows]
+    # The window's unconditional up-share, every scored cycle: what a call
+    # would hit by chance (expected_hit_unconditional).
+    up = sum(1 for v in returns if v > 0) / len(returns)
 
     def _num(value: float) -> float | None:
         """NaN is not a number the model should reason about — say None."""
@@ -294,7 +297,11 @@ async def get_signal_calibration(
     ) -> dict:
 
         sc = score_source(
-            name, directions, returns if rets is None else rets, stamps if when is None else when
+            name,
+            directions,
+            returns if rets is None else rets,
+            stamps if when is None else when,
+            window_up_rate=up,
         )
         enough = sc.n_calls >= min_calls
 
@@ -308,6 +315,10 @@ async def get_signal_calibration(
             "hit_rate": _rate(sc.hit_rate),
             "baseline_hit_rate": _rate(sc.baseline_hit_rate),
             "edge_over_baseline": _rate(sc.edge_over_baseline),
+            "n_long": sc.n_long,
+            "n_short": sc.n_short,
+            "expected_hit_unconditional": _rate(sc.expected_hit_unconditional),
+            "binomial_p_unconditional": _num(sc.binomial_p_unconditional),
             "mean_signed_return_pct": _rate(sc.mean_forward_return),
             "information_coefficient": _num(sc.information_coefficient),
             "t_stat": _num(sc.t_stat),
@@ -392,7 +403,6 @@ async def get_signal_calibration(
         entry.pop("source")
         by_channel.append({"channel": name, **entry})
 
-    up = sum(1 for v in returns if v > 0) / len(returns)
     return {
         "window": {
             "lookback_days": int(lookback_days),
@@ -404,6 +414,14 @@ async def get_signal_calibration(
         "n_scored": len(rows),
         "n_waiting_on_horizon": waiting,
         "base_rate": {
+            "note": (
+                "baseline_hit_rate is each sample's own majority direction; "
+                "expected_hit_unconditional is what the same calls would score at "
+                "this window's up-share, and binomial_p_unconditional how unlikely "
+                "the actual hits are against it (unclustered: read with "
+                "n_independent_days). A one-sided channel shows edge 0.0 on the "
+                "first and its real selection on the second."
+            ),
             "share_of_cycles_price_rose": _num(up),
             "mean_return_pct": _num(sum(returns) / len(returns)),
             "always_long_would_have_hit": _num(up),

@@ -43,7 +43,23 @@ class SourceScore:
     mean_forward_return: float
     information_coefficient: float
     t_stat: float
+    #: Always calling the majority direction of THIS sample. For a channel that
+    #: only calls one side, that majority is its own call whenever it is right
+    #: more than half the time, so ``edge_over_baseline`` reads 0.0 by
+    #: construction for exactly the channels that choose their moments; see
+    #: ``expected_hit_unconditional``.
     baseline_hit_rate: float
+    #: Calls by side: a one-sided record should read as one.
+    n_long: int = 0
+    n_short: int = 0
+    #: The hit rate the same calls would score if each cycle rose with the
+    #: window's unconditional up-share: that share for a long call, one minus it
+    #: for a short call. NaN without a window up-share.
+    expected_hit_unconditional: float = float("nan")
+    #: Two-sided exact probability of a hit count no more likely than this
+    #: one, against that expectation. Unclustered: read it next to
+    #: ``n_events``, never alone.
+    binomial_p_unconditional: float = float("nan")
 
     @property
     def is_informative(self) -> bool:
@@ -111,11 +127,28 @@ def _cluster_t(values: np.ndarray, stamps: Sequence[datetime]) -> tuple[float, i
     return float(t), n
 
 
+def _two_sided_tail(hits: int, rates: np.ndarray) -> float:
+    """Two-sided exact probability of a hit count no more likely than ``hits``.
+
+    Call ``i`` is right with probability ``rates[i]``; the count's distribution
+    (Poisson-binomial) is computed exactly, and every count whose probability
+    is at most the observed one's is summed: the usual exact test, which for
+    one-sided calls is the binomial test. Doubling the smaller tail instead
+    overstates it on a skewed distribution (7 of 8 at 0.35: 0.007 against
+    0.004).
+    """
+    mass = np.ones(1)
+    for p in rates:
+        mass = np.concatenate((mass * (1.0 - p), [0.0])) + np.concatenate(([0.0], mass * p))
+    return float(min(1.0, mass[mass <= mass[hits] * (1 + 1e-7)].sum()))
+
+
 def score_source(
     source: str,
     directions: Sequence[float],
     forward_returns: Sequence[float],
     timestamps: Sequence[datetime],
+    window_up_rate: float | None = None,
 ) -> SourceScore:
     """Score one witness's directional calls against what actually happened.
 
@@ -125,6 +158,10 @@ def score_source(
             conviction. Zeros are abstentions and are excluded.
         forward_returns: Realised return over the decision horizon, same order.
         timestamps: Decision times, used to cluster same-day calls.
+        window_up_rate: Share of the window's cycles whose price rose, over
+            every cycle, called or not. With it, the score says what the same
+            calls would hit by chance (``expected_hit_unconditional``) and how
+            unlikely the actual count is (``binomial_p_unconditional``).
     """
     d = np.asarray(list(directions), dtype=float)
     f = np.asarray(list(forward_returns), dtype=float)
@@ -150,6 +187,12 @@ def score_source(
     ic = float(np.corrcoef(d, f)[0, 1]) if d.std() > 0 and f.std() > 0 else float("nan")
     t, n_events = _cluster_t(signed, ts)
 
+    expected = p_value = float("nan")
+    if window_up_rate is not None and 0.0 < window_up_rate < 1.0:
+        rates = np.where(d > 0, window_up_rate, 1.0 - window_up_rate)
+        expected = float(rates.mean())
+        p_value = _two_sided_tail(int((signed > 0).sum()), rates)
+
     return SourceScore(
         source=source,
         n_calls=len(d),
@@ -159,6 +202,10 @@ def score_source(
         information_coefficient=ic,
         t_stat=t,
         baseline_hit_rate=baseline,
+        n_long=int((d > 0).sum()),
+        n_short=int((d < 0).sum()),
+        expected_hit_unconditional=expected,
+        binomial_p_unconditional=p_value,
     )
 
 

@@ -266,6 +266,8 @@ def create_app(
 
     async def _execute_cycle(source: str) -> None:
         app.state.is_running = True
+        # Read once by the cycle, which records it (web.schedule_slot.cycle_start_notes).
+        app.state.cycle_source = source
         app.state.status = "running"
         app.state.active_cycle_task = asyncio.current_task()
         app.state.thoughts = []
@@ -391,6 +393,21 @@ def create_app(
 
     from evotrader.web.schedule_slot import CronScheduler
 
+    async def _record_not_caught_up(job: str, due: datetime, first_poll: datetime) -> None:
+        """A due minute before this process started, with no run on record: a SKIPPED run."""
+        kind = "EVOLUTION" if job == "evolution" else "TRADING"
+        try:
+            if await app.state.thought_logger.has_run_since(kind, due):
+                return  # the previous process ran it
+            await app.state.thought_logger.record_skipped_run(
+                kind,
+                due,
+                f"the app was not running at its minute: its scheduler first looked at "
+                f"{first_poll:%H:%M} ET, and a minute before that is not caught up",
+            )
+        except Exception as e:  # never let bookkeeping stop the scheduler
+            logger.warning("Could not check the %s minute before the start: %s", job, e)
+
     scheduler = CronScheduler()
     reported_deferrals: set[tuple[str, datetime]] = set()
 
@@ -417,7 +434,11 @@ def create_app(
         busy = bool(app.state.is_running) or bool(
             app.state.evolution_service and app.state.evolution_service.is_running()
         )
+        first_poll = scheduler.last_poll is None
         tick = scheduler.tick(now, schedules, busy=busy)
+        if first_poll:
+            for job, due in scheduler.due_before_start(schedules, now):
+                _spawn(_record_not_caught_up(job, due, now))
 
         for skip in tick.skipped:
             _spawn(_record_skip(skip))
@@ -550,8 +571,9 @@ def create_app(
     # State tracking
     app.state.is_running = False
     # The scheduled cycle starting now: its due minute and why it is late, if
-    # it is (read once by the cycle, which records it).
+    # it is (read once by the cycle, which records it); and who started a cycle.
     app.state.cycle_due = None
+    app.state.cycle_source = None
     # One poll of the scheduled jobs; the loop calls it every ten seconds.
     app.state.scheduler_poll = _scheduler_poll
     app.state.cycle_cron_enabled = getattr(config.settings.schedule, "cycle_cron_enabled", False)

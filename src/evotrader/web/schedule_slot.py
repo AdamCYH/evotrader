@@ -40,6 +40,9 @@ _MINUTE = timedelta(minutes=1)
 CYCLE_GRACE = timedelta(minutes=20)
 EVOLUTION_GRACE = timedelta(hours=2)
 METRICS_GRACE = timedelta(hours=6)
+#: Start-up steps (mostly the order sync with the broker) longer than this are
+#: said in the cycle's own record: its run record lands that much late.
+SLOW_START = timedelta(seconds=60)
 #: How far back a poll after a gap looks for the minutes it did not see.
 LOOKBACK = timedelta(hours=24)
 #: Polls come every ten seconds; a longer gap than this is a stall or a sleep.
@@ -119,6 +122,65 @@ class ScheduleSlot:
         self.due_at = None
 
 
+def cycle_start_notes(
+    due: dict | None,
+    source: str | None,
+    started: datetime,
+    startup_seconds: float,
+    sync_seconds: float,
+    *,
+    console: bool = True,
+) -> list[tuple[str, dict]]:
+    """What a cycle records about how it started, as (runtime line, meta) pairs.
+
+    * Started by the schedule after its minute: when it was due, and why late.
+    * Started by anything else (``source``, e.g. the console's ``user-triggered``):
+      who started it. Without it, a cycle started by hand reads like a
+      scheduled one that ran late, and the hourly record cannot be audited.
+    * Start-up steps over ``SLOW_START``: how long, and how much of it was the
+      order sync. The run record lands that much after the start, which
+      otherwise also reads like a late or manual start.
+
+    ``console``: the cycle runs under the console's scheduler (``due`` and
+    ``source`` are known); outside it only the start-up time is said.
+    """
+    notes: list[tuple[str, dict]] = []
+    if console and due is not None and due.get("late_reason"):
+        notes.append(
+            (
+                f"[scheduler] scheduled cycle due {due['due_at']:%H:%M} ET started "
+                f"{started:%H:%M} ET: {due['late_reason']}",
+                {
+                    "due_at": due["due_at"].isoformat(),
+                    "started_at": started.isoformat(),
+                    "late_reason": due["late_reason"],
+                },
+            )
+        )
+    elif console and due is None:
+        label = source or "unknown"
+        notes.append(
+            (
+                f"[scheduler] cycle started by {label} at {started:%H:%M} ET, not by the schedule",
+                {"source": label, "started_at": started.isoformat()},
+            )
+        )
+    if startup_seconds > SLOW_START.total_seconds():
+        notes.append(
+            (
+                f"[runtime] the cycle's start-up steps took {startup_seconds:.0f} s before its "
+                f"run record ({sync_seconds:.0f} s of it the order sync with the broker); "
+                f"it started at {started:%H:%M:%S} ET",
+                {
+                    "started_at": started.isoformat(),
+                    "startup_seconds": round(startup_seconds, 1),
+                    "order_sync_seconds": round(sync_seconds, 1),
+                },
+            )
+        )
+    return notes
+
+
 @dataclass
 class Start:
     """A job to start now. ``late_reason`` is set when it starts after its minute."""
@@ -174,6 +236,24 @@ class CronScheduler:
             trigger = self._parsed[expr]
             if trigger is not None:
                 out.append(trigger)
+        return out
+
+    def due_before_start(
+        self, schedules: dict[str, Sequence[str]], now: datetime
+    ) -> list[tuple[str, datetime]]:
+        """At the first poll: the latest cycle and evolution minute inside its grace
+        before ``now``. The poll does not catch these up (whether the previous
+        process ran them is unknown); the caller asks the run history."""
+        now_minute = now.replace(second=0, microsecond=0)
+        out = []
+        for job in ("cycle", "evolution"):
+            triggers = self._triggers(schedules.get(job) or ())
+            probe = now_minute - _MINUTE
+            while triggers and now_minute - probe <= self.slots[job].grace:
+                if any(trigger.matches(probe) for trigger in triggers):
+                    out.append((job, probe))
+                    break
+                probe -= _MINUTE
         return out
 
     def tick(self, now: datetime, schedules: dict[str, Sequence[str]], *, busy: bool) -> Tick:

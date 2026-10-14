@@ -267,6 +267,9 @@ class TestTheConsole:
 
     async def test_a_missed_metrics_job_is_said_but_is_not_a_run(self, console, db, caplog) -> None:
         app, _, _ = console
+        # The metrics job alone: the evolution minute before this first poll
+        # would be recorded as not caught up, which is another test.
+        app.state.evolution_cron_enabled = False
         app.state.config.settings.schedule.metrics_cron = "0 16 * * *"
         await app.state.scheduler_poll(_et(15, 59, 55))
         with caplog.at_level(logging.WARNING):

@@ -29,6 +29,29 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **A one-sided record is read against the window's base rate.** The
+  calibration record's baseline is each sample's own majority direction, so
+  a channel that only ever calls one side showed `edge_over_baseline` 0.0
+  whenever it was right more than half the time: exactly the channels that
+  choose their moments. `get_signal_calibration` now also gives, for every
+  witness, side and channel, `n_long` and `n_short`,
+  `expected_hit_unconditional` (what the same calls would hit at the window's
+  up-share: that share for a long call, one minus it for a short) and
+  `binomial_p_unconditional` (the exact two-sided probability of a hit count
+  no more likely than the actual one; unclustered, read it with the number of
+  independent days).
+- **Whether a resting order works after hours.** The broker says per order
+  whether it works outside the regular session, and the order book dropped
+  it, so a cycle after the close could not tell whether a take-profit would
+  act overnight. Each resting order now carries `extended_hours` (true, false,
+  or null when its record does not say), in the book and in the coverage
+  block's orders.
+- **How each cycle started, in its own record.** A cycle started from the
+  console, and one whose start-up steps (the order sync with the broker) ran
+  long, both read like a scheduled cycle that started late. Each now says who
+  started it, when not the schedule, and how long start-up steps over a minute
+  took. After a restart, a scheduled minute still inside its grace with no
+  run on record is recorded as a SKIPPED run saying the app was not running.
 - **A sell refused for want of shares names the orders holding them.** The
   broker refuses a sell with "Not enough shares to sell" when the shares are
   held for working sell orders, a stop or a take-profit: the refusal says the

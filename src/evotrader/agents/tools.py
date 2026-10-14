@@ -3794,6 +3794,23 @@ async def get_performance_summary(days: int = 30) -> dict:
     return await _journal.get_performance_summary(days=days)
 
 
+def _extended_hours(trade: dict) -> bool | None:
+    """Whether an order works outside regular hours; None when its record does not say.
+
+    The broker names it ``market_hours``; an order placed with an explicit
+    ``extended_hours`` flag carries that instead.
+    """
+    flag = trade.get("extended_hours")
+    if isinstance(flag, bool):
+        return flag
+    hours = str(trade.get("market_hours") or "").lower()
+    if hours in ("extended_hours", "all_day_hours"):
+        return True
+    if hours == "regular_hours":
+        return False
+    return None
+
+
 def _pending_order_view(row: dict) -> dict:
     """One ``pending_orders`` row as the agents read it."""
     trade_json = {}
@@ -3824,6 +3841,10 @@ def _pending_order_view(row: dict) -> dict:
         # ET cycles cancelled and re-placed a stop that was already
         # correctly gtc. A null means unknown — not "day".
         "time_in_force": trade_json.get("time_in_force"),
+        # Whether a resting limit works outside regular hours. A cycle after the
+        # close could not tell whether its take-profit tranches did, and rightly
+        # did not count them as overnight cover. A null means unknown.
+        "extended_hours": _extended_hours(trade_json),
         # 'broker_sync' means the broker itself listed this order as
         # working. Anything else came from our own submission record.
         "source": trade_json.get("source", "journal"),
@@ -4275,6 +4296,9 @@ def _pending_row_from_broker_order(order: dict, ticker: str) -> dict:
         "limit_price": _to_float(order.get("price")),
         "stop_price": _to_float(stop_price),
         "time_in_force": order.get("time_in_force"),
+        # 'regular_hours' or 'extended_hours': whether the order works outside
+        # the regular session (see _extended_hours).
+        "market_hours": order.get("market_hours"),
         "order_id": order.get("id") or order.get("order_id"),
         "state": order.get("state"),
         "source": "broker_sync",

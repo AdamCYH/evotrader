@@ -691,6 +691,13 @@ async def start(
         )
 
         async def run_cycle_task() -> None:
+            from evotrader.tools.market_hours import ET as _ET
+
+            # When the cycle really started: its run record waits for the
+            # start-up steps below (web.schedule_slot.cycle_start_notes).
+            started_at = datetime.now(_ET)
+            started_clock = time.monotonic()
+            sync_seconds = 0.0
             # Create a session for this trading run
             session = await session_service.create_session(
                 app_name="evotrader",
@@ -714,6 +721,7 @@ async def start(
                 logger.warning("Failed to check pending fills at cycle start: %s", e)
 
             # Reconcile live Robinhood orders (rejected, cancelled, filled)
+            sync_clock = time.monotonic()
             try:
                 recon_result = await reconcile_pending_orders()
                 if recon_result.get("reconciled_count"):
@@ -733,6 +741,7 @@ async def start(
                     )
             except Exception as e:
                 logger.warning("Failed to reconcile pending orders at cycle start: %s", e)
+            sync_seconds = time.monotonic() - sync_clock
 
             # An entry that filled since its cycle gets its recorded protection
             # now, before the agents read the book (tools.protection_followup,
@@ -745,6 +754,7 @@ async def start(
                 logger.warning("Protection follow-up at cycle start failed: %s", e)
 
             # Insert a running state record for this trading cycle
+            startup_seconds = time.monotonic() - started_clock
             try:
                 await thought_logger.record_run_start(session.id, "TRADING")
             except Exception as db_err:
@@ -753,36 +763,39 @@ async def start(
             # Clear thoughts list in web app state if running
             from evotrader.web.server import _active_app, broadcast_sse_event
 
+            due = source = None
             if _active_app:
                 _active_app.state.thoughts = []
                 broadcast_sse_event("clear_thoughts", {})
-
-                # A scheduled cycle that starts after its minute says so in its
-                # own record (web.schedule_slot): why it was late.
+                # How this cycle started, set by the console (web.server): the
+                # scheduler's due minute, or who started it.
                 due = getattr(_active_app.state, "cycle_due", None)
+                source = getattr(_active_app.state, "cycle_source", None)
                 _active_app.state.cycle_due = None
-                if due and due.get("late_reason"):
-                    from evotrader.tools.market_hours import ET as _ET
+                _active_app.state.cycle_source = None
 
-                    started = datetime.now(_ET)
-                    try:
-                        await thought_logger.record_event(
-                            session_id=session.id,
-                            agent_name="orchestrator",
-                            event_type="runtime",
-                            content=(
-                                f"[scheduler] scheduled cycle due "
-                                f"{due['due_at']:%H:%M} ET started {started:%H:%M} ET: "
-                                f"{due['late_reason']}"
-                            ),
-                            meta={
-                                "due_at": due["due_at"].isoformat(),
-                                "started_at": started.isoformat(),
-                                "late_reason": due["late_reason"],
-                            },
-                        )
-                    except Exception as db_err:
-                        logger.warning("Could not record the late start: %s", db_err)
+            # In its own record: who started it, when it was due and why it was
+            # late, and start-up steps that delayed its run record.
+            from evotrader.web.schedule_slot import cycle_start_notes
+
+            for content, meta in cycle_start_notes(
+                due,
+                source,
+                started_at,
+                startup_seconds,
+                sync_seconds,
+                console=_active_app is not None,
+            ):
+                try:
+                    await thought_logger.record_event(
+                        session_id=session.id,
+                        agent_name="orchestrator",
+                        event_type="runtime",
+                        content=content,
+                        meta=meta,
+                    )
+                except Exception as db_err:
+                    logger.warning("Could not record how the cycle started: %s", db_err)
 
             cycle_start_time = time.monotonic()
             stages_seen = set()
