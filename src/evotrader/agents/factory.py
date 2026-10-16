@@ -166,7 +166,104 @@ def _load_instructions(agent_name: str, config: AppConfig) -> str:
         config.instructions_dir,
         is_sim=(config.settings.mode.value == "sim"),
     )
+    try:
+        _LOADED_VERSIONS[agent_name] = instructions.get_active_version(
+            agent_name, config.instructions_dir
+        )
+    except Exception:  # the text loaded; the version is only a label
+        _LOADED_VERSIONS[agent_name] = "unknown"
     return render_instructions(text, build_instruction_context(config))
+
+
+# ── Instructions, re-read every cycle ─────────────────────────────────────
+
+#: Each trading agent's name in the pipeline -> its instruction folder.
+INSTRUCTION_FOLDERS: dict[str, str] = {
+    "orchestrator": "orchestrator",
+    "news_sentiment": "news_sentiment",
+    "strategy": "strategy",
+    "risk_manager": "risk_manager",
+    "execution": "executor",
+}
+
+#: The instruction version each folder's text was last loaded from.
+_LOADED_VERSIONS: dict[str, str] = {}
+
+
+def _instruction_text(folder: str, config: AppConfig) -> str:
+    """What an agent's instruction field holds for *folder*'s active version."""
+    if folder == "risk_manager":
+        return _risk_manager_instructions(config)
+    return _load_instructions(folder, config)
+
+
+def _pipeline_agents(root: Any) -> list[Any]:
+    """Every agent the cycle can reach from *root*: sub-agents, agents behind
+    tools, and a hosted agent's API fallback. Each once; only real agents are
+    followed, so the walk ends on any object graph."""
+    from google.adk.agents import BaseAgent
+
+    seen: set[int] = set()
+    found: list[Any] = []
+    stack = [root]
+    while stack:
+        agent = stack.pop()
+        if not isinstance(agent, BaseAgent) or id(agent) in seen:
+            continue
+        seen.add(id(agent))
+        found.append(agent)
+        stack.extend(getattr(agent, "sub_agents", None) or [])
+        stack.extend(
+            getattr(tool, "agent", None)
+            for tool in getattr(agent, "tools", None) or []
+            if getattr(tool, "agent", None) is not None
+        )
+        stack.append(getattr(agent, "fallback_agent", None))
+    return found
+
+
+def refresh_instructions(root: Any, config: AppConfig) -> tuple[dict[str, str], dict[str, str]]:
+    """Give every trading agent the text of its instruction version active now.
+
+    The agents are built once, at start-up, and activating a version (the Web
+    Console, the evolution agent) only rewrites ``active.txt``: the running
+    process kept the text it was built with until a restart. Once, a strategy
+    and an executor version activated during the day ran on none of that
+    day's cycles while the console reported both active. Called at the start
+    of every cycle, so an activation is live from the next cycle. An agent
+    whose text is unchanged is left as it is, so its cached prompt stays
+    valid.
+
+    Returns ``(versions, changed)``: the version in force per instruction
+    folder, and for each folder that changed, ``"<old> -> <new>"``.
+    """
+    from evotrader.agents.cli_agent import CliBackedAgent
+
+    before = dict(_LOADED_VERSIONS)
+    texts: dict[str, str] = {}
+    for agent in _pipeline_agents(root):
+        folder = INSTRUCTION_FOLDERS.get(getattr(agent, "name", ""))
+        if folder is None:
+            continue
+        if folder not in texts:
+            texts[folder] = _instruction_text(folder, config)
+        if isinstance(agent, CliBackedAgent):
+            field = "instruction_text"
+        elif getattr(agent, "static_instruction", None):
+            field = "static_instruction"
+        else:
+            field = "instruction"
+        if getattr(agent, field) != texts[folder]:
+            setattr(agent, field, texts[folder])
+    versions = {folder: _LOADED_VERSIONS.get(folder, "unknown") for folder in texts}
+    changed = {
+        folder: f"{before[folder]} -> {version}"
+        for folder, version in versions.items()
+        if before.get(folder) not in (None, version)
+    }
+    for folder, change in changed.items():
+        logger.warning("Instructions for '%s' are now %s, from this cycle.", folder, change)
+    return versions, changed
 
 
 class SanitizedMcpTool(McpTool):
@@ -829,7 +926,11 @@ def _strategy_dynamic_context(config: AppConfig) -> str:
     try:
         from evotrader.tools.trading_handoff import render_for_prompt
 
-        block = render_for_prompt(config.data_dir)
+        try:
+            active = instructions.get_active_version("strategy", config.instructions_dir)
+        except Exception:
+            active = ""
+        block = render_for_prompt(config.data_dir, active_version=active)
         if block:
             parts.append(block)
     except Exception:  # continuity is valuable, a cycle is more so
@@ -929,20 +1030,16 @@ def create_strategy_agent(config: AppConfig) -> Any:
     )
 
 
-def create_risk_manager_agent(config: AppConfig) -> LlmAgent:
-    """Create the Risk Manager agent.
-
-    Validates trade proposals against the constitution and risk limits.
-    """
-    # Inject constitution into instructions for the Risk Manager.
-    # Use to_llm_display_dict() so _pct fields show as "100%" not "1.0".
+def _risk_manager_instructions(config: AppConfig) -> str:
+    """The risk manager's instructions with the constitution appended."""
+    # to_llm_display_dict() so _pct fields show as "100%" not "1.0":
     # model_dump_json() exposes post-normalization fractions that models
-    # misread (1.0 → "1% hard cap" instead of "100% = no cap").
+    # misread (1.0 -> "1% hard cap" instead of "100% = no cap").
     import json
 
     base_instructions = _load_instructions("risk_manager", config)
     constitution_display = json.dumps(config.constitution.to_llm_display_dict(), indent=2)
-    full_instructions = (
+    return (
         f"{base_instructions}\n\n"
         f"## Active Constitution (INVIOLABLE)\n\n"
         f'All `_pct` fields are in human-readable percent (e.g. `"100%"` = 100%, '
@@ -950,10 +1047,16 @@ def create_risk_manager_agent(config: AppConfig) -> LlmAgent:
         f"```json\n{constitution_display}\n```"
     )
 
+
+def create_risk_manager_agent(config: AppConfig) -> LlmAgent:
+    """Create the Risk Manager agent.
+
+    Validates trade proposals against the constitution and risk limits.
+    """
     return LlmAgent(
         model=_resolve_model(config, "risk_manager_agent"),
         name="risk_manager",
-        instruction=full_instructions,
+        instruction=_risk_manager_instructions(config),
         tools=[
             check_risk_limits,
             check_option_risk_limits,

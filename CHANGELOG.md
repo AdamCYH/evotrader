@@ -29,6 +29,16 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **Which instruction version wrote what.** Each attribution row records the
+  strategy instruction version it was made under
+  (`strategy_instruction_version`, migration 0030; filled by the app, not the
+  agent), and `get_signal_calibration` takes `instruction_version` to score
+  one version alone. The trading handoff is stamped with the version it was
+  written under; read under another version, it opens with a line saying so,
+  and that a rule it quotes is void where it differs. Agent learnings
+  (`store_learning`) are cut at 800 characters and stamped with their agent
+  and instruction version; `query_user_notes` returns the stamp, with a note
+  when the version differs.
 - **A one-sided record is read against the window's base rate.** The
   calibration record's baseline is each sample's own majority direction, so
   a channel that only ever calls one side showed `edge_over_baseline` 0.0
@@ -246,6 +256,17 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **An activated instruction version is used from the next cycle.** The
+  agents read their instructions once, when the app started, and activating
+  a version (in the console, or by the evolution agent) only moved the active
+  pointer: the running app kept the old text until a restart while the
+  console reported the new version active. Every cycle now re-reads each
+  agent's active version before it runs, so a version activated in between
+  is live from the next cycle; an agent whose text did not change keeps its
+  cached prompt. The cycle's log opens with the versions it runs on
+  (`[runtime] instructions: strategy v…, executor v…`) and names any that
+  changed, and the console's activation message says when the version takes
+  effect.
 - **A sell the agents placed and never recorded is journaled.** The order
   sync lists every working order at the broker and the coverage counts them,
   but an order the executor placed without recording it had no journal row:

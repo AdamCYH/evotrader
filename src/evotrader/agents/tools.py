@@ -62,6 +62,36 @@ _EARNINGS_HISTORY_MAX_CONSTITUENTS = 8
 _event_state: dict[str, Any] = {}
 
 
+#: The instruction version per folder this cycle runs on (main.py sets it at
+#: the start of each cycle, from agents.factory.refresh_instructions).
+_cycle_instruction_versions: dict[str, str] = {}
+
+#: Agent learnings longer than this are cut: the handoff has a ceiling, and
+#: learnings, recalled for a month, had none.
+_MAX_LEARNING_CHARS = 800
+
+
+def set_cycle_instruction_versions(versions: dict[str, str] | None) -> None:
+    """Record the instruction versions the current cycle runs on."""
+    global _cycle_instruction_versions
+    _cycle_instruction_versions = dict(versions or {})
+
+
+def _instruction_version(folder: str) -> str:
+    """The version *folder*'s agent runs on: this cycle's, else active.txt's; '' if unknown."""
+    version = _cycle_instruction_versions.get(folder)
+    if version:
+        return version
+    if _config is None:
+        return ""
+    try:
+        from evotrader.agents import instructions
+
+        return instructions.get_active_version(folder, _config.instructions_dir)
+    except Exception:
+        return ""
+
+
 def set_current_session_id(session_id: str | None) -> None:
     """Set the active cycle session ID for trade linkage.
 
@@ -2631,7 +2661,13 @@ async def log_signal_attribution(attribution_json: str) -> dict:
         kwargs["traded"] = bool(kwargs["traded"])
 
     store = SignalAttributionStore(_db)
-    row_id = await store.record(ticker, session_id=_current_session_id, **kwargs)
+    row_id = await store.record(
+        ticker,
+        session_id=_current_session_id,
+        # Filled here, not by the agent: the version it actually ran on.
+        strategy_instruction_version=_instruction_version("strategy") or None,
+        **kwargs,
+    )
     if row_id is None:
         return {"status": "error", "error": "failed to write attribution row"}
     return {
@@ -5378,6 +5414,20 @@ def query_user_notes(
         category=category if category else None,
         agent_note_max_age_days=30,
     )
+    # An agent learning restates the rules of its moment; once the
+    # instructions moved on, a rule it quotes may no longer exist.
+    current = _instruction_version("strategy")
+    for result in results:
+        meta = result.get("metadata") or {}
+        if meta.get("source") != "agent_learning":
+            continue
+        written_under = meta.get("instruction_version") or "unknown"
+        result["written_under"] = written_under
+        if current and written_under != current:
+            result["version_note"] = (
+                f"Written under strategy {written_under}; you are running {current}. "
+                "A rule it quotes is void where it differs from your instructions."
+            )
     return {"results": results, "count": len(results)}
 
 
@@ -5393,6 +5443,11 @@ def store_learning(text: str, category: str = "observation") -> dict:
     source='agent_learning') so they don't compete with human instructions
     in semantic search results.
 
+    KEEP IT UNDER 800 CHARACTERS: one lesson, not a restatement of your
+    instructions. Longer learnings are cut. Each is stamped with the
+    instruction version you run on, and read back with that stamp, because
+    a rule quoted here outlives the version that had it.
+
     Args:
         text: The learning to store (natural language).
         category: Type of learning ('observation', 'market_insight',
@@ -5403,14 +5458,23 @@ def store_learning(text: str, category: str = "observation") -> dict:
 
     import hashlib
 
-    note_id = f"agent_{hashlib.md5(text.encode()).hexdigest()[:12]}"
+    note = (text or "").strip()
+    truncated = len(note) > _MAX_LEARNING_CHARS
+    if truncated:
+        note = note[:_MAX_LEARNING_CHARS] + "\n…[truncated]"
+    version = _instruction_version("strategy")
+    note_id = f"agent_{hashlib.md5(note.encode()).hexdigest()[:12]}"
     _memory.store_note(
         note_id=note_id,
-        text=text,
+        text=note,
         source="agent_learning",
         category=category,
+        metadata={"agent": "strategy", "instruction_version": version or "unknown"},
     )
-    return {"note_id": note_id, "status": "stored"}
+    result: dict[str, Any] = {"note_id": note_id, "status": "stored"}
+    if truncated:
+        result["note"] = f"Cut to {_MAX_LEARNING_CHARS} characters; keep learnings short."
+    return result
 
 
 def update_trading_handoff(
@@ -5479,6 +5543,7 @@ def update_trading_handoff(
             agent="strategy",
             cycle=cycle,
             session_id=_current_session_id or "",
+            written_under=_instruction_version("strategy"),
         )
     except Exception as e:
         logger.error("update_trading_handoff failed: %s", e)

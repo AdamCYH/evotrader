@@ -262,7 +262,14 @@ class InstructionEvolver:
         logger.info(
             "Instruction version activated: %s → %s (is_sim=%s)", agent_name, version, self._is_sim
         )
-        return {"status": "activated", "agent": agent_name, "version": version}
+        return {
+            "status": "activated",
+            "agent": agent_name,
+            "version": version,
+            # The trading cycle re-reads active.txt at its start
+            # (agents.factory.refresh_instructions).
+            "live_from": "the next trading cycle",
+        }
 
     def rollback(self, agent_name: str, to_version: str) -> dict[str, Any]:
         """Rollback to a previous instruction version."""

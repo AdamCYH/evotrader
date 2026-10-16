@@ -37,6 +37,7 @@ from evotrader.agents.tools import (
     gather_market_data,
     reconcile_pending_orders,
     set_current_session_id,
+    set_cycle_instruction_versions,
 )
 from evotrader.config import AppConfig
 from evotrader.db.connection import Database
@@ -864,6 +865,30 @@ async def start(
                 except Exception as db_err:
                     logger.warning("Could not record how the cycle started: %s", db_err)
 
+            # The instructions this cycle runs on, re-read now: a version
+            # activated since the last cycle is live from this one, and the
+            # record says which versions produced the cycle.
+            try:
+                from evotrader.agents.factory import refresh_instructions
+
+                versions, changed = refresh_instructions(orchestrator, config)
+                set_cycle_instruction_versions(versions)
+                note = "instructions: " + ", ".join(f"{k} {v}" for k, v in versions.items())
+                if changed:
+                    note += "; changed since the last cycle: " + ", ".join(
+                        f"{k} {v}" for k, v in changed.items()
+                    )
+                logger.info("Cycle %s: %s", session.id, note)
+                await thought_logger.record_event(
+                    session_id=session.id,
+                    agent_name="orchestrator",
+                    event_type="runtime",
+                    content=f"[runtime] {note}",
+                    meta={"instruction_versions": versions, "changed": changed},
+                )
+            except Exception as e:
+                logger.warning("Could not refresh the agents' instructions: %s", e)
+
             cycle_start_time = time.monotonic()
             stages_seen = set()
             last_strategy_text = ""
@@ -1138,6 +1163,7 @@ async def start(
             finally:
                 # Always reset session linkage
                 set_current_session_id(None)
+                set_cycle_instruction_versions(None)
                 if not was_cancelled:
                     duration_ms = int((time.monotonic() - cycle_start_time) * 1000)
 

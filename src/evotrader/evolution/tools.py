@@ -180,7 +180,7 @@ def _base_channel(author: str, known: list[str]) -> str:
 
 
 async def get_signal_calibration(
-    lookback_days: int = 60, ticker: str = "", horizon: str = "1d"
+    lookback_days: int = 60, ticker: str = "", horizon: str = "1d", instruction_version: str = ""
 ) -> dict:
     """Score each witness's calls against what price actually did afterwards.
 
@@ -219,6 +219,9 @@ async def get_signal_calibration(
             ``"close"`` (the decision's own session close: the horizon the
             intraday channels are built for, resolved a session sooner than
             ``"1d"``; decisions after the close have none).
+        instruction_version: Only calls made under this strategy
+            instruction version (``"v102"``; empty = all). Rows from before
+            the version was recorded, and algorithm-only rows, have none.
     """
     import json
     import math
@@ -246,6 +249,10 @@ async def get_signal_calibration(
         if r.get(column) is not None
         and str(r.get("timestamp", "")) >= cutoff.isoformat()
         and (not want or str(r.get("ticker", "")).upper() == want)
+        and (
+            not instruction_version
+            or r.get("strategy_instruction_version") == instruction_version.strip()
+        )
     ]
     # Scoped to the same instrument, or the count answers a different question
     # than the table above it.
@@ -267,6 +274,7 @@ async def get_signal_calibration(
             "n_scored": len(rows),
             "n_waiting_on_horizon": waiting,
             "horizon": column,
+            "instruction_version": instruction_version or None,
             "note": (
                 "Too few scored cycles to score anything. Rows are scored after "
                 "each cycle once their horizon elapses; if this stays at zero "
@@ -410,6 +418,7 @@ async def get_signal_calibration(
             "ticker": want or "all",
         },
         "horizon": column,
+        "instruction_version": instruction_version or None,
         "units": "percent; +2.16 means +2.16%",
         "n_scored": len(rows),
         "n_waiting_on_horizon": waiting,

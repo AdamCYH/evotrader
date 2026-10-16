@@ -62,6 +62,7 @@ class SignalAttributionStore:
         participation_denominator: int | None = None,
         timestamp: str | None = None,
         agent_absent: bool = False,
+        strategy_instruction_version: str | None = None,
     ) -> int | None:
         """Record one cycle's witnesses and decision. Returns the row id.
 
@@ -83,8 +84,9 @@ class SignalAttributionStore:
                         traded, price_at_decision,
                         deviation_atr, trigger_atr, agent_absent,
                         composite_unattenuated, participation_scale,
-                        participation_numerator, participation_denominator
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        participation_numerator, participation_denominator,
+                        strategy_instruction_version
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         timestamp or datetime.now(UTC).isoformat(),
@@ -114,6 +116,7 @@ class SignalAttributionStore:
                         participation_scale,
                         participation_numerator,
                         participation_denominator,
+                        strategy_instruction_version,
                     ),
                 )
                 return cur.lastrowid
@@ -540,6 +543,8 @@ class SignalAttributionStore:
             # Written from the stored snapshot because the agent never logged
             # the cycle (migration 0021): algorithm only, agent fields NULL.
             "agent_absent",
+            # The strategy instructions the call ran on (migration 0030).
+            "strategy_instruction_version",
         ]
         if horizon_column is None:
             scored = "scored_at IS NOT NULL"

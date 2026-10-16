@@ -2319,7 +2319,11 @@ def create_app(
                 )
                 return {
                     "status": "success",
-                    "message": f"Instruction version '{version}' activated for agent '{agent_name}'.",
+                    "message": (
+                        f"Instruction version '{version}' activated for agent '{agent_name}'. "
+                        "The running app uses it from the next trading cycle; no restart "
+                        "is needed."
+                    ),
                 }
             else:
                 raise HTTPException(

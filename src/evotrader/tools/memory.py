@@ -406,6 +406,7 @@ class SemanticMemory:
         source: str = "user",
         category: str = "general",
         priority: str = "normal",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Store a user-provided note or instruction.
 
@@ -416,6 +417,8 @@ class SemanticMemory:
             category: Note category ('instruction', 'observation',
                 'market_insight', 'strategy_hint', 'general').
             priority: 'critical', 'high', 'normal', or 'low'.
+            metadata: More fields to keep with it (an agent learning's
+                ``agent`` and ``instruction_version``).
         """
         now = datetime.now(UTC)
         self._notes.upsert(
@@ -423,6 +426,7 @@ class SemanticMemory:
             documents=[text],
             metadatas=[
                 {
+                    **(metadata or {}),
                     "source": source,
                     "category": category,
                     "priority": priority,
