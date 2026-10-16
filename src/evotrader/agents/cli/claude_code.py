@@ -23,6 +23,7 @@ unknown options with a warning instead of failing the run.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,10 @@ _AUTH_FAILURE_MARKERS = (
     "oauth token has expired",
     "authentication_error",
 )
+
+# The harness's own notice that a plan limit was hit ("You've hit your session
+# limit · resets 9:05am"), which can arrive as a run's whole text.
+_LIMIT_NOTICE_RE = re.compile(r"\bhit your\b[^.\n]*\blimit\b", re.IGNORECASE)
 
 
 def subscription_credential_source() -> str | None:
@@ -548,17 +553,24 @@ class ClaudeCodeBackend(CliAgentBackend):
         auth_failed = bool(result_msg.is_error) and _looks_like_auth_failure(
             result_msg.result, *(result_msg.errors or ())
         )
+        text = result_msg.result or "\n".join(texts)
+        ok = not result_msg.is_error
+        error = "; ".join(result_msg.errors) if result_msg.errors else None
+        if ok and quota.status is QuotaStatus.EXHAUSTED and _LIMIT_NOTICE_RE.search(text or ""):
+            # The plan's limit notice is not an answer: the call did not land,
+            # and passed on as a proposal it would read as the agent's decision.
+            ok, error = False, text.strip()
 
         return AgentResult(
-            ok=not result_msg.is_error,
-            text=(result_msg.result or "\n".join(texts)),
+            ok=ok,
+            text=text,
             structured=getattr(result_msg, "structured_output", None),
             session_token=result_msg.session_id,
             turns=result_msg.num_turns,
             cost_usd=result_msg.total_cost_usd,
             usage=result_msg.usage or {},
             quota=quota,
-            error="; ".join(result_msg.errors) if result_msg.errors else None,
+            error=error,
             stop_reason=getattr(result_msg, "terminal_reason", None) or result_msg.stop_reason,
             billing_used=billing,
             auth_failed=auth_failed,

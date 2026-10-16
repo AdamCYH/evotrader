@@ -113,6 +113,12 @@ cli_runtimes:
       warn_utilization: 0.85  # send the NEXT task to the API at this share of the usage window
       on_exhausted: "api"     # api (keep trading, costs money) | skip | fail
 
+    # The strategy stage stops after this long, harness and API fallback
+    # together, and reports no decision; the fallback also stops after this
+    # many model calls without an answer (each is billed per token).
+    max_run_seconds: 1200
+    fallback_max_model_calls: 25
+
 # Which runtime each agent uses: "api", or a cli_runtimes key above.
 # Agents not listed use "api". `./run.sh setup` sets strategy and evolution to
 # "claude_code" if you choose your Claude subscription.

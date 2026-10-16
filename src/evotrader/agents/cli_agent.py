@@ -35,6 +35,9 @@ where it started. A decision is never abandoned half-made.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import copy
 import logging
 import re as _re
 import time
@@ -48,6 +51,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from evotrader.agents.cli import (
     AgentEvent,
     AgentRequest,
+    AgentResult,
     BillingMode,
     QuotaStatus,
     ThinkingSpec,
@@ -88,6 +92,15 @@ _MAX_EVENT_BLOCK_CHARS = 60_000
 # EARLIEST in the cycle, so a newest-first walk reaches them LAST — exactly
 # backwards from their importance. Their absence is an error, not a detail.
 _CRITICAL_TOOL_RESULTS = ("gather_market_data",)
+
+# How long one stage may take, harness and API fallback together, unless the
+# runtime sets ``max_run_seconds``: past it the stage reports no decision. A
+# healthy run takes minutes; this leaves room for a slow one.
+_DEFAULT_MAX_RUN_SECONDS = 1200.0
+
+# Model calls the API fallback may make without an answer, unless the runtime
+# sets ``fallback_max_model_calls``. A decision takes a handful; each is billed.
+_DEFAULT_FALLBACK_MODEL_CALLS = 25
 
 
 def _render_part(part: Any) -> str:
@@ -132,6 +145,58 @@ def _event_text(event: Any) -> str:
     return "\n".join(chunks).strip()
 
 
+def _parts(event: Any) -> list[Any]:
+    return list(getattr(getattr(event, "content", None), "parts", None) or [])
+
+
+def _calls_a_tool(event: Any) -> bool:
+    return any(getattr(p, "function_call", None) is not None for p in _parts(event))
+
+
+def _is_final(event: Any) -> bool:
+    """An answer, not a step: no tool call or tool result, not a fragment."""
+    check = getattr(event, "is_final_response", None)
+    if callable(check):
+        return bool(check())
+    return not getattr(event, "partial", False) and not any(
+        getattr(p, "function_call", None) is not None
+        or getattr(p, "function_response", None) is not None
+        for p in _parts(event)
+    )
+
+
+def _answer_text(event: Any) -> str:
+    """The plain text of an answer: no tool results, no thinking."""
+    return "\n".join(
+        p.text
+        for p in _parts(event)
+        if getattr(p, "text", None) and not getattr(p, "thought", False)
+    ).strip()
+
+
+def _with(obj: Any, **changes: Any) -> Any:
+    """A shallow copy of *obj* with *changes*, for a pydantic model or a plain object."""
+    if hasattr(obj, "model_copy"):
+        return obj.model_copy(update=changes)
+    clone = copy.copy(obj)
+    for key, value in changes.items():
+        setattr(clone, key, value)
+    return clone
+
+
+def _clock(epoch: float) -> str:
+    """An epoch time as US Eastern wall-clock time, e.g. ``10:05 ET``."""
+    from datetime import datetime
+
+    from evotrader.tools.market_hours import ET
+
+    return datetime.fromtimestamp(epoch, ET).strftime("%H:%M ET")
+
+
+def _minutes(seconds: float) -> str:
+    return f"{seconds / 60:.0f}-minute"
+
+
 class CliBackedAgent(BaseAgent):
     """Runs one agent's turn on a hosted harness, with an API-backed fallback."""
 
@@ -152,10 +217,52 @@ class CliBackedAgent(BaseAgent):
     """An ``LlmAgent`` used when the harness is unusable. Without one, a quota
     wall means no decision at all, so this should normally be supplied."""
 
+    on_exhausted: str = "api"
+    """``quota.on_exhausted`` of the runtime. ``api``: while the plan is spent,
+    the fallback decides, billed per token. ``skip`` and ``fail``: no decision
+    until the window resets, and the cycle's record says so."""
+
     thought_logger: Any = None
 
     _backoff_until: float = PrivateAttr(default=0.0)
     _backoff_reason: str = PrivateAttr(default="")
+    _backoff_exhausted: bool = PrivateAttr(default=False)
+    _outcome: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    # ── What the cycle reads ──────────────────────────────────────
+
+    def out_of_quota(self) -> str | None:
+        """Why the plan cannot run this agent now, or None.
+
+        Only a spent plan still inside its window: one near its threshold can
+        still answer on the harness.
+        """
+        if self._in_backoff() and self._backoff_exhausted:
+            return f"{self._backoff_reason}, until {_clock(self._backoff_until)}"
+        return None
+
+    def decides_without_quota(self) -> bool:
+        """Whether a spent plan still gets a decision: from the API fallback."""
+        return self.on_exhausted == "api" and self.fallback_agent is not None
+
+    def outcome(self, session_id: str) -> dict[str, Any] | None:
+        """How this agent's run in *session_id* ended, or None if it did not run there.
+
+        ``decided`` is whether it answered; ``via`` says where (``harness`` or
+        ``api_fallback``); a run that did not answer says why in ``reason``,
+        and a spent plan names ``on_exhausted``.
+        """
+        if self._outcome.get("session_id") != session_id:
+            return None
+        return dict(self._outcome)
+
+    def _max_run_seconds(self) -> float:
+        value = getattr(self.runtime, "max_run_seconds", None)
+        return float(value) if value else _DEFAULT_MAX_RUN_SECONDS
+
+    def _fallback_model_calls(self) -> int:
+        value = getattr(self.runtime, "fallback_max_model_calls", None)
+        return int(value) if value else _DEFAULT_FALLBACK_MODEL_CALLS
 
     # ── Prompt assembly ───────────────────────────────────────────
 
@@ -263,7 +370,10 @@ class CliBackedAgent(BaseAgent):
         sim run, which backed off at 76% against a 0.85 threshold.
 
         So: back off when the plan is genuinely exhausted, or when *we* judge it
-        near the limit. Log an advisory warning below that and carry on.
+        near the limit. Log an advisory warning below that and carry on. Near
+        the limit is only worth acting on when there is somewhere to go: with
+        ``on_exhausted`` 'skip' or 'fail' the harness keeps answering until the
+        plan is actually spent.
         """
         threshold = getattr(getattr(self.runtime, "quota", None), "warn_utilization", 0.85)
         utilization = getattr(quota, "utilization", None)
@@ -282,6 +392,16 @@ class CliBackedAgent(BaseAgent):
                     threshold * 100,
                 )
             return
+        exhausted = quota.status is QuotaStatus.EXHAUSTED
+        if not exhausted and not self.decides_without_quota():
+            logger.info(
+                "%s: harness near its limit on the %s window; quota.on_exhausted=%r, "
+                "so it keeps answering on the harness until the plan is spent.",
+                self.name,
+                window,
+                self.on_exhausted,
+            )
+            return
 
         resets_at = getattr(quota, "resets_at", None)
         now = time.time()
@@ -296,31 +416,54 @@ class CliBackedAgent(BaseAgent):
             # keeps paying for the API long after capacity returned.
             self._backoff_until = now + 3600
 
+        self._backoff_exhausted = exhausted
         self._backoff_reason = f"quota {quota.status.value} on the {window} window" + (
             f" at {utilization:.0%} utilisation" if utilization is not None else ""
         )
-        logger.warning(
-            "%s: %s — routing invocations to the %s until %s. THIS COSTS MONEY: "
-            "the fallback is billed per token.",
-            self.name,
-            self._backoff_reason,
-            "API fallback" if self.fallback_agent else "(no fallback configured)",
-            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._backoff_until)),
-        )
+        if self.decides_without_quota():
+            logger.warning(
+                "%s: %s — the API fallback decides until %s. THIS COSTS MONEY: "
+                "the fallback is billed per token.",
+                self.name,
+                self._backoff_reason,
+                _clock(self._backoff_until),
+            )
+        else:
+            logger.warning(
+                "%s: %s — no decision until %s (quota.on_exhausted=%r%s).",
+                self.name,
+                self._backoff_reason,
+                _clock(self._backoff_until),
+                self.on_exhausted,
+                "" if self.fallback_agent is not None else ", no fallback configured",
+            )
 
     # ── Run ───────────────────────────────────────────────────────
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         from google.adk.events import Event
 
-        if self._in_backoff() and self.fallback_agent is not None:
-            logger.info(
-                "%s: still in quota backoff (%s) — using the API fallback.",
-                self.name,
-                self._backoff_reason,
-            )
-            async for event in self.fallback_agent.run_async(ctx):
-                yield event
+        session_id = str(getattr(getattr(ctx, "session", None), "id", "") or ctx.invocation_id)
+        self._outcome = {"session_id": session_id, "decided": False}
+        sink = self._make_event_sink(session_id)
+        limit = self._max_run_seconds()
+        deadline = time.monotonic() + limit
+
+        if self._in_backoff():
+            if self.decides_without_quota():
+                logger.info(
+                    "%s: still in quota backoff (%s) — using the API fallback.",
+                    self.name,
+                    self._backoff_reason,
+                )
+                reason = f"subscription {self._backoff_reason}, until {_clock(self._backoff_until)}"
+                async for event in self._run_fallback(
+                    ctx, session_id, sink, reason, deadline, limit
+                ):
+                    yield event
+            else:
+                reason = f"subscription {self.out_of_quota() or self._backoff_reason}"
+                yield await self._no_decision(ctx, sink, reason, on_exhausted=self.on_exhausted)
             return
 
         request = AgentRequest(
@@ -337,9 +480,7 @@ class CliBackedAgent(BaseAgent):
                 "permission_mode": self.runtime.permission_mode,
                 "agent": self.name,
             },
-            on_event=self._make_event_sink(
-                str(getattr(getattr(ctx, "session", None), "id", "") or ctx.invocation_id)
-            ),
+            on_event=sink,
         )
 
         # A hosted agent that silently lost its market data still answers, it
@@ -374,7 +515,7 @@ class CliBackedAgent(BaseAgent):
                     exc_info=True,
                 )
 
-        result = await self.backend.run(request)
+        result = await self._run_harness(request, deadline, limit)
         self._note_quota(result.quota)
 
         if result.ok and result.text:
@@ -385,6 +526,7 @@ class CliBackedAgent(BaseAgent):
                 result.billing_used.value if result.billing_used else "?",
                 f"${result.cost_usd:.4f}" if result.cost_usd is not None else "n/a",
             )
+            self._outcome.update(decided=True, via="harness")
             yield Event(
                 author=self.name,
                 invocation_id=ctx.invocation_id,
@@ -396,23 +538,19 @@ class CliBackedAgent(BaseAgent):
             return
 
         # Failure. Fall back rather than returning nothing: a cycle with no
-        # strategy output is a cycle that cannot trade.
+        # strategy output is a cycle that cannot trade. A spent plan falls back
+        # only when quota.on_exhausted says to spend money on it.
         reason = result.error or "the hosted run produced no output"
-        if self.fallback_agent is None:
-            logger.error(
-                "%s: hosted run failed (%s) and no fallback is configured.",
-                self.name,
+        if result.quota_exhausted:
+            reason = f"subscription {self.out_of_quota() or 'quota exhausted'}"
+        if self.fallback_agent is None or (
+            result.quota_exhausted and not self.decides_without_quota()
+        ):
+            yield await self._no_decision(
+                ctx,
+                sink,
                 reason,
-            )
-            yield Event(
-                author=self.name,
-                invocation_id=ctx.invocation_id,
-                branch=getattr(ctx, "branch", None),
-                error_message=f"{self.name} failed: {reason}",
-                content=genai_types.Content(
-                    role="model",
-                    parts=[genai_types.Part(text=f"{self.name} could not run: {reason}")],
-                ),
+                on_exhausted=self.on_exhausted if result.quota_exhausted else None,
             )
             return
 
@@ -422,8 +560,185 @@ class CliBackedAgent(BaseAgent):
             self.name,
             reason,
         )
-        async for event in self.fallback_agent.run_async(ctx):
+        async for event in self._run_fallback(ctx, session_id, sink, reason, deadline, limit):
             yield event
+
+    async def _run_harness(self, request: AgentRequest, deadline: float, limit: float) -> Any:
+        """The hosted run, stopped at the stage's deadline."""
+        try:
+            return await asyncio.wait_for(
+                self.backend.run(request), timeout=max(1.0, deadline - time.monotonic())
+            )
+        except TimeoutError:
+            logger.error("%s: the hosted run passed its %.0f s limit; stopped.", self.name, limit)
+            return AgentResult(
+                ok=False,
+                error=f"the hosted run did not finish within its {_minutes(limit)} limit",
+            )
+
+    async def _run_fallback(
+        self,
+        ctx: InvocationContext,
+        session_id: str,
+        sink: Any,
+        reason: str,
+        deadline: float,
+        limit: float,
+    ) -> AsyncGenerator[Event, None]:
+        """Let the API agent decide, with its own steps in front of it, and bounded.
+
+        An ``LlmAgent`` builds every model request from the session's events,
+        and the Runner adds each event the agent yields to the session before
+        the agent's next step. Run here, inside a tool call, nothing added
+        them: every request was the first one again, so the fallback called
+        its first tools over and over and never answered, billed per token,
+        until the app was stopped or the cycle cancelled, and none of it
+        reached the thought log.
+
+        So it gets a private copy of the cycle's history, and each of its steps
+        is added to that copy before its next one. The shared session, and so
+        the orchestrator's own context, is left as it was. Its thoughts and
+        tool calls reach the thought log as a hosted run's do. It stops at the
+        stage's deadline, or after ``fallback_max_model_calls`` model calls
+        without an answer, and then reports no decision.
+        """
+        cap = self._fallback_model_calls()
+        logger.warning(
+            "%s: %s — the API fallback decides this cycle. THIS COSTS MONEY: it is "
+            "billed per token (at most %d model calls).",
+            self.name,
+            reason,
+            cap,
+        )
+        await self._runtime_note(
+            sink,
+            f"{reason}: the API fallback decides this cycle, billed per token "
+            f"(at most {cap} model calls)",
+            {"fallback": "api", "reason": reason, "max_model_calls": cap},
+        )
+
+        history = list(getattr(getattr(ctx, "session", None), "events", None) or [])
+        fallback_ctx = _with(ctx, session=_with(ctx.session, events=history))
+        name = getattr(self.fallback_agent, "name", None)
+        calls = 0
+        answer = ""
+        stopped: str | None = None
+        stream = self.fallback_agent.run_async(fallback_ctx)
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stopped = f"it reached the stage's {_minutes(limit)} limit"
+                    break
+                try:
+                    event = await asyncio.wait_for(anext(stream), timeout=remaining)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    stopped = f"it reached the stage's {_minutes(limit)} limit"
+                    break
+                except Exception as exc:  # a provider error ends the stage, not the cycle
+                    logger.error("%s: the API fallback failed: %s", self.name, exc, exc_info=True)
+                    stopped = f"it failed: {exc}"
+                    break
+                if not getattr(event, "partial", False):
+                    history.append(event)
+                    content = getattr(event, "content", None)
+                    if (
+                        getattr(event, "author", None) == name
+                        and getattr(content, "role", None) == "model"
+                    ):
+                        calls += 1
+                    await self._mirror(session_id, event)
+                    if _is_final(event):
+                        answer = _answer_text(event) or answer
+                yield event
+                if calls >= cap and not answer and _calls_a_tool(event):
+                    stopped = f"it reached {cap} model calls without an answer"
+                    break
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+
+        if answer:
+            logger.info("%s: the API fallback decided in %d model call(s).", self.name, calls)
+            self._outcome.update(decided=True, via="api_fallback", model_calls=calls)
+            return
+        why = stopped or "it ended without an answer"
+        self._outcome["model_calls"] = calls
+        yield await self._no_decision(
+            ctx, sink, f"the API fallback made no decision: {why} ({calls} model call(s))"
+        )
+
+    async def _no_decision(
+        self,
+        ctx: InvocationContext,
+        sink: Any,
+        reason: str,
+        *,
+        on_exhausted: str | None = None,
+    ) -> Event:
+        """The stage's answer when it made no decision: says so, never silence."""
+        from google.adk.events import Event
+
+        self._outcome.update(decided=False, reason=reason, on_exhausted=on_exhausted)
+        note = f"no decision this cycle: {reason}" + (
+            f" (quota.on_exhausted={on_exhausted!r})" if on_exhausted else ""
+        )
+        logger.error("%s: %s", self.name, note)
+        await self._runtime_note(
+            sink, note, {"decided": False, "reason": reason, "on_exhausted": on_exhausted}
+        )
+        return Event(
+            author=self.name,
+            invocation_id=ctx.invocation_id,
+            branch=getattr(ctx, "branch", None),
+            error_message=f"{self.name} failed: {reason}",
+            content=genai_types.Content(
+                role="model",
+                parts=[
+                    genai_types.Part(
+                        text=(
+                            f"{self.name} could not run: {reason}. No decision was made "
+                            "this cycle; this is not a decision to stay flat."
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _runtime_note(self, sink: Any, content: str, payload: dict[str, Any]) -> None:
+        """A ``[runtime]`` row in the thought log, the way the harness's quota notes are."""
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):
+            await sink(AgentEvent(kind="quota", content=content, payload=payload))
+
+    async def _mirror(self, session_id: str, event: Any) -> None:
+        """The fallback's thoughts and tool calls, as rows like a hosted run's."""
+        if self.thought_logger is None:
+            return
+        for part in _parts(event):
+            if getattr(part, "thought", False):
+                continue
+            call = getattr(part, "function_call", None)
+            if text := getattr(part, "text", None):
+                row = ("thought", text, {"runtime": "api_fallback"})
+            elif call is not None:
+                args = dict(getattr(call, "args", None) or {})
+                row = ("tool_call", call.name, {"args": args, "runtime": "api_fallback"})
+            else:
+                continue
+            try:
+                await self.thought_logger.record_event(
+                    session_id=session_id,
+                    agent_name=self.name,
+                    event_type=row[0],
+                    content=row[1],
+                    meta=row[2],
+                )
+            except Exception:  # telemetry must never break a trading cycle
+                logger.debug("thought logging failed", exc_info=True)
 
     # ── Console timeline ──────────────────────────────────────────
 
@@ -493,8 +808,9 @@ class SessionSharingAgentTool(AgentTool):
        outage where the agent was asked to size a trade with no market data.
 
     So: invoke the agent directly against the parent's ``InvocationContext``,
-    swapping only the active agent, and return its text as the function
-    response.
+    swapping only the active agent, and return its answer as the function
+    response: the text of its final events, not its intermediate steps (an
+    API fallback's tool calls and tool results are steps, not the proposal).
     """
 
     async def run_async(self, *, args: dict[str, Any], tool_context: Any) -> Any:
@@ -508,7 +824,7 @@ class SessionSharingAgentTool(AgentTool):
             actions = getattr(event, "actions", None)
             if actions is not None and getattr(actions, "state_delta", None):
                 tool_context.state.update(actions.state_delta)
-            if text := _event_text(event):
+            if _is_final(event) and (text := _event_text(event)):
                 texts.append(text)
 
         result = "\n".join(texts).strip()
@@ -526,3 +842,13 @@ class SessionSharingAgentTool(AgentTool):
                 f"as a no-trade. Report it in the cycle summary."
             )
         return result
+
+
+def hosted_agents(root: Any) -> dict[str, CliBackedAgent]:
+    """The hosted agents an orchestrator reaches as tools, by name."""
+    found: dict[str, CliBackedAgent] = {}
+    for tool in getattr(root, "tools", None) or []:
+        agent = getattr(tool, "agent", None)
+        if isinstance(tool, SessionSharingAgentTool) and isinstance(agent, CliBackedAgent):
+            found[agent.name] = agent
+    return found

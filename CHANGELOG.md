@@ -246,6 +246,30 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The strategy agent's API fallback no longer repeats itself.** When the
+  hosted strategy agent could not run (its subscription plan spent, or the
+  harness failing), it handed the cycle to its API fallback from inside the
+  orchestrator's `strategy` tool call. There, nothing added the fallback's own
+  steps to the history it builds each model request from, so every request
+  was its first one again: it called its first tools over and over, billed per
+  token, without answering, until the app was stopped or the cycle cancelled.
+  None of it reached the thought log, so the cycle read as though no fallback
+  had run. The fallback now works on a private copy of the cycle's history
+  with its steps added as it goes; its thoughts and tool calls are in the
+  thought log, a `[runtime]` row says when and why it took over, and the
+  `strategy` tool returns its answer, not its steps. The whole strategy stage
+  stops after `max_run_seconds` (new, default 1200, harness and fallback
+  together), and the fallback after `fallback_max_model_calls` (new, default
+  25) model calls without an answer; either way the stage answers "no
+  decision", never silence. The harness's own limit notice ("You've hit your
+  session limit …") counts as a failed run, not a proposal. The defaults need
+  no change in your settings.
+- **`quota.on_exhausted` applies to the strategy agent.** Only the evolution
+  run read it: a spent plan always sent the strategy stage to the API. `api`
+  still does that and is still the default; `skip` and `fail` now make no
+  decision until the window resets and call no API. Under them a plan near
+  `warn_utilization` keeps answering on the harness, since there is nowhere
+  else to send it. The policy is logged at start-up.
 - **A filled stop or take-profit closes the lots it sold, with its P&L.** A
   resting stop is one journal row against the lot it was placed for, and when
   the broker reported it filled, that row alone was marked filled. A stop

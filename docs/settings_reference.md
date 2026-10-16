@@ -180,8 +180,10 @@ one for the weekly evolution run.
 | `max_turns` | Hard cap on agent turns, so a runaway run cannot use up the plan's window |
 | `permission_mode` | `dontAsk` (deny anything not explicitly allowed) is right for unattended runs |
 | `allow_file_tools` | Let the harness read the repository with its own read/search tools. Writing files, running commands and web access are always blocked |
-| `quota.warn_utilization` | Once the harness reports this share of the usage window consumed, send the *next* task to the fallback. The current task finishes where it started |
-| `quota.on_exhausted` | At the wall: `api` re-runs the task on the metered API (costs money, keeps trading), `skip` drops it (free, loses the cycle), `fail` raises so a person notices |
+| `quota.warn_utilization` | Once the harness reports this share of the usage window consumed, send the *next* task to the fallback. The current task finishes where it started. Under `skip` or `fail` there is no fallback to go to, so the harness keeps answering until the plan is spent |
+| `quota.on_exhausted` | At the wall: `api` re-runs the task on the metered API (costs money, keeps trading), `skip` drops it (free, loses the cycle), `fail` drops it and records the cycle as failed so a person notices. For the strategy agent, `skip` and `fail` mean no decision until the window resets, and no API call |
+| `max_run_seconds` | A hosted trading agent's whole stage, the harness and its API fallback together, stops after this many seconds and reports no decision (default 1200) |
+| `fallback_max_model_calls` | The API fallback stops after this many model calls without an answer, each billed per token, and reports no decision (default 25) |
 
 ### Billing is enforced, not assumed
 

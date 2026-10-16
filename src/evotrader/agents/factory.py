@@ -895,6 +895,17 @@ def create_strategy_agent(config: AppConfig) -> Any:
         runtime.thinking,
         runtime.effort or "unset",
     )
+    on_exhausted = str(getattr(runtime.quota, "on_exhausted", None) or "api")
+    logger.info(
+        "Strategy quota policy: on_exhausted=%s — when the plan is spent, %s. "
+        "The stage stops after %.0f s; the API fallback after %d model calls.",
+        on_exhausted,
+        "the API fallback decides, billed per token"
+        if on_exhausted == "api"
+        else "no decision until the window resets",
+        runtime.max_run_seconds,
+        runtime.fallback_max_model_calls,
+    )
     return CliBackedAgent(
         name="strategy",
         # Becomes the function declaration the orchestrator sees when this agent
@@ -910,7 +921,10 @@ def create_strategy_agent(config: AppConfig) -> Any:
         instruction_text=_load_instructions("strategy", config),
         dynamic_instruction=lambda ctx: _strategy_dynamic_context(config),
         local_tools=[LocalTool.from_function(fn) for fn in _STRATEGY_TOOLS],
+        # Also decides when the harness fails for any reason other than a
+        # spent plan; on_exhausted governs the spent plan.
         fallback_agent=api_agent,
+        on_exhausted=on_exhausted,
         thought_logger=_LazyThoughtLogger(config),
     )
 

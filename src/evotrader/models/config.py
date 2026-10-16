@@ -1137,6 +1137,24 @@ class CliRuntimeConfig(BaseModel):
         ),
     )
     quota: QuotaPolicy = Field(default_factory=QuotaPolicy)
+    max_run_seconds: float = Field(
+        1200,
+        ge=60,
+        description=(
+            "A hosted trading agent's whole stage, the harness and its API "
+            "fallback together, is stopped after this many seconds and reports "
+            "no decision. A healthy run takes minutes; this leaves room for a "
+            "slow one."
+        ),
+    )
+    fallback_max_model_calls: int = Field(
+        25,
+        ge=1,
+        description=(
+            "The API fallback is stopped after this many model calls without an "
+            "answer. Each call is billed per token; a decision takes a handful."
+        ),
+    )
 
     @field_validator("billing")
     @classmethod
