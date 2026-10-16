@@ -41,6 +41,9 @@ EXCLUDE_RECONCILIATION_SQL = " AND regime != 'reconciliation' AND algo_version !
 #: It records nothing that happened: no position, no P&L, no status updates.
 DUPLICATE_STATUS = "DUPLICATE"
 
+#: The actions that sell (or cover) shares of a lot.
+_EXIT_ACTIONS = ("CLOSE", "STOP_LOSS", "TAKE_PROFIT")
+
 # ── ONE BROKER ORDER, ONE JOURNAL FACT ───────────────────────────────────
 # Rows written for the same broker order against the same lot, both FILLED:
 # every one but the latest is a second copy. record_trade no longer writes
@@ -399,7 +402,7 @@ class TradeJournal:
         #
         # The order is one fact: N shares of protection, resting. Write it that
         # way. When it actually fills, the broker says so and the fill path
-        # does the FIFO matching then.
+        # (update_order_status) does the FIFO matching then.
         is_protective = proposal.action in (TradeAction.STOP_LOSS, TradeAction.TAKE_PROFIT)
         status_is_filled = (order_status or "FILLED").upper() == "FILLED"
         # `matching` must be non-empty: a protective order with NO journal lot at
@@ -1852,6 +1855,151 @@ class TradeJournal:
             row = await cursor.fetchone()
         return float(row["pending"] or 0.0) if row else 0.0
 
+    async def _spread_filled_exits(self, order_id: str) -> list[int]:
+        """Match each filled exit row of one order to the lots it sold (see below)."""
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM trades WHERE order_id = ? AND order_status = 'FILLED' "
+                "AND action IN ('CLOSE', 'STOP_LOSS', 'TAKE_PROFIT') "
+                "AND related_trade_id IS NOT NULL ORDER BY id",
+                (order_id,),
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+        written: list[int] = []
+        for row in rows:
+            written += await self._spread_filled_exit(row)
+        return written
+
+    async def _spread_filled_exit(self, row: dict[str, Any]) -> list[int]:
+        """Spread a filled exit over the lots it sold, oldest first.
+
+        A resting exit is one row against the lot it was placed for (see
+        record_trade), and the order can be larger than that lot: a stop sized
+        to a position bought in two lots names the first. When it fills, the
+        shares beyond its lot came out of the next ones. Once such a stop
+        filled: the row closed more shares of the first lot than it held, the
+        second lot's shares stayed open in the journal, and the day's position
+        check closed them as a sync row at a later price, with no decision
+        behind it.
+
+        So the row keeps what its lot still held and one row per further lot
+        of the same instrument and direction, oldest first, takes the rest:
+        same order, same fill, its own lot, marked ``FIFO_SPLIT_OF <row>``.
+        When the row's own lot had nothing left, the row itself moves to the
+        first lot that has. Shares beyond every open lot stay on the row, as
+        before, and a warning says so: the position check measures them.
+
+        Idempotent: a row that fits its lot is left alone, so a second
+        promotion of the same order writes nothing. Returns the new row ids.
+        """
+        lot_id = int(row["related_trade_id"])
+        quantity = float(row["quantity"] or 0.0)
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT t.direction,
+                       t.quantity - COALESCE((
+                           SELECT SUM(c.quantity) FROM trades c
+                           WHERE c.related_trade_id = t.id AND c.id != ?
+                             AND c.action IN ('CLOSE', 'STOP_LOSS', 'TAKE_PROFIT')
+                             AND COALESCE(c.order_status, 'FILLED') = 'FILLED'
+                       ), 0) AS held
+                FROM trades t WHERE t.id = ?
+                """,
+                (row["id"], lot_id),
+            )
+            lot = await cursor.fetchone()
+        if lot is None:
+            return []
+        held = max(0.0, float(lot["held"] or 0.0))
+        if quantity <= held + 1e-4:
+            return []
+
+        shares: list[tuple[int, float]] = [(lot_id, held)] if held > 1e-4 else []
+        rest = quantity - held
+        for other in await self.get_open_trades():
+            if rest <= 1e-4:
+                break
+            if (
+                int(other["id"]) == lot_id
+                or other.get("ticker") != row.get("ticker")
+                or other.get("option_id") != row.get("option_id")
+                or other.get("direction") != lot["direction"]
+            ):
+                continue
+            take = min(rest, float(other.get("remaining_quantity") or 0.0))
+            if take > 1e-4:
+                shares.append((int(other["id"]), take))
+                rest -= take
+        if not any(other_id != lot_id for other_id, _ in shares):
+            logger.warning(
+                "Filled exit #%s (order %s) is %.4f shares against lot #%s, which held "
+                "%.4f, and no other open lot of %s can take the rest. Left as filled; "
+                "the position check measures the difference.",
+                row["id"],
+                row.get("order_id"),
+                quantity,
+                lot_id,
+                held,
+                row.get("ticker"),
+            )
+            return []
+        if rest > 1e-4:
+            logger.warning(
+                "Filled exit #%s (order %s): %.4f shares beyond every open lot of %s "
+                "stay on the row; the position check measures them.",
+                row["id"],
+                row.get("order_id"),
+                rest,
+                row.get("ticker"),
+            )
+            shares[0] = (shares[0][0], shares[0][1] + rest)
+
+        first_lot, first_qty = shares[0]
+        tag = f"FIFO_SPLIT_OF {row['id']}"
+        written: list[int] = []
+        columns = [c for c in row if c != "id"]
+        async with self._db.transaction() as conn:
+            if first_lot == lot_id:
+                await conn.execute(
+                    "UPDATE trades SET quantity = ? WHERE id = ?",
+                    (round(first_qty, 4), row["id"]),
+                )
+            else:
+                note = f"lot #{lot_id} had no shares left; FIFO moved this exit to lot #{first_lot}"
+                reason = "; ".join(p for p in (row.get("broker_status_reason"), note) if p)
+                await conn.execute(
+                    "UPDATE trades SET quantity = ?, related_trade_id = ?, "
+                    "broker_status_reason = ? WHERE id = ?",
+                    (round(first_qty, 4), first_lot, reason, row["id"]),
+                )
+            for other_id, take in shares[1:]:
+                child = {
+                    **row,
+                    "quantity": round(take, 4),
+                    "related_trade_id": other_id,
+                    "realized_pnl": None,
+                    "holding_period_s": None,
+                    "broker_status_reason": tag,
+                }
+                cursor = await conn.execute(
+                    f"INSERT INTO trades ({', '.join(columns)}) "
+                    f"VALUES ({', '.join('?' for _ in columns)})",
+                    [child[c] for c in columns],
+                )
+                written.append(int(cursor.lastrowid))
+        logger.warning(
+            "Filled exit #%s (order %s, %.4f shares) was larger than lot #%s held "
+            "(%.4f): spread FIFO as %s.",
+            row["id"],
+            row.get("order_id"),
+            quantity,
+            lot_id,
+            held,
+            ", ".join(f"{q:g} vs lot #{i}" for i, q in shares),
+        )
+        return written
+
     async def update_order_status(
         self,
         order_id: str,
@@ -1992,8 +2140,15 @@ class TradeJournal:
                     fill_price,
                 )
 
-            # If a CLOSE trade was promoted to FILLED, compute realized_pnl from linked entry trade
+            # A filled exit is matched to the lots it sold, then takes its
+            # realized P&L against each. A stop or take-profit too: only CLOSE
+            # rows used to get one here, so a resting stop that filled closed
+            # its lot with no P&L on record, and the loss was in no total.
             if new_status.upper() == "FILLED":
+                try:
+                    await self._spread_filled_exits(order_id)
+                except Exception as ex:
+                    logger.warning("Could not match filled order %s to its lots: %s", order_id, ex)
                 try:
                     async with self._db.connection() as conn:
                         cursor = await conn.execute(
@@ -2005,7 +2160,7 @@ class TradeJournal:
                         close_rows = [dict(r) for r in await cursor.fetchall()]
 
                     for crow in close_rows:
-                        if crow.get("action") == "CLOSE" and crow.get("related_trade_id"):
+                        if crow.get("action") in _EXIT_ACTIONS and crow.get("related_trade_id"):
                             entry_row = await self.get_trade_by_id(int(crow["related_trade_id"]))
                             if entry_row:
                                 e_fill = entry_row.get("fill_price")
@@ -2017,6 +2172,11 @@ class TradeJournal:
                                 c_fill = (
                                     fill_price if fill_price is not None else crow.get("fill_price")
                                 )
+                                if c_fill is None and crow.get("action") != "CLOSE":
+                                    # A stop's trigger or a take-profit's limit
+                                    # is not the price it sold at: the P&L
+                                    # waits for the broker's fill price.
+                                    continue
                                 c_price = (
                                     float(c_fill) if c_fill is not None else float(crow["price"])
                                 )

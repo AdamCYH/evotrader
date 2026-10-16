@@ -246,6 +246,19 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A filled stop or take-profit closes the lots it sold, with its P&L.** A
+  resting stop is one journal row against the lot it was placed for, and when
+  the broker reported it filled, that row alone was marked filled. A stop
+  larger than its lot closed more shares of that lot than it held, the next
+  lot's shares stayed open in the journal until the day's position check
+  closed them as a sync row (at its own price, outside the decision P&L), and
+  only rows labelled CLOSE were given a realized P&L there, so a stop or
+  take-profit that filled from rest had none at all. Now the fill is spread
+  over the open lots, oldest first: one row per lot, each with its own P&L
+  (the added rows are marked `FIFO_SPLIT_OF <row>`), and a row whose lot was
+  already sold moves to the next. A stop's or take-profit's P&L waits for the
+  broker's fill price rather than using its trigger or limit. Rows already in
+  the journal are not changed.
 - **A failed read of the broker's orders is no longer taken for their
   absence.** Reconciliation marked an order CANCELLED ("not found on broker")
   whenever no lookup returned it, and a lookup that failed returned nothing,
