@@ -708,6 +708,14 @@ class TradeJournal:
                 recorded_ids.append(trade_id)
         return recorded_ids
 
+    async def order_is_journaled(self, order_id: str) -> bool:
+        """Whether any row, of any action, carries this broker order id."""
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT 1 FROM trades WHERE order_id = ? LIMIT 1", (order_id,)
+            )
+            return await cursor.fetchone() is not None
+
     async def rows_for_order(
         self, order_id: str, action: TradeAction | str
     ) -> list[dict[str, Any]]:

@@ -4372,6 +4372,9 @@ def _pending_row_from_broker_order(order: dict, ticker: str) -> dict:
         "market_hours": order.get("market_hours"),
         "order_id": order.get("id") or order.get("order_id"),
         "state": order.get("state"),
+        # 'agentic' for an order the agents placed through the broker's agent
+        # API; a person's order in the app says otherwise.
+        "placed_agent": order.get("placed_agent"),
         "source": "broker_sync",
     }
 
@@ -4473,6 +4476,170 @@ class _BrokerListing:
         return f"{name} order list ({len(self.orders)} orders{back})"
 
 
+#: A working order is adopted (``_adopt_agents_exit``) only once it is this
+#: old: the executor records an order right after placing it, in its stage.
+_ADOPT_AFTER = timedelta(minutes=10)
+
+
+async def _session_that_placed(order_id: str, created: datetime | None) -> str | None:
+    """The cycle whose activity log first names the order: the one that placed it."""
+    if _db is None or created is None:
+        return None
+    try:
+        async with _db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT session_id FROM agent_thought_log WHERE timestamp >= ? "
+                "AND timestamp <= ? AND instr(meta, ?) > 0 ORDER BY id LIMIT 1",
+                (
+                    (created - timedelta(minutes=2)).isoformat(),
+                    (created + timedelta(minutes=30)).isoformat(),
+                    order_id,
+                ),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.debug("Could not find the cycle that placed %s: %s", order_id, e)
+        return None
+    return row["session_id"] if row else None
+
+
+async def _adopt_agents_exit(order: dict, ticker: str, *, filled: bool = False) -> list[int]:
+    """Journal a sell the agents placed at the broker and never recorded.
+
+    An order the executor places and does not record has no trades row. The
+    order book shows it (``pending_orders``, source ``broker_sync``) and the
+    coverage counts it, but when it fills the fill path finds no row, and the
+    position check later closes the shares as a sync row, at its own price and
+    outside every decision P&L figure. Once a stop and a take-profit for a new
+    position were placed this way and neither was recorded.
+
+    So a sell the broker says the agents placed (``placed_agent`` 'agentic',
+    never an order a person placed in the app), with no row for its id, is
+    recorded as the executor would have recorded it: a stop as STOP_LOSS, a
+    limit sell above the oldest lot's price as TAKE_PROFIT, any other sell as
+    CLOSE, against the open lots as record_trade matches them (the oldest
+    first), with that lot's signals, in the cycle that placed it, marked
+    ``ADOPTED_FROM_BROKER``. A working order is recorded PENDING, and only
+    once it is ``_ADOPT_AFTER`` old, so the executor's own record comes first;
+    a filled one is recorded FILLED at its fill, split FIFO with its P&L.
+    Returns the new row ids.
+    """
+    from evotrader.models.trade import (
+        OrderResult,
+        OrderStatus,
+        OrderType,
+        TradeAction,
+        TradeDirection,
+        TradeProposal,
+    )
+
+    if _journal is None:
+        return []
+    order_id = _order_id_of(order)
+    if (
+        not order_id
+        or str(order.get("side") or "").lower() != "sell"
+        or str(order.get("placed_agent") or "").lower() != "agentic"
+    ):
+        return []
+    created = _parse_when(order.get("created_at"))
+    if not filled and (created is None or datetime.now(UTC) - created < _ADOPT_AFTER):
+        return []
+    if await _journal.order_is_journaled(order_id):
+        return []
+    lots = [
+        t
+        for t in await _journal.get_open_trades()
+        if str(t.get("ticker") or "").upper() == ticker.upper()
+        and not t.get("option_id")
+        and str(t.get("direction") or "LONG").upper() == "LONG"
+    ]
+    if not lots:
+        logger.warning(
+            "[ORDERBOOK] Agent sell %s on %s was never recorded, and no open lot can own "
+            "it; left to the position check.",
+            order_id,
+            ticker,
+        )
+        return []
+    lot = lots[0]
+    stop_price = _to_float(order.get("stop_price"))
+    limit_price = _to_float(order.get("price"))
+    entry = _to_float(lot.get("fill_price")) or _to_float(lot.get("price"))
+    if str(order.get("trigger") or "").lower() == "stop" or stop_price:
+        action = TradeAction.STOP_LOSS
+        order_type = OrderType.STOP_LIMIT if limit_price else OrderType.STOP
+    elif limit_price and entry and limit_price > entry:
+        action, order_type = TradeAction.TAKE_PROFIT, OrderType.LIMIT
+    else:
+        action = TradeAction.CLOSE
+        order_type = OrderType.LIMIT if limit_price else OrderType.MARKET
+    quantity = _to_float(order.get("cumulative_quantity") if filled else None) or _to_float(
+        order.get("quantity")
+    )
+    fill_price = _to_float(order.get("average_price")) if filled else None
+    if not quantity or (filled and not fill_price):
+        return []
+
+    def _lot_float(key: str) -> float | None:
+        return _to_float(lot.get(key))
+
+    proposal = TradeProposal(
+        ticker=ticker.upper(),
+        direction=TradeDirection.LONG,
+        action=action,
+        quantity=quantity,
+        order_type=order_type,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        time_in_force=order.get("time_in_force"),
+        algo_signal=_lot_float("algo_signal"),
+        llm_signal=_lot_float("llm_signal"),
+        hybrid_score=_lot_float("hybrid_score"),
+        confidence=_lot_float("confidence"),
+        regime=lot.get("regime"),
+        algo_version=lot.get("algo_version"),
+        reasoning=(
+            f"Adopted from the broker: order {order_id}, placed by the agents at "
+            f"{order.get('created_at')}, was never recorded. Signals from lot #{lot['id']}."
+        ),
+    )
+    result = None
+    if filled:
+        result = OrderResult(
+            order_id=order_id,
+            status=OrderStatus.FILLED,
+            ticker=ticker.upper(),
+            direction=TradeDirection.LONG,
+            action=action,
+            order_type=order_type,
+            requested_quantity=quantity,
+            filled_quantity=quantity,
+            fill_price=fill_price,
+        )
+    ids = await _journal.record_trade(
+        proposal,
+        result=result,
+        session_id=await _session_that_placed(order_id, created),
+        order_status="FILLED" if filled else "PENDING",
+        order_id=order_id,
+        broker_status_reason=f"ADOPTED_FROM_BROKER {datetime.now(UTC):%Y-%m-%dT%H:%MZ}",
+        fill_source="broker" if filled else None,
+    )
+    logger.warning(
+        "[ORDERBOOK] Adopted agent order %s (%s %g %s%s), which was never recorded: rows %s.",
+        order_id,
+        action.value,
+        quantity,
+        ticker,
+        f", filled at {fill_price:g}" if fill_price else "",
+        ", ".join(str(i) for i in ids),
+    )
+    global _open_positions_cache
+    _open_positions_cache = None
+    return ids
+
+
 async def _record_working_orders(
     orders: list[dict] | tuple[dict, ...],
     symbols: set[str] | None,
@@ -4480,11 +4647,14 @@ async def _record_working_orders(
     book: list[dict],
     errors: list[str],
     ticker: str | None = None,
+    adopted: list[str] | None = None,
 ) -> None:
     """Give each order the broker is still working a ``pending_orders`` row.
 
     ``ticker`` names the symbol a symbol-filtered listing was asked for;
     without it, the order's own symbol is used, kept only if in ``symbols``.
+    A sell the agents placed and never recorded is journaled too
+    (``_adopt_agents_exit``); its id joins ``adopted``.
     """
     for order in orders:
         if str(order.get("state") or "").lower() not in _BROKER_OPEN_STATES:
@@ -4517,6 +4687,13 @@ async def _record_working_orders(
         except Exception as e:
             errors.append(f"{order_id}: {e}")
             logger.warning("[ORDERBOOK] Could not record broker order %s: %s", order_id, e)
+            continue
+        try:
+            if await _adopt_agents_exit(order, symbol) and adopted is not None:
+                adopted.append(order_id)
+        except Exception as e:
+            errors.append(f"{order_id}: could not adopt it: {e}")
+            logger.warning("[ORDERBOOK] Could not adopt agent order %s: %s", order_id, e)
 
 
 async def sync_open_orders_from_broker(
@@ -4549,6 +4726,7 @@ async def sync_open_orders_from_broker(
     # (the orchestrator's cycle summary) can state quantities and levels.
     book: list[dict] = []
     errors: list[str] = []
+    adopted: list[str] = []
     listing_status: dict[str, dict] = {}
     for ticker in allowed_tickers():
         orders = await _list_broker_orders(account_number, ticker)
@@ -4560,7 +4738,9 @@ async def sync_open_orders_from_broker(
         if listings is not None:
             listings[ticker] = _BrokerListing(ticker, tuple(orders))
         before = len(synced)
-        await _record_working_orders(orders, None, synced, book, errors, ticker=ticker)
+        await _record_working_orders(
+            orders, None, synced, book, errors, ticker=ticker, adopted=adopted
+        )
         listing_status[ticker] = {
             "ok": True,
             "count": len(orders),
@@ -4580,6 +4760,8 @@ async def sync_open_orders_from_broker(
         "order_ids": synced,
         "orders": book,
         "listing_status": listing_status,
+        # Agent orders found unrecorded and journaled now (_adopt_agents_exit).
+        "adopted": adopted or None,
         "errors": errors if errors else None,
     }
 
@@ -4844,11 +5026,22 @@ async def reconcile_pending_orders() -> dict:
                         filled_quantity=filled_qty,
                         broker_status_reason=broker_reason,
                     )
+                    adopted_ids: list[int] = []
+                    if state == "filled" and not rows_updated:
+                        # A fill with no row: an exit the agents placed and
+                        # never recorded is journaled at its fill.
+                        adopted_ids = await _adopt_agents_exit(
+                            order_data,
+                            ticker or str(order_data.get("symbol") or "").upper(),
+                            filled=True,
+                        )
+                        rows_updated = len(adopted_ids)
                     reconciled.append(
                         {
                             "order_id": order_id,
                             "state": state,
                             "rows_updated": rows_updated,
+                            **({"adopted": adopted_ids} if adopted_ids else {}),
                         }
                     )
                     logger.info(

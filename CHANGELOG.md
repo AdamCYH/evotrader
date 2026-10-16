@@ -246,6 +246,19 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A sell the agents placed and never recorded is journaled.** The order
+  sync lists every working order at the broker and the coverage counts them,
+  but an order the executor placed without recording it had no journal row:
+  when it filled, there was nothing to mark filled, and the position check
+  later closed the shares as a sync row. Now a sell the broker says the agents
+  placed (`placed_agent` 'agentic'; never an order a person placed in the
+  app) with no row for its id is recorded as the executor would have recorded
+  it: a stop as STOP_LOSS, a limit sell above the lot's price as TAKE_PROFIT,
+  any other sell as CLOSE, against the open lots with the oldest lot's
+  signals, in the cycle that placed it, marked `ADOPTED_FROM_BROKER`. A
+  working order is recorded once it is ten minutes old, so the executor's own
+  record comes first; one that filled first is recorded at its fill, with its
+  P&L. The order sync's result lists them under `adopted`.
 - **A cycle's run record says when its strategy made no decision.** A cycle
   that reached the strategy stage read SUCCESS whatever the stage answered.
   Now one whose strategy made no decision reads FAILED with the reason, or
