@@ -209,3 +209,75 @@ def validate_threshold_atr(name: str, value: object) -> list[str]:
             f"percent fallback; got {v}"
         ]
     return []
+
+
+# ── The daily moving-average stack ─────────────────────────────────────
+
+#: How a channel reads the daily MA stack; see :func:`stack_context`.
+STACK_MODES = ("slow", "location")
+
+
+def location_stack(
+    price: float | None,
+    ema_9: float | None,
+    ema_21: float | None,
+    sma_20: float | None,
+) -> str:
+    """``bull`` above EMA9, EMA21 and SMA20; ``bear`` below all three; else ``no_stack``.
+
+    Where price sits against the fast averages, whatever the SMA20/SMA50 cross
+    says. The regime classifier's price-location override
+    (:func:`evotrader.indicators.regime._resolve_structure`) reads it from here,
+    so the regime tag and a channel in ``location`` mode cannot disagree.
+    """
+    mas = (ema_9, ema_21, sma_20)
+    if price is None or any(v is None or v <= 0 for v in mas):
+        return "no_stack"
+    if price > ema_9 and price > ema_21 and price > sma_20:  # type: ignore[operator]
+        return "bull"
+    if price < ema_9 and price < ema_21 and price < sma_20:  # type: ignore[operator]
+        return "bear"
+    return "no_stack"
+
+
+def stack_context(price: float | None, ind: Any, mode: str = "slow") -> str:
+    """The daily MA stack as a channel reads it: ``bull``, ``bear`` or ``no_stack``.
+
+    ``slow``, the default and every vote stored before this mode existed:
+    price above EMA9 above EMA21, and SMA20 above SMA50, for bull; the mirror
+    for bear. The SMA20/SMA50 cross lags a V-turn by weeks. After a rally
+    SMA20 sits far above SMA50, so a day that falls through every fast
+    average still reads ``no_stack``, and every with-trend bearish leg is
+    unreachable while the regime classifier already tags the tape bearish.
+
+    ``location``: :func:`location_stack`, the classifier's own reading. It
+    ignores the SMA cross and the order of the EMAs.
+
+    Either mode reads ``no_stack`` when any of the four averages is missing.
+    """
+    mas = tuple(getattr(ind, name, None) for name in ("ema_9", "ema_21", "sma_20", "sma_50"))
+    if price is None or any(v is None for v in mas):
+        return "no_stack"
+    ema_9, ema_21, sma_20, sma_50 = mas
+    if mode == "location":
+        return location_stack(price, ema_9, ema_21, sma_20)
+    if price > ema_9 > ema_21 and sma_20 > sma_50:
+        return "bull"
+    if price < ema_9 < ema_21 and sma_20 < sma_50:
+        return "bear"
+    return "no_stack"
+
+
+def sma_cross(ind: Any) -> str:
+    """``bull`` or ``bear`` from SMA20 against SMA50; ``unavailable`` without both."""
+    sma_20, sma_50 = getattr(ind, "sma_20", None), getattr(ind, "sma_50", None)
+    if sma_20 is None or sma_50 is None:
+        return "unavailable"
+    return "bull" if sma_20 > sma_50 else "bear"
+
+
+def validate_stack_mode(value: object) -> list[str]:
+    """Errors for a ``stack_mode`` parameter."""
+    if value in STACK_MODES:
+        return []
+    return [f"stack_mode must be one of {', '.join(STACK_MODES)}; got {value!r}"]

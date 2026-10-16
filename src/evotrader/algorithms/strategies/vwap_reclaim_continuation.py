@@ -63,6 +63,7 @@ import math
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm, warming_up
+from evotrader.algorithms.units import sma_cross, stack_context, validate_stack_mode
 from evotrader.indicators.volume import select_relative_volume, validate_rvol_source
 from evotrader.indicators.vwap_episode import locate_vwap_dip_episode
 from evotrader.models.market import MarketSnapshot
@@ -103,6 +104,10 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
         # indicators.volume.select_relative_volume. 'daily' is every existing
         # version's behaviour.
         rvol_source: str = "daily",
+        # How the trend is read from the MA stack: "slow" (every existing
+        # version) or "location" (the regime classifier's reading). See
+        # algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
     ) -> None:
         self._lookback_bars = lookback_bars
@@ -117,6 +122,7 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
         self._rvol_scale = rvol_scale
         self._require_current_session_anchor = require_current_session_anchor
         self._rvol_source = rvol_source
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -183,12 +189,13 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
         # ── 1. TREND DIRECTION from the daily MA stack ───────────────────────
         # Deliberately NOT read from snapshot.regime: the classifier has its own
         # accuracy caveats and this gate must not inherit them.
-        ema_9, ema_21 = ind.ema_9, ind.ema_21
-        sma_20, sma_50 = ind.sma_20, ind.sma_50
-        bull_stack = price > ema_9 > ema_21 and sma_20 > sma_50
-        bear_stack = price < ema_9 < ema_21 and sma_20 < sma_50
+        stack = stack_context(price, ind, self._stack_mode)
+        bull_stack = stack == "bull"
+        bear_stack = stack == "bear"
         meta["bull_stack"] = bull_stack
         meta["bear_stack"] = bear_stack
+        meta["stack_mode"] = self._stack_mode
+        meta["sma_cross"] = sma_cross(ind)
 
         if not bull_stack and not bear_stack:
             # Preconditions ABSENT, not a judgement on a candidate → off duty.
@@ -288,6 +295,7 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
             "rvol_scale": self._rvol_scale,
             "require_current_session_anchor": self._require_current_session_anchor,
             "rvol_source": self._rvol_source,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -318,6 +326,8 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
             self._require_current_session_anchor = bool(params["require_current_session_anchor"])
         if "rvol_source" in params:
             self._rvol_source = str(params["rvol_source"])
+        if "stack_mode" in params:
+            self._stack_mode = str(params["stack_mode"])
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -362,4 +372,6 @@ class VwapReclaimContinuationStrategy(TradingAlgorithm):
             err = validate_rvol_source(params["rvol_source"])
             if err:
                 errors.append(err)
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
         return errors

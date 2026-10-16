@@ -188,6 +188,21 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`stack_mode` reads the moving-average stack where the regime classifier
+  reads it.** Six channels read the daily stack as price above EMA9 above
+  EMA21 and SMA20 above SMA50 (or the mirror). After a rally SMA20 stays above
+  SMA50 for weeks, so a day falling through every fast average read "no
+  stack" while the regime classifier, overriding the stale cross by where
+  price sits, already tagged the tape bearish: the VWAP fade's with-trend
+  sell leg, mean reversion's trend guard and both reclaim channels could not
+  see the downtrend. `stack_mode: location` (on `intraday_vwap_zscore`,
+  `mean_reversion`, `vwap_reclaim_fade`, `vwap_reclaim_continuation`,
+  `trend_persistence` and `gap_fail_continuation`) reads bull above EMA9,
+  EMA21 and SMA20 and bear below all three; `slow`, the default, is the old
+  reading, so a version that does not set it is unchanged. Every vote records
+  `stack_mode` and `sma_cross`, `trend_persistence` both readings
+  (`bull_stack_slow`, `bull_stack_location` and the bear pair), and the
+  regime classifier's override uses the same rule.
 - **`intraday_vwap_zscore.session_extreme_ibs` and
   `session_extreme_dampener`.** The channel fades the distance from session
   VWAP and never asked where in the session's range the price sat: on a day

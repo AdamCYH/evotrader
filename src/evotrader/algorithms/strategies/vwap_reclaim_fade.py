@@ -55,6 +55,7 @@ import math
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm, warming_up
+from evotrader.algorithms.units import sma_cross, stack_context, validate_stack_mode
 from evotrader.indicators.volume import select_relative_volume, validate_rvol_source
 from evotrader.indicators.vwap_episode import locate_vwap_dip_episode
 from evotrader.models.market import MarketSnapshot
@@ -85,6 +86,10 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
         # prior session's daily ratio (labelled *_fallback) until then. See
         # indicators.volume.select_relative_volume.
         rvol_source: str = "session",
+        # How the trend is read from the MA stack: "slow" (every existing
+        # version) or "location" (the regime classifier's reading). See
+        # algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
     ) -> None:
         self._lookback_bars = lookback_bars
@@ -99,6 +104,7 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
         self._full_fade_rvol = full_fade_rvol
         self._require_current_session_anchor = require_current_session_anchor
         self._rvol_source = rvol_source
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -159,10 +165,13 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
         meta["vwap_anchor"] = anchor
 
         # ── 1. TREND from the daily MA stack (not snapshot.regime) ───────────
-        bull_stack = price > ind.ema_9 > ind.ema_21 and ind.sma_20 > ind.sma_50
-        bear_stack = price < ind.ema_9 < ind.ema_21 and ind.sma_20 < ind.sma_50
+        stack = stack_context(price, ind, self._stack_mode)
+        bull_stack = stack == "bull"
+        bear_stack = stack == "bear"
         meta["bull_stack"] = bull_stack
         meta["bear_stack"] = bear_stack
+        meta["stack_mode"] = self._stack_mode
+        meta["sma_cross"] = sma_cross(ind)
         if not bull_stack and not bear_stack:
             meta["in_scope"] = False
             meta["out_of_scope_reason"] = "no_ma_stack"
@@ -247,6 +256,7 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
             "full_fade_rvol": self._full_fade_rvol,
             "require_current_session_anchor": self._require_current_session_anchor,
             "rvol_source": self._rvol_source,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -269,6 +279,8 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
             self._require_current_session_anchor = bool(params["require_current_session_anchor"])
         if "rvol_source" in params:
             self._rvol_source = str(params["rvol_source"])
+        if "stack_mode" in params:
+            self._stack_mode = str(params["stack_mode"])
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -314,4 +326,6 @@ class VwapReclaimFadeStrategy(TradingAlgorithm):
             err = validate_rvol_source(params["rvol_source"])
             if err:
                 errors.append(err)
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
         return errors

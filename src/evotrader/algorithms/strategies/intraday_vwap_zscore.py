@@ -69,6 +69,7 @@ from statistics import stdev
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import sma_cross, stack_context, validate_stack_mode
 from evotrader.indicators.volume import select_relative_volume, validate_rvol_source
 from evotrader.models.market import MarketSnapshot
 from evotrader.models.signals import AlgoSignal
@@ -148,6 +149,10 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # indicators.volume.select_relative_volume. 'daily' is every existing
         # version's behaviour.
         rvol_source: str = "daily",
+        # How the MA stack is read: "slow" (every existing version) or
+        # "location" (the regime classifier's price-location reading). See
+        # algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
     ) -> None:
         self._zscore_window = zscore_window
@@ -171,6 +176,7 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         self._session_extreme_ibs = session_extreme_ibs
         self._session_extreme_dampener = session_extreme_dampener
         self._rvol_source = rvol_source
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -248,15 +254,8 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # the classifier has its own accuracy caveats and this gate must not
         # inherit them.
         _i = snapshot.indicators
-        _mas = (_i.ema_9, _i.ema_21, _i.sma_20, _i.sma_50)
-        if any(v is None for v in _mas):
-            stack_context = "no_stack"
-        elif price > _i.ema_9 > _i.ema_21 and _i.sma_20 > _i.sma_50:
-            stack_context = "bull"
-        elif price < _i.ema_9 < _i.ema_21 and _i.sma_20 < _i.sma_50:
-            stack_context = "bear"
-        else:
-            stack_context = "no_stack"
+        stack = stack_context(price, _i, self._stack_mode)
+        cross = sma_cross(_i)
 
         # ⚠ SIGN CONVENTION — READ BEFORE EDITING ⚠
         # This channel FADES: it emits OPPOSITE the deviation. Price ABOVE VWAP
@@ -268,9 +267,9 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
         # Getting this backwards silently inverts both knobs below and would
         # amplify exactly the leg we are damping. Mirrored for a bear stack.
         _pre_z = deviation / sd
-        if stack_context == "bull":
+        if stack == "bull":
             leg = "with_trend" if _pre_z < 0 else "counter_trend"
-        elif stack_context == "bear":
+        elif stack == "bear":
             leg = "with_trend" if _pre_z > 0 else "counter_trend"
         else:
             # No stack: the concept does not apply, and neither knob engages.
@@ -350,7 +349,9 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
                     "sd_floored": sd_floored,
                     "trigger_atr": round(trigger_atr, 4),
                     "saturation_atr": round(saturation_atr, 4),
-                    "stack_context": stack_context,
+                    "stack_context": stack,
+                    "stack_mode": self._stack_mode,
+                    "sma_cross": cross,
                     "leg": leg,
                     "effective_entry_z": round(effective_entry_z, 4),
                     "deviation_atr": round(deviation, 4),
@@ -395,7 +396,9 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
                 "sd_floored": sd_floored,
                 "trigger_atr": round(trigger_atr, 4),
                 "saturation_atr": round(saturation_atr, 4),
-                "stack_context": stack_context,
+                "stack_context": stack,
+                "stack_mode": self._stack_mode,
+                "sma_cross": cross,
                 "leg": leg,
                 "effective_entry_z": round(effective_entry_z, 4),
                 "trend_factor": round(trend_factor, 4),
@@ -456,6 +459,7 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
             "session_extreme_ibs": self._session_extreme_ibs,
             "session_extreme_dampener": self._session_extreme_dampener,
             "rvol_source": self._rvol_source,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -474,6 +478,7 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
             "session_extreme_ibs",
             "session_extreme_dampener",
             "rvol_source",
+            "stack_mode",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])
@@ -539,4 +544,6 @@ class IntradayVwapZscoreStrategy(TradingAlgorithm):
             err = validate_rvol_source(params["rvol_source"])
             if err:
                 errors.append(err)
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
         return errors

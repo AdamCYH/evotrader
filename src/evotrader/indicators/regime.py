@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 import pandas as pd
 
+from evotrader.algorithms.units import location_stack
 from evotrader.indicators.atr import atr_percentile, compute_atr
 from evotrader.indicators.moving_averages import compute_moving_averages
 from evotrader.models.market import MarketRegime, RegimeClassification
@@ -82,8 +83,11 @@ def _resolve_structure(
     # MAs the tape is not bearish regardless of the stale cross, and mirrored
     # for bullish-structure/bearish-price.
     if ema_9_val > 0 and ema_21_val > 0 and sma_20_val > 0:
-        reclaimed_up = price > ema_9_val and price > ema_21_val and price > sma_20_val
-        reclaimed_dn = price < ema_9_val and price < ema_21_val and price < sma_20_val
+        # The rule lives in algorithms.units, where the channels read it too
+        # (stack_mode "location"), so the tag and the channels cannot drift.
+        location = location_stack(price, ema_9_val, ema_21_val, sma_20_val)
+        reclaimed_up = location == "bull"
+        reclaimed_dn = location == "bear"
         if (not structure_bull) and reclaimed_up:
             structure_bull = True
             location_conf_penalty = 0.6

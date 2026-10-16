@@ -25,6 +25,9 @@ from evotrader.algorithms.units import (
     check_move,
     pct_move_in_atr,
     previous_close,
+    sma_cross,
+    stack_context,
+    validate_stack_mode,
     validate_threshold_atr,
 )
 from evotrader.models.market import MarketSnapshot
@@ -74,6 +77,10 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         # when it is neither. Either left as None keeps the hard gate exactly.
         counter_stack_scale: float | None = None,
         no_stack_scale: float | None = None,
+        # Which stack the gate (or the modifier) reads: "slow" (every existing
+        # version) or "location" (the regime classifier's reading). Both are
+        # reported either way. See algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
     ) -> None:
         self._lookback_days = lookback_days
@@ -89,6 +96,7 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         self._counter_day_atr = counter_day_atr
         self._counter_stack_scale = counter_stack_scale
         self._no_stack_scale = no_stack_scale
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -158,8 +166,13 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         cum_move_atr = (closes[-1] - closes[0]) / ind.atr_14
 
         # ── 3. STRUCTURAL STACK ────────────────────────────────────
-        bear_stack = price < ind.ema_9 < ind.ema_21 and ind.sma_20 < ind.sma_50
-        bull_stack = price > ind.ema_9 > ind.ema_21 and ind.sma_20 > ind.sma_50
+        # Both readings, so a rule that keys on one can name it; the gate reads
+        # the configured one.
+        slow = stack_context(price, ind, "slow")
+        location = stack_context(price, ind, "location")
+        stack = location if self._stack_mode == "location" else slow
+        bear_stack = stack == "bear"
+        bull_stack = stack == "bull"
 
         # ── 4. EFFICIENCY RATIO (Kaufman) ──────────────────────────
         path = sum(abs(d) for d in deltas)
@@ -171,6 +184,12 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         meta["cum_move_atr"] = round(cum_move_atr, 3)
         meta["bear_stack"] = bear_stack
         meta["bull_stack"] = bull_stack
+        meta["stack_mode"] = self._stack_mode
+        meta["bull_stack_slow"] = slow == "bull"
+        meta["bear_stack_slow"] = slow == "bear"
+        meta["bull_stack_location"] = location == "bull"
+        meta["bear_stack_location"] = location == "bear"
+        meta["sma_cross"] = sma_cross(ind)
         meta["efficiency"] = round(efficiency, 3)
         meta["lookback_bars"] = len(bars)
 
@@ -293,6 +312,7 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             "counter_day_atr": self._counter_day_atr,
             "counter_stack_scale": self._counter_stack_scale,
             "no_stack_scale": self._no_stack_scale,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -323,6 +343,8 @@ class TrendPersistenceStrategy(TradingAlgorithm):
             if key in params:
                 v = params[key]
                 setattr(self, f"_{key}", None if v is None else float(v))
+        if "stack_mode" in params:
+            self._stack_mode = str(params["stack_mode"])
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -387,4 +409,6 @@ class TrendPersistenceStrategy(TradingAlgorithm):
                 "counter_stack_scale and no_stack_scale switch the stack modifier on "
                 "together: set both, or leave both null"
             )
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
         return errors

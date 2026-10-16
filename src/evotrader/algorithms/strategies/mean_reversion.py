@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from evotrader.algorithms.base import TradingAlgorithm
+from evotrader.algorithms.units import sma_cross, stack_context, validate_stack_mode
 from evotrader.indicators.bollinger import bollinger_signal
 from evotrader.indicators.ibs import ibs_signal
 from evotrader.indicators.rsi import rsi_signal
@@ -50,6 +51,10 @@ class MeanReversionStrategy(TradingAlgorithm):
         # ungated copy here double-counted the same deviation in the
         # composite, with the lower-quality voice getting a free vote.
         trend_fade_decay: float = 0.35,
+        # How the trend guard reads the MA stack: "slow" (every existing
+        # version) or "location" (the regime classifier's reading). See
+        # algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
     ) -> None:
         self._rsi_period = rsi_period
@@ -63,6 +68,7 @@ class MeanReversionStrategy(TradingAlgorithm):
         self._bollinger_weight = bollinger_weight
         self._ibs_weight = ibs_weight
         self._trend_fade_decay = trend_fade_decay
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -174,13 +180,8 @@ class MeanReversionStrategy(TradingAlgorithm):
             and ind.sma_20 is not None
             and ind.sma_50 is not None
         ):
-            price = snapshot.quote.last
-            if price < ind.ema_9 < ind.ema_21 and ind.sma_20 < ind.sma_50:
-                trend_stack = "bear"
-            elif price > ind.ema_9 > ind.ema_21 and ind.sma_20 > ind.sma_50:
-                trend_stack = "bull"
-            else:
-                trend_stack = "none"
+            stack = stack_context(snapshot.quote.last, ind, self._stack_mode)
+            trend_stack = "none" if stack == "no_stack" else stack
             if (trend_stack == "bear" and signal_value > 0) or (
                 trend_stack == "bull" and signal_value < 0
             ):
@@ -197,6 +198,8 @@ class MeanReversionStrategy(TradingAlgorithm):
         # rather than indistinguishable from a build that lacks the guard.
         metadata["trend_guard_applied"] = trend_guard_applied
         metadata["trend_stack"] = trend_stack
+        metadata["stack_mode"] = self._stack_mode
+        metadata["sma_cross"] = sma_cross(ind)
 
         return AlgoSignal(
             name=self.name,
@@ -218,6 +221,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "bollinger_weight": self._bollinger_weight,
             "ibs_weight": self._ibs_weight,
             "trend_fade_decay": self._trend_fade_decay,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -233,6 +237,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "bollinger_weight",
             "ibs_weight",
             "trend_fade_decay",
+            "stack_mode",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])
@@ -249,6 +254,8 @@ class MeanReversionStrategy(TradingAlgorithm):
             decay = float(params["trend_fade_decay"])
             if not (0.0 <= decay <= 1.0):
                 errors.append(f"trend_fade_decay must be between 0.0 and 1.0, got {decay}")
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
         # Validate component weights sum to ~1.0 if all four are provided
         weight_keys = ("rsi_weight", "bollinger_weight", "ibs_weight")
         if all(k in params for k in weight_keys):

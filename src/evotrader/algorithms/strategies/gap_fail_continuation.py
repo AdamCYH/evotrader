@@ -65,6 +65,9 @@ from evotrader.algorithms.units import (
     check_move,
     pct_move_in_atr,
     previous_close,
+    sma_cross,
+    stack_context,
+    validate_stack_mode,
     validate_threshold_atr,
 )
 from evotrader.models.market import MarketSnapshot
@@ -88,6 +91,9 @@ class GapFailContinuationStrategy(TradingAlgorithm):
         min_minutes_since_open: float = 60.0,
         late_session_minute: float = 360.0,
         session_minutes: float = 390.0,
+        # How the stack_context metadata is read ("slow" or "location"); it
+        # never gates this channel. See algorithms.units.stack_context.
+        stack_mode: str = "slow",
         version: str = "v001",
         **kwargs: Any,
     ) -> None:
@@ -102,6 +108,7 @@ class GapFailContinuationStrategy(TradingAlgorithm):
         self._min_minutes_since_open = min_minutes_since_open
         self._late_session_minute = late_session_minute
         self._session_minutes = session_minutes
+        self._stack_mode = stack_mode
         self._version = version
 
     @property
@@ -196,7 +203,9 @@ class GapFailContinuationStrategy(TradingAlgorithm):
             "vwap_dev_atr": round(vwap_dev_atr, 4),
             "fill_held": fill_held,
             "elapsed_min": round(elapsed, 2),
-            "stack_context": _stack_context(price, ind),
+            "stack_context": stack_context(price, ind, self._stack_mode),
+            "stack_mode": self._stack_mode,
+            "sma_cross": sma_cross(ind),
             "leg": "failed_gap_up" if sign > 0 else "failed_gap_down",
         }
         if penetration_atr < self._min_penetration_atr:
@@ -252,6 +261,7 @@ class GapFailContinuationStrategy(TradingAlgorithm):
             "min_minutes_since_open": self._min_minutes_since_open,
             "late_session_minute": self._late_session_minute,
             "session_minutes": self._session_minutes,
+            "stack_mode": self._stack_mode,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -274,6 +284,8 @@ class GapFailContinuationStrategy(TradingAlgorithm):
         if "min_gap_atr" in params:
             v = params["min_gap_atr"]
             self._min_gap_atr = None if v is None else float(v)
+        if "stack_mode" in params:
+            self._stack_mode = str(params["stack_mode"])
 
     def validate_parameters(self, params: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -303,6 +315,8 @@ class GapFailContinuationStrategy(TradingAlgorithm):
         _check("session_minutes", 0.0, 480.0, low_open=True)
         if "min_gap_atr" in params:
             errors.extend(validate_threshold_atr("min_gap_atr", params["min_gap_atr"]))
+        if "stack_mode" in params:
+            errors.extend(validate_stack_mode(params["stack_mode"]))
 
         # Cross-check: a fade that starts at or after the close never applies.
         late = params.get("late_session_minute", self._late_session_minute)
@@ -316,15 +330,3 @@ class GapFailContinuationStrategy(TradingAlgorithm):
         except (TypeError, ValueError):
             pass
         return errors
-
-
-def _stack_context(price: float, ind: Any) -> str:
-    """The daily MA stack, read as ``intraday_vwap_zscore`` reads it; metadata only."""
-    mas = (ind.ema_9, ind.ema_21, ind.sma_20, ind.sma_50)
-    if any(v is None for v in mas):
-        return "no_stack"
-    if price > ind.ema_9 > ind.ema_21 and ind.sma_20 > ind.sma_50:
-        return "bull"
-    if price < ind.ema_9 < ind.ema_21 and ind.sma_20 < ind.sma_50:
-        return "bear"
-    return "no_stack"
