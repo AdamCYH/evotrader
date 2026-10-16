@@ -183,8 +183,13 @@ yourself; this page is not legal advice.
   policy exists for this: once the harness reports it is close to the limit,
   the next cycle goes to the API agent (the current one always finishes where
   it started), so a limit costs a different model for a while, not a missed
-  decision. Set `on_exhausted: "skip"` if you would rather lose a cycle than
-  pay for the API.
+  decision. Set `on_exhausted: "skip"` if you would rather lose cycles than
+  pay for the API: while the plan is spent, a cycle then runs no agent at all.
+  The book is still reconciled, and the market data and the algorithm's call
+  are still recorded; the cycle's run record reads Skipped (or Failed, under
+  `"fail"`) with the time the window resets. Either way the strategy stage
+  stops after `max_run_seconds`, and the API agent after
+  `fallback_max_model_calls` model calls without an answer.
 - Each hosted run also starts a CLI process, which adds some seconds per
   cycle.
 

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
 from google.adk.agents.context_cache_config import ContextCacheConfig
@@ -33,6 +34,7 @@ from evotrader.agents.provider_retry import run_with_one_resume, short_error
 from evotrader.agents.tools import (
     bind_dependencies,
     check_and_journal_pending_fills,
+    gather_market_data,
     reconcile_pending_orders,
     set_current_session_id,
 )
@@ -74,6 +76,42 @@ _ORDER_INTENT_RE = re.compile(
     r"routing to risk_manager|for risk_manager)\b",
     re.IGNORECASE,
 )
+
+
+#: The run record's status for each cycle status; anything else is FAILED.
+_DB_STATUS = {"complete": "SUCCESS", "partial": "SUCCESS", "skipped": "SKIPPED"}
+
+
+def _cycle_status(
+    stages_seen: set[str],
+    cycle_error: str | None,
+    strategy_outcome: dict[str, Any] | None,
+    no_agents_policy: str | None,
+) -> tuple[str, str | None]:
+    """The cycle's status and error, from what ran and how its strategy stage ended.
+
+    A strategy stage that made no decision (its plan spent, its fallback
+    stopped or failed) is not a success, though the stage was reached: the
+    cycle reads ``error``, or ``skipped`` when the plan's ``on_exhausted`` is
+    'skip'. ``no_agents_policy`` is that setting when the cycle ran no agent
+    at all (its error already says why).
+    """
+    policy = no_agents_policy
+    if strategy_outcome is not None and not strategy_outcome.get("decided"):
+        reason = strategy_outcome.get("reason") or "no answer"
+        cycle_error = cycle_error or f"the strategy agent made no decision: {reason}"
+        policy = strategy_outcome.get("on_exhausted")
+    if cycle_error:
+        return ("skipped" if policy == "skip" else "error"), cycle_error
+    if _MANDATORY_STAGES.issubset(stages_seen):
+        return "complete", None
+    return "partial", None
+
+
+async def _no_events() -> AsyncIterator[Any]:
+    """The event stream of a cycle in which no agent runs."""
+    return
+    yield  # pragma: no cover - makes this an async generator
 
 
 def _stage_for_call(tool_name: str, args: dict | None) -> str | None:
@@ -499,6 +537,18 @@ async def start(
         from evotrader.db.thought_log import ThoughtLogger
 
         thought_logger = ThoughtLogger(db)
+        # A run the last process left open (it stopped mid-cycle) reads
+        # RUNNING for good unless it is closed here, where none can be running.
+        try:
+            for run in await thought_logger.close_open_runs():
+                logger.warning(
+                    "Closed a %s run the last process left open (%s): %s",
+                    run["cycle_type"].lower(),
+                    run["session_id"],
+                    run["error"],
+                )
+        except Exception as e:
+            logger.warning("Could not close runs left open: %s", e)
 
         # ── Initialise semantic memory ──────────────────────────
         from evotrader.tools.memory import SemanticMemory
@@ -644,6 +694,11 @@ async def start(
             "Orchestrator agent created with %d sub-agents",
             len(orchestrator.sub_agents) if orchestrator.sub_agents else 0,
         )
+        # The hosted strategy agent, when there is one: the cycle reads whether
+        # it can decide (its plan) and whether it did.
+        from evotrader.agents.cli_agent import hosted_agents
+
+        strategy_host = hosted_agents(orchestrator).get("strategy")
         # Note: market data gathering is now done by the deterministic
         # gather_market_data tool, not the former market_intelligence sub-agent.
 
@@ -814,6 +869,12 @@ async def start(
             last_strategy_text = ""
             cycle_error = None
             was_cancelled = False
+            # A spent plan with quota.on_exhausted 'skip' or 'fail': the
+            # strategy agent cannot decide, so no agent runs this cycle
+            # (agents/quota_cycle.py). With 'api' its fallback decides.
+            no_agents = None
+            if strategy_host is not None and not strategy_host.decides_without_quota():
+                no_agents = strategy_host.out_of_quota()
 
             # ── One resume on a transient provider fault ─────────────
             # See agents/provider_retry.py. These three are what decide whether
@@ -877,17 +938,33 @@ async def start(
 
             event_count = 0
             try:
-                async for event in run_with_one_resume(
-                    lambda message: runner.run_async(
-                        user_id="trader",
-                        session_id=session.id,
-                        new_message=message,
-                    ),
-                    initial_prompt,
-                    delay_seconds=config.settings.schedule.provider_retry_delay_seconds,
-                    blocked_reason=_resume_blocked_reason,
-                    resume_message=_resume_prompt,
-                    on_resume=_record_resume,
+                if no_agents:
+                    from evotrader.agents.quota_cycle import record_cycle_without_agents
+
+                    cycle_error = await record_cycle_without_agents(
+                        thought_logger,
+                        session.id,
+                        config.settings.asset.primary_ticker,
+                        no_agents,
+                        strategy_host.on_exhausted,
+                        gather_market_data,
+                    )
+                    stages_seen.add("gather_market_data")
+                async for event in (
+                    _no_events()
+                    if no_agents
+                    else run_with_one_resume(
+                        lambda message: runner.run_async(
+                            user_id="trader",
+                            session_id=session.id,
+                            new_message=message,
+                        ),
+                        initial_prompt,
+                        delay_seconds=config.settings.schedule.provider_retry_delay_seconds,
+                        blocked_reason=_resume_blocked_reason,
+                        resume_message=_resume_prompt,
+                        on_resume=_record_resume,
+                    )
                 ):
                     event_count += 1
                     max_allowed = config.settings.schedule.max_cycle_events
@@ -1045,11 +1122,12 @@ async def start(
                             logger.warning("Could not persist tool response to DB: %s", db_err)
 
             except asyncio.CancelledError:
+                # From the console's cancel button or a stop of the app.
                 was_cancelled = True
-                logger.info("Trading cycle cancelled (shutdown in progress).")
+                logger.info("Trading cycle cancelled.")
                 try:
                     await thought_logger.record_run_completion(
-                        session_id=session.id, status="FAILED", error="Trading cycle cancelled."
+                        session_id=session.id, status="CANCELLED", error="Trading cycle cancelled."
                     )
                 except Exception as db_err:
                     logger.warning("Could not update CANCELLED status in cycle_runs: %s", db_err)
@@ -1063,12 +1141,12 @@ async def start(
                 if not was_cancelled:
                     duration_ms = int((time.monotonic() - cycle_start_time) * 1000)
 
-                    if cycle_error:
-                        status = "error"
-                    elif _MANDATORY_STAGES.issubset(stages_seen):
-                        status = "complete"
-                    else:
-                        status = "partial"
+                    status, cycle_error = _cycle_status(
+                        stages_seen,
+                        cycle_error,
+                        strategy_host.outcome(session.id) if strategy_host else None,
+                        strategy_host.on_exhausted if no_agents else None,
+                    )
 
                     completed_list = [s for s in _PIPELINE_STAGES if s in stages_seen]
                     skipped_list = [s for s in _PIPELINE_STAGES if s not in stages_seen]
@@ -1115,7 +1193,7 @@ async def start(
 
                     # Update status in cycle_runs
                     try:
-                        db_status = "SUCCESS" if status in ("complete", "partial") else "FAILED"
+                        db_status = _DB_STATUS.get(status, "FAILED")
                         await thought_logger.record_run_completion(
                             session_id=session.id,
                             status=db_status,

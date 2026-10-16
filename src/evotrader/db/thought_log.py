@@ -263,14 +263,76 @@ class ThoughtLogger:
         logger.info("Cycle run start recorded: session_id=%s, type=%s", session_id, cycle_type)
 
     async def has_run_since(self, cycle_type: str, since: datetime) -> bool:
-        """Whether a run of ``cycle_type`` started at or after ``since`` (SKIPPED ones aside)."""
+        """Whether a run of ``cycle_type`` started at or after ``since``.
+
+        A scheduled run that never started (``record_skipped_run``) is not one.
+        A cycle that started and ran no agent, its plan spent with
+        ``quota.on_exhausted`` 'skip', is: it is SKIPPED too, but it ran.
+        """
         async with self._db.connection() as conn:
             cursor = await conn.execute(
                 "SELECT 1 FROM cycle_runs WHERE cycle_type = ? AND timestamp >= ? "
-                "AND status != 'SKIPPED' LIMIT 1",
+                "AND NOT (status = 'SKIPPED' AND session_id LIKE 'skipped-%') LIMIT 1",
                 (cycle_type, since.astimezone(UTC).isoformat()),
             )
             return await cursor.fetchone() is not None
+
+    async def close_open_runs(self) -> list[dict[str, Any]]:
+        """Close the runs a stopped process left RUNNING; returns them, each with its error.
+
+        Called once at start-up, when no run of this data folder can be in
+        progress (one process per data folder, held by a lock). A process that
+        stops mid-cycle (a forced stop, a crash, the machine going down) never
+        writes its run's outcome, and the run read RUNNING for good: once a
+        cycle stayed open from the day it ran, and the restart after it left
+        only skipped rows. Each is closed FAILED, saying when it started and
+        when its session last recorded anything, which is when the process
+        was last seen working on it.
+        """
+        from evotrader.tools.market_hours import ET
+
+        def eastern(value: str | None) -> str | None:
+            if not value:
+                return None
+            try:
+                when = datetime.fromisoformat(value)
+            except ValueError:
+                return value
+            when = when if when.tzinfo else when.replace(tzinfo=UTC)
+            return when.astimezone(ET).strftime("%Y-%m-%d %H:%M ET")
+
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT r.session_id, r.cycle_type, r.timestamp, ("
+                "SELECT MAX(t.timestamp) FROM agent_thought_log t "
+                "WHERE t.session_id = r.session_id) AS last_event "
+                "FROM cycle_runs r WHERE r.status = 'RUNNING' ORDER BY r.timestamp"
+            )
+            runs = [dict(r) for r in await cursor.fetchall()]
+        for run in runs:
+            last = eastern(run["last_event"])
+            run["error"] = (
+                f"The app stopped while this run was open (started {eastern(run['timestamp'])}; "
+                + (
+                    f"its last recorded event was at {last}"
+                    if last
+                    else "nothing was recorded in it"
+                )
+                + "). Closed when the app started again."
+            )
+            await self.record_run_completion(run["session_id"], "FAILED", error=run["error"])
+            await self.record_event(
+                session_id=run["session_id"],
+                agent_name="evolution" if run["cycle_type"] == "EVOLUTION" else "orchestrator",
+                event_type="runtime",
+                content=f"[runtime] {run['error']}",
+                meta={
+                    "closed_at_start": True,
+                    "started_at": run["timestamp"],
+                    "last_event_at": run["last_event"],
+                },
+            )
+        return runs
 
     async def record_skipped_run(self, cycle_type: str, due_at: datetime, reason: str) -> str:
         """A scheduled run that never started, kept where the run history shows it.

@@ -246,6 +246,20 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A cycle's run record says when its strategy made no decision.** A cycle
+  that reached the strategy stage read SUCCESS whatever the stage answered.
+  Now one whose strategy made no decision reads FAILED with the reason, or
+  SKIPPED under `on_exhausted: skip`. While the plan is spent under `skip` or
+  `fail`, a cycle runs no agent at all: the book is reconciled as at every
+  start, the market data and the algorithm's call are recorded (and
+  attributed, flagged agent_absent), and no agent is billed for a cycle that
+  cannot act.
+- **A run left open by a stopped app is closed at the next start.** A cycle
+  the app was in the middle of when it stopped (a forced stop, a crash)
+  stayed RUNNING for good. At start-up each such run is closed FAILED,
+  saying when it started and when it last recorded anything, with a
+  `[runtime]` row in its log. A cancelled cycle (the console's cancel, or a
+  stop) reads CANCELLED instead of FAILED.
 - **The strategy agent's API fallback no longer repeats itself.** When the
   hosted strategy agent could not run (its subscription plan spent, or the
   harness failing), it handed the cycle to its API fallback from inside the
