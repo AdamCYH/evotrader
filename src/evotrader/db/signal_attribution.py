@@ -610,13 +610,16 @@ def algo_call_from_snapshot(composite: Any, sub_signals: Any) -> tuple[float, st
 #: momentum vote with its stack intact, decayed for a day against it, or under
 #: a fast dissent.
 _COHORT_FLAGS = ("divergence_applied", "fast_dissent", "fast_dissent_applied")
+#: Kept as reported, not as flags: the fast pair's direction (-1, 0, +1) and
+#: whether it agreed with the vote (None when either was neutral).
+_COHORT_READS = ("fast_read", "fast_read_agrees_value")
 
 
 def channel_votes_from_sub_signals(sub_signals: Any) -> dict[str, dict[str, Any]]:
     """``{channel: {value, weight, applicable, reason}}`` from a snapshot's
-    stored sub-signals, plus any of ``_COHORT_FLAGS`` the channel reports. A
-    channel that reports no ``applicable`` flag emitted a value without
-    qualification, so it counts as applicable."""
+    stored sub-signals, plus any of ``_COHORT_FLAGS`` and ``_COHORT_READS``
+    the channel reports. A channel that reports no ``applicable`` flag emitted
+    a value without qualification, so it counts as applicable."""
     if isinstance(sub_signals, str):
         try:
             sub_signals = json.loads(sub_signals)
@@ -633,5 +636,6 @@ def channel_votes_from_sub_signals(sub_signals: Any) -> dict[str, dict[str, Any]
             "applicable": bool(meta.get("applicable", True)),
             "reason": meta.get("reason"),
             **{flag: bool(meta[flag]) for flag in _COHORT_FLAGS if flag in meta},
+            **{key: meta[key] for key in _COHORT_READS if key in meta},
         }
     return votes

@@ -29,6 +29,26 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **Which way momentum's fast reads point, whatever its slow read says.**
+  `fast_dissent` is the two fast reads (price beyond EMA 9 by
+  `fast_dissent_min_atr` daily ATRs, the daily MACD histogram outside its
+  neutral band) pointing AGAINST the moving-average term, so it turns false
+  the moment that term crosses to their side. After a rally SMA 20 stays
+  above SMA 50 for weeks and cancels a price far under SMA 20, and the MA term
+  sits just below zero while price falls: the fast reads point down as hard
+  as they ever do and `fast_dissent` reads false, so a rule that reads it to
+  close a long cannot fire where the tape is most bearish. The momentum vote
+  now reports `fast_read` (+1, -1 or 0: the fast reads' own direction) and
+  `fast_read_agrees_value` (whether they point the way the vote does; null
+  when either is neutral), both also kept with the vote in the attribution
+  record, and `ma_signal_parts`, the MA term's three weighted parts (EMA 9
+  against EMA 21, price against SMA 20, SMA 20 against SMA 50), which sum to
+  it. `fast_dissent` is the same condition as before; no vote changes.
+- **How far past its gate a grind is.** trend_persistence's strength starts
+  from zero at its displacement gate, so a grind that has just cleared
+  `min_cum_atr` reads `bearish_trigger: true` next to a value near zero. Its
+  vote now reports `gate_margin_atr`: the displacement past the gate in daily
+  ATRs, negative when short of it.
 - **Which instruction version wrote what.** Each attribution row records the
   strategy instruction version it was made under
   (`strategy_instruction_version`, migration 0030; filled by the app, not the

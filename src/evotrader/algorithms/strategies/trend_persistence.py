@@ -11,6 +11,14 @@ advances.  Includes exhaustion decay (suppresses piling in at
 capitulation) and a counter-day guard (decays when today moves hard
 against the established grind).
 
+Strength starts from ZERO at the displacement gate: the depth term is
+tanh((|cum_move_atr| - min_cum_atr) / cum_scale), so a grind that has just
+cleared ``min_cum_atr`` is reported triggered with a value near zero, and
+depth reaches one half only about 0.55 x ``cum_scale`` ATRs past the gate
+(1.1 ATRs at a ``cum_scale`` of 2).
+``gate_margin_atr`` reports how far past the gate (or short of it) the
+displacement is, so a trigger and a near-zero value can be told apart.
+
 Best in: Range Bound regime (the only regime where existing strategies
 lack a multi-session trend voice).
 """
@@ -192,6 +200,9 @@ class TrendPersistenceStrategy(TradingAlgorithm):
         meta["sma_cross"] = sma_cross(ind)
         meta["efficiency"] = round(efficiency, 3)
         meta["lookback_bars"] = len(bars)
+        # Signed: ATRs of displacement past min_cum_atr, negative when short
+        # of it. Depth is tanh of this over cum_scale.
+        meta["gate_margin_atr"] = round(abs(cum_move_atr) - self._min_cum_atr, 4)
 
         # ── 5. FIRE CONDITIONS (symmetric) ─────────────────────────
         # The grind itself: persistence, displacement, efficiency.

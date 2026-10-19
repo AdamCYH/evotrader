@@ -40,6 +40,18 @@ def compute_moving_averages(close: pd.Series) -> MovingAverages:
     )
 
 
+class MovingAverageParts(NamedTuple):
+    """The three weighted parts of ``moving_average_signal``, which is their sum."""
+
+    ema_9_vs_21: float  # 0.4 x the EMA 9 / EMA 21 spread
+    price_vs_sma_20: float  # 0.3 x price against SMA 20
+    sma_20_vs_50: float  # 0.3 x the SMA 20 / SMA 50 spread
+
+    @property
+    def total(self) -> float:
+        return self.ema_9_vs_21 + self.price_vs_sma_20 + self.sma_20_vs_50
+
+
 def moving_average_signal(
     close: float,
     ema_9: float,
@@ -70,10 +82,28 @@ def moving_average_signal(
             to the legacy percent-of-price normaliser.
 
     Returns:
-        Signal in (-1.0, +1.0).
+        Signal in (-1.0, +1.0): the sum of ``moving_average_parts``.
+    """
+    return moving_average_parts(close, ema_9, ema_21, sma_20, sma_50, atr).total
+
+
+def moving_average_parts(
+    close: float,
+    ema_9: float,
+    ema_21: float,
+    sma_20: float,
+    sma_50: float,
+    atr: float | None = None,
+) -> MovingAverageParts:
+    """The three weighted components of ``moving_average_signal``, apart.
+
+    A reader can then see which part carries the signal: after a long advance
+    SMA 20 stays above SMA 50 for weeks, so the last part keeps reading close
+    to +0.3 while price falls under every fast average, and can cancel the
+    price part on its own.
     """
     if sma_50 == 0:
-        return 0.0
+        return MovingAverageParts(0.0, 0.0, 0.0)
 
     # Volatility-relative scaling.  A fixed percent-of-price normaliser
     # saturates on any instrument whose ATR exceeds it (QQQ ATR ~2.25%
@@ -96,4 +126,4 @@ def moving_average_signal(
     price_signal = math.tanh((close - sma_20) / price_scale)
     trend_signal = math.tanh((sma_20 - sma_50) / trend_scale)
 
-    return 0.4 * ema_signal + 0.3 * price_signal + 0.3 * trend_signal
+    return MovingAverageParts(0.4 * ema_signal, 0.3 * price_signal, 0.3 * trend_signal)

@@ -15,7 +15,7 @@ from typing import Any
 from evotrader.algorithms.base import TradingAlgorithm
 from evotrader.algorithms.units import move_over_sessions_in_atr, session_date_et
 from evotrader.indicators.macd import macd_signal
-from evotrader.indicators.moving_averages import moving_average_signal
+from evotrader.indicators.moving_averages import MovingAverageParts, moving_average_parts
 from evotrader.indicators.volume import (
     select_relative_volume,
     validate_rvol_source,
@@ -30,6 +30,28 @@ from evotrader.models.signals import AlgoSignal
 #: years of daily bars the band holds the quietest quarter of MSTR's days (25%)
 #: and about 40% of QQQ's and SPY's.
 MACD_NEUTRAL_ATR = 0.10
+
+
+def fast_pair_direction(
+    price_vs_ema9_atr: float | None, macd_hist_atr: float | None, min_atr: float
+) -> int:
+    """Which way the two fast reads point together: +1, -1 or 0.
+
+    +1 when price is above EMA 9 by at least ``min_atr`` daily ATRs AND the
+    daily MACD histogram is at least ``MACD_NEUTRAL_ATR`` above zero; -1 when
+    both are as far below; 0 when either is missing or inside its band, or
+    the two disagree. Price exactly at EMA 9 points nowhere, even with a
+    margin of 0.
+    """
+    if price_vs_ema9_atr is None or macd_hist_atr is None:
+        return 0
+    if (
+        price_vs_ema9_atr * macd_hist_atr > 0
+        and abs(price_vs_ema9_atr) >= min_atr
+        and abs(macd_hist_atr) >= MACD_NEUTRAL_ATR
+    ):
+        return 1 if price_vs_ema9_atr > 0 else -1
+    return 0
 
 
 class MomentumStrategy(TradingAlgorithm):
@@ -125,13 +147,14 @@ class MomentumStrategy(TradingAlgorithm):
         # None-guard so the type checker sees them as non-optional without
         # relying on assert statements (stripped under -O).
         ma_sig = 0.0
+        ma_parts: MovingAverageParts | None = None
         ema_9 = ind.ema_9
         ema_21 = ind.ema_21
         sma_20 = ind.sma_20
         sma_50 = ind.sma_50
         if all(v is not None for v in (ema_9, ema_21, sma_20, sma_50)):
             # The all() guard guarantees these are not None.
-            ma_sig = moving_average_signal(
+            ma_parts = moving_average_parts(
                 close=snapshot.quote.last,
                 ema_9=ema_9,  # type: ignore[arg-type]
                 ema_21=ema_21,  # type: ignore[arg-type]
@@ -139,6 +162,7 @@ class MomentumStrategy(TradingAlgorithm):
                 sma_50=sma_50,  # type: ignore[arg-type]
                 atr=ind.atr_14,
             )
+            ma_sig = ma_parts.total
 
         # MACD signal
         macd_sig = 0.0
@@ -163,8 +187,15 @@ class MomentumStrategy(TradingAlgorithm):
             else None
         )
 
-        # Fast dissent: price on the other side of EMA 9 by a margin AND the
-        # MACD histogram outside its neutral band, both against the MA term.
+        # The fast pair: price beyond EMA 9 by a margin AND the MACD histogram
+        # outside its neutral band, both the same way. ``fast_read`` is its
+        # direction whatever the MA term reads. Fast dissent is the fast pair
+        # AGAINST the MA term, so it turns false the moment the MA term
+        # crosses to the pair's side, however hard the pair points: after a
+        # rally SMA 20 stays above SMA 50 for weeks and cancels price under
+        # SMA 20, and the MA term sits near zero, either side, while price
+        # falls. A reader holding a position needs the direction, not the
+        # dissent.
         # ``fast_dissent`` records the condition whether or not a decay is
         # configured, so its days can be counted before anyone acts on them;
         # ``fast_dissent_applied`` says the decay changed the value.
@@ -177,15 +208,10 @@ class MomentumStrategy(TradingAlgorithm):
             and snapshot.quote.last
             else None
         )
-        fast_dissent = (
-            ma_sig != 0.0
-            and price_vs_ema9_atr is not None
-            and macd_hist_atr is not None
-            and price_vs_ema9_atr * ma_sig < 0
-            and abs(price_vs_ema9_atr) >= self._fast_dissent_min_atr
-            and macd_hist_atr * ma_sig < 0
-            and abs(macd_hist_atr) >= MACD_NEUTRAL_ATR
+        fast_read = fast_pair_direction(
+            price_vs_ema9_atr, macd_hist_atr, self._fast_dissent_min_atr
         )
+        fast_dissent = fast_read != 0 and fast_read * ma_sig < 0
         fast_dissent_applied = fast_dissent and self._fast_dissent_decay < 1.0
         ma_sig_effective = ma_sig * self._fast_dissent_decay if fast_dissent_applied else ma_sig
 
@@ -274,6 +300,11 @@ class MomentumStrategy(TradingAlgorithm):
             raw_signal *= vol_multiplier_applied
 
         signal_value = max(-1.0, min(1.0, raw_signal))
+        # Whether the fast pair points the way this vote does: None when
+        # either is neutral.
+        fast_read_agrees_value = (
+            fast_read * signal_value > 0 if fast_read != 0 and signal_value != 0.0 else None
+        )
 
         return AlgoSignal(
             name=self.name,
@@ -283,9 +314,22 @@ class MomentumStrategy(TradingAlgorithm):
                 # The raw MA term, as before; the term the blend used is
                 # ma_signal_effective (they differ only under a fast dissent).
                 "ma_signal": ma_sig,
+                # Its three weighted parts, which sum to it: EMA 9 against
+                # EMA 21 (0.4), price against SMA 20 (0.3), SMA 20 against
+                # SMA 50 (0.3). The last can hold near +0.3 for weeks after an
+                # advance and cancel a price far under SMA 20.
+                "ma_signal_parts": (
+                    {k: round(v, 4) for k, v in ma_parts._asdict().items()}
+                    if ma_parts is not None
+                    else None
+                ),
                 "ma_signal_effective": ma_sig_effective,
                 "macd_signal": macd_sig,
                 "price_vs_ema9_atr": price_vs_ema9_atr,
+                # The fast pair's own direction (+1, -1, 0) whatever the MA
+                # term reads, and whether it agrees with this vote's sign.
+                "fast_read": fast_read,
+                "fast_read_agrees_value": fast_read_agrees_value,
                 "fast_dissent": fast_dissent,
                 "fast_dissent_applied": fast_dissent_applied,
                 "fast_dissent_decay": self._fast_dissent_decay,
