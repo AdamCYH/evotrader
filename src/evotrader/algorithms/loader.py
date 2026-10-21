@@ -226,6 +226,7 @@ class StrategyLoader:
                     "gap_fail_continuation": 0.0,
                     "vwap_reclaim_fade": 0.0,
                     "btc_lead_residual": 0.0,
+                    "swing_failure_fade": 0.0,
                 }
                 weights[name] = default_weights.get(name, 1.0 / len(sub_strategies))
 

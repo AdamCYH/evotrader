@@ -93,6 +93,16 @@ test("the reclaim-fade channel has a plain name and plain reasons", () => {
         metadata: { applicable: true, reason: "reclaim_faded" } }), "watch only (-0.19)");
 });
 
+test("the failed-breakout channel has a plain name and plain reasons", () => {
+    assert.equal(channelLabel("swing_failure_fade"), "Failed breakout");
+    assert.equal(silenceReason({ name: "swing_failure_fade", value: 0, weight: 0.1,
+        metadata: { applicable: true, reason: "not_broken_down" } }), "no setup");
+    assert.equal(silenceReason({ name: "swing_failure_fade", value: 0, weight: 0.1,
+        metadata: { applicable: true, reason: "stale_flush" } }), "setup expired");
+    assert.equal(silenceReason({ name: "swing_failure_fade", value: -0.3, weight: 0.0,
+        metadata: { applicable: true, reason: "confirmed_fade" } }), "watch only (-0.30)");
+});
+
 test("unknown channels and reasons still render", () => {
     assert.equal(channelLabel("keltner_squeeze"), "keltner squeeze");
     assert.equal(silenceReason({ name: "k", value: 0, weight: 0.1, metadata: { reason: "brand_new_reason" } }),

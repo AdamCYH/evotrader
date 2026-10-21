@@ -208,6 +208,19 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **A `swing_failure_fade` channel, in shadow.** `swing_failure_reversal`
+  fires long once a session low has held: higher lows after the flush and a
+  close back above the flush bar's high. Nothing read the other side, so a
+  session high that had failed went unrecorded, and a sell-leg firing of the
+  VWAP stretch at the session high had no confirmation to wait for. The new
+  channel is the same rule reflected: a flush high stretched above session
+  VWAP, lower highs since, a close back below the flush bar's low and no new
+  high on the last bar. It votes short, with the long leg's gate, strength and
+  freshness, and records the daily MA stack it fired in (`stack_context`, read
+  by `stack_mode`). It ships at weight 0 in every regime of the starter
+  algorithm: it runs and its firings are recorded, but it does not move the
+  combined signal until promoted on that record. The console calls it
+  "Failed breakout".
 - **`stack_mode` reads the moving-average stack where the regime classifier
   reads it.** Six channels read the daily stack as price above EMA9 above
   EMA21 and SMA20 above SMA50 (or the mirror). After a rally SMA20 stays above

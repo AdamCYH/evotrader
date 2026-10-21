@@ -101,6 +101,16 @@ swing_failure_reversal:
   reclaim_scale: 0.5
   base_strength: 0.8
   require_current_session_anchor: true
+swing_failure_fade:   # the mirror of swing_failure_reversal, on the same gate
+  lookback_bars: 20
+  min_confirm_bars: 2
+  max_confirm_bars: 14
+  min_stretch_atr: 0.3
+  stretch_scale: 0.3
+  confirm_decay: 0.87
+  reclaim_scale: 0.5
+  base_strength: 0.8
+  require_current_session_anchor: true
 trend_persistence:
   lookback_days: 7
   min_persistence_frac: 0.6
@@ -168,18 +178,21 @@ composite:
   trend_persistence_weight: 0.0
   gap_fail_continuation_weight: 0.0
   vwap_reclaim_fade_weight: 0.0
+  swing_failure_fade_weight: 0.0
   regime_adaptive: true
   renormalize_on_abstain: true
   # With regime_adaptive on, these weights replace the flat ones above for the
   # regime detected this cycle. vwap_reclaim_continuation,
-  # gap_fail_continuation and vwap_reclaim_fade are weighted 0 in every
-  # regime: they run and are recorded, but do not vote until promoted.
+  # gap_fail_continuation, vwap_reclaim_fade and swing_failure_fade are
+  # weighted 0 in every regime: they run and are recorded, but do not vote
+  # until promoted.
   regime_weights:
     trending_bull:
       momentum: 0.2045
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
       vwap_reclaim_fade: 0.0
+      swing_failure_fade: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -193,6 +206,7 @@ composite:
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
       vwap_reclaim_fade: 0.0
+      swing_failure_fade: 0.0
       mean_reversion: 0.129
       gap: 0.0
       intraday_vwap_zscore: 0.1935
@@ -206,6 +220,7 @@ composite:
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
       vwap_reclaim_fade: 0.0
+      swing_failure_fade: 0.0
       mean_reversion: 0.12
       gap: 0.0
       intraday_vwap_zscore: 0.4
@@ -219,6 +234,7 @@ composite:
       vwap_reclaim_continuation: 0.0
       gap_fail_continuation: 0.0
       vwap_reclaim_fade: 0.0
+      swing_failure_fade: 0.0
       mean_reversion: 0.1538
       gap: 0.0
       intraday_vwap_zscore: 0.1183

@@ -102,3 +102,12 @@ strategies:
     # asset.reference_ticker is set in settings.yaml.
     status: active
     added_in: v001
+
+  swing_failure_fade:
+    module: evotrader.algorithms.strategies.swing_failure_fade
+    class: SwingFailureFadeStrategy
+    description: "A session high that failed: lower highs and a close back below the spike bar"
+    # Shadow mode: the bearish mirror of swing_failure_reversal, recorded at
+    # weight 0 in every regime until its firings have a record.
+    status: active
+    added_in: v001

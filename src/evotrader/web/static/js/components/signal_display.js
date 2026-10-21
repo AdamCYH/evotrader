@@ -54,6 +54,7 @@ const CHANNEL_LABELS = {
     vwap_reclaim_continuation: "VWAP reclaim",
     gap_fail_continuation: "Failed gap",
     vwap_reclaim_fade: "VWAP reclaim fade",
+    swing_failure_fade: "Failed breakout",
 };
 
 export function channelLabel(name) {
@@ -65,6 +66,7 @@ export function channelLabel(name) {
 const REASON_LABELS = {
     within_band: "no setup",
     not_reclaimed: "no setup",
+    not_broken_down: "no setup",
     no_reclaim_yet: "no setup",
     dip_too_shallow: "no setup",
     dip_too_brief: "no setup",
