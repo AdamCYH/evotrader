@@ -51,6 +51,13 @@ class MeanReversionStrategy(TradingAlgorithm):
         # ungated copy here double-counted the same deviation in the
         # composite, with the lower-quality voice getting a free vote.
         trend_fade_decay: float = 0.35,
+        # The factor the trend guard below applies to a counter-trend vote.
+        # None, the default and every existing version, is trend_fade_decay,
+        # which also damps the Bollinger and IBS parts on every cycle, so
+        # raising that one setting changes the channel's mix (RSI against the
+        # two oscillators) as well as the guard. Set, this changes the guard
+        # alone.
+        trend_guard_decay: float | None = None,
         # How the trend guard reads the MA stack: "slow" (every existing
         # version) or "location" (the regime classifier's reading). See
         # algorithms.units.stack_context.
@@ -68,6 +75,7 @@ class MeanReversionStrategy(TradingAlgorithm):
         self._bollinger_weight = bollinger_weight
         self._ibs_weight = ibs_weight
         self._trend_fade_decay = trend_fade_decay
+        self._trend_guard_decay = trend_guard_decay
         self._stack_mode = stack_mode
         self._version = version
 
@@ -174,6 +182,9 @@ class MeanReversionStrategy(TradingAlgorithm):
         # by design in BOTH trends (review 20260924_224217 finding 1).
         trend_guard_applied = False
         trend_stack = "unavailable"
+        guard_decay = (
+            self._trend_fade_decay if self._trend_guard_decay is None else self._trend_guard_decay
+        )
         if (
             ind.ema_9 is not None
             and ind.ema_21 is not None
@@ -185,7 +196,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             if (trend_stack == "bear" and signal_value > 0) or (
                 trend_stack == "bull" and signal_value < 0
             ):
-                signal_value *= self._trend_fade_decay
+                signal_value *= guard_decay
                 trend_guard_applied = True
 
         # Build metadata by component name — immune to ordering shifts.
@@ -197,6 +208,7 @@ class MeanReversionStrategy(TradingAlgorithm):
         # Always present, so a cycle where the guard did not fire is countable
         # rather than indistinguishable from a build that lacks the guard.
         metadata["trend_guard_applied"] = trend_guard_applied
+        metadata["trend_guard_decay"] = guard_decay
         metadata["trend_stack"] = trend_stack
         metadata["stack_mode"] = self._stack_mode
         metadata["sma_cross"] = sma_cross(ind)
@@ -221,6 +233,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "bollinger_weight": self._bollinger_weight,
             "ibs_weight": self._ibs_weight,
             "trend_fade_decay": self._trend_fade_decay,
+            "trend_guard_decay": self._trend_guard_decay,
             "stack_mode": self._stack_mode,
         }
 
@@ -237,6 +250,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "bollinger_weight",
             "ibs_weight",
             "trend_fade_decay",
+            "trend_guard_decay",
             "stack_mode",
         ):
             if key in params:
@@ -254,6 +268,12 @@ class MeanReversionStrategy(TradingAlgorithm):
             decay = float(params["trend_fade_decay"])
             if not (0.0 <= decay <= 1.0):
                 errors.append(f"trend_fade_decay must be between 0.0 and 1.0, got {decay}")
+        if params.get("trend_guard_decay") is not None:
+            decay = float(params["trend_guard_decay"])
+            if not (0.0 <= decay <= 1.0):
+                errors.append(
+                    f"trend_guard_decay must be between 0.0 and 1.0 (or null), got {decay}"
+                )
         if "stack_mode" in params:
             errors.extend(validate_stack_mode(params["stack_mode"]))
         # Validate component weights sum to ~1.0 if all four are provided

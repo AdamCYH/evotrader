@@ -208,6 +208,15 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`mean_reversion.trend_guard_decay`.** One setting, `trend_fade_decay`,
+  did two jobs: it damped the Bollinger and IBS parts of the channel on every
+  cycle, and it was the factor the trend guard applied to a vote against the
+  daily stack. Raising it to let the guard speak louder also raised the two
+  oscillators against RSI on every cycle, so the channel became a different
+  mix rather than the same channel with a lighter guard. `trend_guard_decay`
+  sets the guard's factor alone (0 to 1); unset, it is `trend_fade_decay` and
+  every vote is unchanged. Votes record the factor their guard used
+  (`trend_guard_decay`).
 - **A `swing_failure_fade` channel, in shadow.** `swing_failure_reversal`
   fires long once a session low has held: higher lows after the flush and a
   close back above the flush bar's high. Nothing read the other side, so a
