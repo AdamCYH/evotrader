@@ -93,6 +93,21 @@ def _source_fingerprint() -> str:
 COMPOSITE_SOURCE_FINGERPRINT = _source_fingerprint()
 
 
+def _valid_vote_scales(raw: Any) -> dict[str, float]:
+    """The ``vote_scales`` entries in (0, 1]; anything else is dropped with a warning."""
+    scales: dict[str, float] = {}
+    for key, value in (raw or {}).items():
+        try:
+            scale = float(value)
+        except (TypeError, ValueError):
+            scale = 0.0
+        if 0.0 < scale <= 1.0:
+            scales[str(key)] = scale
+        else:
+            logger.warning("vote_scales[%s] = %r is outside (0, 1]; ignored", key, value)
+    return scales
+
+
 class CompositeStrategy(TradingAlgorithm):
     """Ensemble of multiple sub-strategies with configurable weighting.
 
@@ -118,6 +133,7 @@ class CompositeStrategy(TradingAlgorithm):
         regime_weights: dict[MarketRegime, dict[str, float]] | None = None,
         renormalize_on_abstain: bool = True,
         inverted_strategies: set[str] | None = None,
+        vote_scales: dict[str, float] | None = None,
     ) -> None:
         self._regime_adaptive = regime_adaptive
         self._version = version
@@ -144,6 +160,23 @@ class CompositeStrategy(TradingAlgorithm):
                     ", ".join(sorted(unknown)),
                 )
             logger.info("Inverting sub-signal(s): %s", ", ".join(sorted(self._inverted)))
+
+        # Full-vote magnitude per sub-strategy. A channel's emission is divided
+        # by its scale and clipped to +/-1 before aggregation, so a channel
+        # whose honest reads are small by construction can carry the
+        # authority its weight gives it: mean_reversion emits a few hundredths
+        # at mid-RSI (its Bollinger and IBS parts are damped and its trend
+        # guard decays a counter-trend read again) while momentum emits a few
+        # tenths, so at equal weight momentum authored nearly every call.
+        # Absent, or 1.0, is the plain weighted mean. The raw emission is kept
+        # in the channel's metadata (``raw_value``, as for an inverted one).
+        self._vote_scales = _valid_vote_scales(vote_scales)
+        unknown_scaled = set(self._vote_scales) - set(self._strategies)
+        if unknown_scaled:
+            logger.warning(
+                "vote_scales for strategies not in this composite: %s",
+                ", ".join(sorted(unknown_scaled)),
+            )
 
         # Normalize main weights
         self._weights = {name: weights.get(name, 0.0) for name in self._strategies}
@@ -200,11 +233,18 @@ class CompositeStrategy(TradingAlgorithm):
         return set(self._inverted)
 
     @property
+    def vote_scales(self) -> dict[str, float]:
+        """Sub-strategies whose emission is divided by a full-vote magnitude."""
+        return dict(self._vote_scales)
+
+    @property
     def description(self) -> str:
-        desc_parts = [
-            f"{name}({weight:.0%}{'*' if name in self._inverted else ''})"
-            for name, weight in self._weights.items()
-        ]
+        def part(name: str, weight: float) -> str:
+            star = "*" if name in self._inverted else ""
+            scale = f", s{self._vote_scales[name]:g}" if name in self._vote_scales else ""
+            return f"{name}({weight:.0%}{star}{scale})"
+
+        desc_parts = [part(name, weight) for name, weight in self._weights.items()]
         inv = f", inverted={sorted(self._inverted)}" if self._inverted else ""
         return f"Ensemble: {' + '.join(desc_parts)}, regime_adaptive={self._regime_adaptive}{inv}"
 
@@ -406,6 +446,11 @@ class CompositeStrategy(TradingAlgorithm):
                 # strategy's own output, not just the inverted contribution.
                 metadata = {**metadata, "inverted": True, "raw_value": sig.value}
                 value = -value
+            scale = self._vote_scales.get(name, 1.0)
+            if scale != 1.0 and abs(value) >= SIGNAL_EPSILON:
+                # A read below the vote threshold stays a non-vote.
+                metadata = {**metadata, "vote_scale": scale, "raw_value": sig.value}
+                value = max(-1.0, min(1.0, value / scale))
             weighted_sig = AlgoSignal(
                 name=sig.name,
                 value=value,
@@ -660,6 +705,8 @@ class CompositeStrategy(TradingAlgorithm):
             "regime_adaptive": self._regime_adaptive,
             "renormalize_on_abstain": self._renormalize_on_abstain,
         }
+        if self._vote_scales:
+            params["vote_scales"] = dict(self._vote_scales)
         for name in self._strategies:
             params[f"{name}_weight"] = self._weights.get(name, 0.0)
         for name, strategy in self._strategies.items():
@@ -667,6 +714,8 @@ class CompositeStrategy(TradingAlgorithm):
         return params
 
     def set_parameters(self, params: dict[str, Any]) -> None:
+        if isinstance(params.get("vote_scales"), dict):
+            self._vote_scales = _valid_vote_scales(params["vote_scales"])
         if "regime_adaptive" in params:
             self._regime_adaptive = bool(params["regime_adaptive"])
         if "renormalize_on_abstain" in params:

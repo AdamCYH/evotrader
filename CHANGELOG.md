@@ -208,6 +208,18 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`composite.vote_scales`: a channel's full-vote magnitude.** The composite
+  is a weighted mean of the channels' votes, and the call's author is the
+  largest weight times vote, but the votes are not on one scale: a
+  mean-reversion read is a few hundredths at mid-RSI by construction (its
+  Bollinger and IBS parts are damped, and its trend guard decays a
+  counter-trend read again) while a momentum read is a few tenths, so no
+  weight short of most of the ensemble let mean reversion author a call.
+  `composite.vote_scales` maps a channel to a scale in (0, 1]: its vote is
+  divided by the scale and clipped to +/-1 before aggregation, and the raw
+  emission stays in the vote's metadata (`raw_value`, `vote_scale`), as for
+  an inverted channel. A read below the vote threshold stays a non-vote.
+  Absent, every composite is unchanged.
 - **`mean_reversion.trend_guard_decay`.** One setting, `trend_fade_decay`,
   did two jobs: it damped the Bollinger and IBS parts of the channel on every
   cycle, and it was the factor the trend guard applied to a vote against the
