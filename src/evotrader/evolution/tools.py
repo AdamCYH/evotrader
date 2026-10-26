@@ -180,7 +180,11 @@ def _base_channel(author: str, known: list[str]) -> str:
 
 
 async def get_signal_calibration(
-    lookback_days: int = 60, ticker: str = "", horizon: str = "1d", instruction_version: str = ""
+    lookback_days: int = 60,
+    ticker: str = "",
+    horizon: str = "1d",
+    instruction_version: str = "",
+    algo_version: str = "",
 ) -> dict:
     """Score each witness's calls against what price actually did afterwards.
 
@@ -222,14 +226,47 @@ async def get_signal_calibration(
         instruction_version: Only calls made under this strategy
             instruction version (``"v102"``; empty = all). Rows from before
             the version was recorded, and algorithm-only rows, have none.
+        algo_version: Only calls made under this algorithm version
+            (``"v101_name"``; empty = all). Which channel authors a call
+            changes with the version, so a pooled record can answer a
+            different question than the version running now.
+    """
+    if not _attribution_store:
+        return {"error": "Attribution store not initialised"}
+    return await calibration_report(
+        _attribution_store,
+        lookback_days=lookback_days,
+        ticker=ticker,
+        horizon=horizon,
+        instruction_version=instruction_version,
+        algo_version=algo_version,
+    )
+
+
+async def calibration_report(
+    store: Any,
+    *,
+    lookback_days: int = 60,
+    ticker: str = "",
+    horizon: str = "1d",
+    instruction_version: str = "",
+    algo_version: str = "",
+    include_agreement: bool = True,
+) -> dict:
+    """:func:`get_signal_calibration` on a given attribution store.
+
+    The one aggregation of the scored record: the evolution agent's tool and
+    the strategy agent's channel record (``evolution.channel_record``) both
+    read it, so the two can never disagree about a count. Without
+    ``include_agreement`` the witnesses' agreement is not scored (``None``),
+    and nothing is logged about it: a caller that runs every cycle needs
+    neither.
     """
     import json
     import math
 
     from evotrader.backtest.attribution import attribute, score_calibration, score_source
-
-    if not _attribution_store:
-        return {"error": "Attribution store not initialised"}
+    from evotrader.db.signal_attribution import algo_version_name
 
     wanted = str(horizon).strip().lower()
     if wanted == "close":
@@ -240,10 +277,11 @@ async def get_signal_calibration(
         column = "forward_return_1d"
     cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
     want = str(ticker or "").strip().upper()
+    want_algo = algo_version_name(algo_version)
 
     rows = [
         r
-        for r in await _attribution_store.scored_rows(
+        for r in await store.scored_rows(
             limit=5000, horizon_column=column if column == "forward_return_close" else None
         )
         if r.get(column) is not None
@@ -253,6 +291,7 @@ async def get_signal_calibration(
             not instruction_version
             or r.get("strategy_instruction_version") == instruction_version.strip()
         )
+        and (not want_algo or r.get("algo_version") == want_algo)
     ]
     # Scoped to the same instrument, or the count answers a different question
     # than the table above it.
@@ -262,11 +301,11 @@ async def get_signal_calibration(
         # Only rows that will get a close: one decided after it never does.
         pending = [
             r
-            for r in await _attribution_store.pending_close_horizon(limit=5000)
+            for r in await store.pending_close_horizon(limit=5000)
             if close_horizon_session(r.get("timestamp")) is not None
         ]
     else:
-        pending = await _attribution_store.pending_scoring(horizon_days=1, limit=5000)
+        pending = await store.pending_scoring(horizon_days=1, limit=5000)
     waiting = len([r for r in pending if not want or str(r.get("ticker", "")).upper() == want])
 
     if len(rows) < 3:
@@ -275,6 +314,7 @@ async def get_signal_calibration(
             "n_waiting_on_horizon": waiting,
             "horizon": column,
             "instruction_version": instruction_version or None,
+            "algo_version": want_algo,
             "note": (
                 "Too few scored cycles to score anything. Rows are scored after "
                 "each cycle once their horizon elapses; if this stays at zero "
@@ -352,7 +392,7 @@ async def get_signal_calibration(
         "llm": _dirs("llm_direction", agent_side=True),
         "final": _dirs("final_direction", agent_side=True),
     }
-    report = attribute(sources, returns, stamps)
+    report = attribute(sources, returns, stamps) if include_agreement else None
 
     by_side: dict[str, dict] = {}
     for name in ("algo", "final"):
@@ -382,12 +422,22 @@ async def get_signal_calibration(
         if not calls:
             continue
         signed = [sources["algo"][i] / abs(sources["algo"][i]) * returns[i] for i in calls]
+        # Days and t from the same scorer as every other row, so an author's
+        # record says how many independent days it rests on.
+        clustered = _score(
+            author,
+            [sources["algo"][i] for i in calls],
+            [returns[i] for i in calls],
+            [stamps[i] for i in calls],
+        )
         by_author.append(
             {
                 "author": author,
                 "n_calls": len(calls),
+                "n_independent_days": clustered["n_independent_days"],
                 "hit_rate": _num(sum(1 for v in signed if v > 0) / len(signed)),
                 "mean_signed_return_pct": _num(sum(signed) / len(signed)),
+                "t_stat": clustered["t_stat"],
                 "qualifiers_seen": sorted(variants.get(author, []))[:8],
             }
         )
@@ -419,6 +469,7 @@ async def get_signal_calibration(
         },
         "horizon": column,
         "instruction_version": instruction_version or None,
+        "algo_version": want_algo,
         "units": "percent; +2.16 means +2.16%",
         "n_scored": len(rows),
         "n_waiting_on_horizon": waiting,
@@ -449,7 +500,7 @@ async def get_signal_calibration(
                     "earning its complexity."
                 ),
             }
-            if report.agreement is not None
+            if report is not None and report.agreement is not None
             else None
         ),
         "by_side": by_side,

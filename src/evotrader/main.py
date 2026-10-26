@@ -889,6 +889,33 @@ async def start(
             except Exception as e:
                 logger.warning("Could not refresh the agents' instructions: %s", e)
 
+            # The live channel record the strategy agent reads this cycle
+            # (evolution.channel_record), built once here from the scored
+            # attribution record and kept in the thought log, so a replay sees
+            # what the agent saw.
+            try:
+                from evotrader.agents.factory import set_channel_record
+                from evotrader.db.signal_attribution import SignalAttributionStore
+                from evotrader.evolution.channel_record import build_channel_record
+
+                record = await build_channel_record(
+                    SignalAttributionStore(db),
+                    config.settings.asset.primary_ticker,
+                    active_algo_version=algo_registry.get_active_version(),
+                )
+                set_channel_record(record)
+                if record:
+                    await thought_logger.record_event(
+                        session_id=session.id,
+                        agent_name="orchestrator",
+                        event_type="runtime",
+                        content=f"[runtime] channel record ({len(record)} chars)\n{record}",
+                        meta={"channel_record_chars": len(record)},
+                    )
+            except Exception as e:
+                set_channel_record("")
+                logger.warning("Could not build the channel record: %s", e)
+
             cycle_start_time = time.monotonic()
             stages_seen = set()
             last_strategy_text = ""
@@ -1374,6 +1401,9 @@ async def start(
                         # stored — so the calibration report can score each
                         # channel on its own calls, not only the one that led.
                         await store.backfill_channel_votes()
+                        # The algorithm version of each call, from the same
+                        # snapshot, so the record can be split by version.
+                        await store.backfill_algo_version()
                         # The participation scale and its counts, from the
                         # market-data response this cycle kept.
                         await store.backfill_participation()

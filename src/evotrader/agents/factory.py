@@ -912,6 +912,18 @@ class _LazyThoughtLogger:
                 await db.close()
 
 
+#: The live channel record (evolution.channel_record), rendered once at the start
+#: of each cycle and read by every model request of it. Empty until a cycle has
+#: built one, or when it could not be built.
+_CHANNEL_RECORD = ""
+
+
+def set_channel_record(text: str) -> None:
+    """The channel record the strategy agent reads this cycle (``""`` for none)."""
+    global _CHANNEL_RECORD
+    _CHANNEL_RECORD = text or ""
+
+
 def _strategy_dynamic_context(config: AppConfig) -> str:
     """Per-cycle context for the strategy agent, on EITHER runtime.
 
@@ -935,6 +947,11 @@ def _strategy_dynamic_context(config: AppConfig) -> str:
             parts.append(block)
     except Exception:  # continuity is valuable, a cycle is more so
         logger.debug("Could not attach the trading handoff", exc_info=True)
+    # The live record of which channel's calls have been right, so the agent
+    # reads base rates from the record rather than from a count copied into its
+    # instructions. Built once per cycle by the cycle's start (main.py).
+    if _CHANNEL_RECORD:
+        parts.append(_CHANNEL_RECORD)
     return "\n\n".join(p for p in parts if p)
 
 

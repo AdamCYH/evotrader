@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 _HORIZON_COLUMNS = ("forward_return_1d", "forward_return_5d", "forward_return_close")
 
 
+def algo_version_name(raw: Any) -> str | None:
+    """An algorithm version as the registry names it: ``composite_v101`` -> ``v101``."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    return text.removeprefix("composite_") or None
+
+
 class SignalAttributionStore:
     """Repository for the ``signal_attribution`` table."""
 
@@ -314,6 +322,47 @@ class SignalAttributionStore:
             logger.error("Failed to backfill channel votes: %s", e)
             return 0
 
+    async def backfill_algo_version(self, limit: int = 5000) -> int:
+        """Fill ``algo_version`` from the market snapshot of the same session.
+
+        Every snapshot names the algorithm version that produced it, so, as for
+        :meth:`backfill_channel_votes`, the row takes it from there: the latest
+        snapshot of the row's own instrument at or before the row, the
+        session's latest if clocks disagree. Idempotent: only rows still NULL
+        are touched. Returns the number of rows filled.
+        """
+        try:
+            async with self._db.transaction() as conn:
+                cur = await conn.execute(
+                    "SELECT id, timestamp, session_id, ticker FROM signal_attribution "
+                    "WHERE algo_version IS NULL AND session_id IS NOT NULL "
+                    "ORDER BY timestamp LIMIT ?",
+                    (limit,),
+                )
+                rows = [dict(r) for r in await cur.fetchall()]
+                filled = 0
+                for row in rows:
+                    snap = await conn.execute(
+                        "SELECT algo_version FROM market_snapshots "
+                        "WHERE session_id = ? AND algo_version IS NOT NULL "
+                        "AND (? IS NULL OR UPPER(ticker) = UPPER(?)) "
+                        "ORDER BY (timestamp <= ?) DESC, timestamp DESC LIMIT 1",
+                        (row["session_id"], row["ticker"], row["ticker"], row["timestamp"]),
+                    )
+                    found = await snap.fetchone()
+                    version = algo_version_name(found["algo_version"]) if found else None
+                    if not version:
+                        continue
+                    await conn.execute(
+                        "UPDATE signal_attribution SET algo_version = ? WHERE id = ?",
+                        (version, row["id"]),
+                    )
+                    filled += 1
+                return filled
+        except Exception as e:
+            logger.error("Failed to backfill algorithm versions: %s", e)
+            return 0
+
     async def backfill_participation(self, limit: int = 5000) -> int:
         """Fill the participation scale and its counts from the cycle's own record.
 
@@ -545,6 +594,8 @@ class SignalAttributionStore:
             "agent_absent",
             # The strategy instructions the call ran on (migration 0030).
             "strategy_instruction_version",
+            # The algorithm version that made the call (migration 0031).
+            "algo_version",
         ]
         if horizon_column is None:
             scored = "scored_at IS NOT NULL"

@@ -29,6 +29,25 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **The strategy agent reads the live channel record every cycle.** It had
+  no read of the calibration record, so every base rate it reasoned from
+  (which channel's calls have been right how often) was typed into its
+  instructions by hand: it changed only when they did, and a count copied
+  once could outlive the record it came from. Each cycle now renders that
+  record from the same aggregation as the evolution agent's
+  `get_signal_calibration` (by author, by channel and the final call by side,
+  to the session's close and to the next session's close, for the primary
+  instrument over the last 30 days, in about 2 KB at most), puts it in the
+  strategy agent's prompt beside the trading handoff on either runtime, and
+  keeps a copy in the thought log. A row resting on fewer than 5 independent
+  days is marked (days), one with |t| under 2 (chance): neither is a base
+  rate.
+- **Which algorithm version made each call.** Attribution rows record
+  `algo_version` (migration 0031), filled after each cycle from the session's
+  stored market snapshot, past rows too. `get_signal_calibration` takes
+  `algo_version` to score one version alone, and the channel record says how
+  many calls the active version has scored. Authors in the calibration report
+  now carry independent days and t like every other row.
 - **Which way momentum's fast reads point, whatever its slow read says.**
   `fast_dissent` is the two fast reads (price beyond EMA 9 by
   `fast_dissent_min_atr` daily ATRs, the daily MACD histogram outside its
