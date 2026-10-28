@@ -236,6 +236,7 @@ class StrategyLoader:
         inverted = {str(x) for x in raw_inverted} if isinstance(raw_inverted, list) else set()
         raw_scales = composite_config.get("vote_scales") or {}
         vote_scales = dict(raw_scales) if isinstance(raw_scales, dict) else {}
+        regime_weight_blend = composite_config.get("regime_weight_blend")
 
         # Parse regime_weights from config if present, mapping string keys
         # (e.g. "trending_bull") to MarketRegime enum members.
@@ -265,4 +266,5 @@ class StrategyLoader:
             renormalize_on_abstain=renormalize_on_abstain,
             inverted_strategies=inverted,
             vote_scales=vote_scales,
+            regime_weight_blend=regime_weight_blend,
         )

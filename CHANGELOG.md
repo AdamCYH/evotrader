@@ -227,6 +227,22 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`composite.regime_weight_blend: confidence`.** The regime tag picks a
+  whole weight vector, and the range-bound and trending vectors can order the
+  same channels oppositely, so on a pool of two daily channels a tag read at
+  under 0.5 confidence decided which one authored the call, and its sign,
+  while neither channel changed its read. Set to `confidence`, the tag's
+  vector is blended with the flat weights by the tag's confidence (c x regime
+  + (1 - c) x flat), and the factor is recorded as `regime_weight_blend`.
+  Unset, the tag picks the vector as before.
+- **`composite.regime_volatility_on_completed_bars`.** Live, the daily series
+  ends with today's bar still forming, and the regime's volatility test (the
+  ATR percentile) read it: the forming bar's true range grows through the
+  session, so it first dragged the 14-day ATR down and then let it back up,
+  and the tag changed during the day with every channel's read unchanged. Set
+  to true, the test reads the completed bars, as the backtest always has; the
+  moving averages, the ADX, the slope and the price-location override keep
+  reading the live print. Unset, nothing changes.
 - **`composite.vote_scales`: a channel's full-vote magnitude.** The composite
   is a weighted mean of the channels' votes, and the call's author is the
   largest weight times vote, but the votes are not on one scale: a

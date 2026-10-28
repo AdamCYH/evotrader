@@ -18,6 +18,18 @@ Units convention
   to the clamp ceiling on every call.
 - **daily_change_pct** and similar snapshot fields are in PERCENT
   (1.5 = 1.5%), matching the MarketSnapshot convention.
+
+Live or completed bars
+~~~~~~~~~~~~~~~~~~~~~~
+Live, the daily series ends with today's session still forming (the live
+print). The moving averages, the ADX, the SMA20 slope and the price-location
+override read it, because where price sits now is the point. The ATR
+percentile (step 1's volatility test) can read the COMPLETED bars instead
+(``volatility_on_completed_bars``; an algorithm version opts in): a forming
+bar's true range grows through the session, so the forming bar first drags
+the 14-day ATR down and then lets it back up, and one tape read range_bound
+at 09:30 and trending at 10:30 with every channel's read unchanged. The
+backtest classifies on completed bars throughout.
 """
 
 from __future__ import annotations
@@ -181,6 +193,7 @@ def detect_regime_rule_based(
     daily_change_pct: float | None = None,
     vwap: float | None = None,
     macd_histogram: float | None = None,
+    volatility_on_completed_bars: bool = False,
 ) -> RegimeClassification:
     """Classify market regime using rule-based thresholds.
 
@@ -207,6 +220,9 @@ def detect_regime_rule_based(
             Used for intraday trend override when ADX lags.
         vwap: Session VWAP value. Used with daily_change_pct for intraday override.
         macd_histogram: Current MACD histogram value. Confirms intraday trend direction.
+        volatility_on_completed_bars: The last bar is today's session, still
+            forming, and the volatility percentile reads the completed bars
+            before it. The caller decides: only it knows the bar is forming.
 
     Returns:
         ``RegimeClassification`` with regime, confidence, and diagnostics.
@@ -221,8 +237,13 @@ def detect_regime_rule_based(
     # Compute required indicators
     mas = compute_moving_averages(close)
     atr_series = compute_atr(high, low, close, period=14)
-    current_atr = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-    atr_pct = atr_percentile(current_atr, atr_series, lookback=60)
+    # The volatility test reads completed sessions (see "Live or completed
+    # bars" above): the forming bar's range is still growing.
+    vol_series = (
+        atr_series.iloc[:-1] if volatility_on_completed_bars and len(atr_series) > 1 else atr_series
+    )
+    current_atr = float(vol_series.iloc[-1]) if not vol_series.empty else 0.0
+    atr_pct = atr_percentile(current_atr, vol_series, lookback=60)
 
     # Compute ADX (simplified directional index)
     adx_value = _compute_adx_simplified(high, low, close, period=14)

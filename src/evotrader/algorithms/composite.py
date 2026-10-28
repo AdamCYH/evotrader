@@ -93,6 +93,16 @@ def _source_fingerprint() -> str:
 COMPOSITE_SOURCE_FINGERPRINT = _source_fingerprint()
 
 
+def _valid_regime_weight_blend(raw: Any) -> str | None:
+    """``"confidence"`` or None; anything else is ignored with a warning."""
+    if raw is None or str(raw).strip().lower() in ("", "none", "off"):
+        return None
+    if str(raw).strip().lower() == "confidence":
+        return "confidence"
+    logger.warning("regime_weight_blend = %r is not 'confidence' or none; ignored", raw)
+    return None
+
+
 def _valid_vote_scales(raw: Any) -> dict[str, float]:
     """The ``vote_scales`` entries in (0, 1]; anything else is dropped with a warning."""
     scales: dict[str, float] = {}
@@ -134,6 +144,7 @@ class CompositeStrategy(TradingAlgorithm):
         renormalize_on_abstain: bool = True,
         inverted_strategies: set[str] | None = None,
         vote_scales: dict[str, float] | None = None,
+        regime_weight_blend: str | None = None,
     ) -> None:
         self._regime_adaptive = regime_adaptive
         self._version = version
@@ -171,6 +182,16 @@ class CompositeStrategy(TradingAlgorithm):
         # Absent, or 1.0, is the plain weighted mean. The raw emission is kept
         # in the channel's metadata (``raw_value``, as for an inverted one).
         self._vote_scales = _valid_vote_scales(vote_scales)
+
+        # How much of the regime's weight vector a cycle uses. None, the
+        # default, is all of it: the tag picks the vector. "confidence" blends
+        # it with the flat weights by the regime's confidence, c x regime +
+        # (1 - c) x flat, so a tag read at under 0.5 confidence moves the
+        # weights less than halfway. Two vectors that order the same channels
+        # oppositely (range_bound and the trending ones on the two daily
+        # channels) otherwise let a coin-flip tag decide the call's author
+        # while no channel changed its read.
+        self._regime_weight_blend = _valid_regime_weight_blend(regime_weight_blend)
         unknown_scaled = set(self._vote_scales) - set(self._strategies)
         if unknown_scaled:
             logger.warning(
@@ -258,10 +279,15 @@ class CompositeStrategy(TradingAlgorithm):
         detailed = self.compute_detailed_signal(snapshot)
 
         # Build metadata identical to the previous standalone implementation
-        weights = self._get_regime_weights(snapshot.regime.regime)
+        confidence = getattr(snapshot.regime, "confidence", None)
+        weights = self._get_regime_weights(snapshot.regime.regime, confidence)
         metadata: dict[str, float | str | bool] = {
             "regime": snapshot.regime.regime.value,
         }
+        blend = self._regime_blend_factor(confidence)
+        if blend is not None:
+            # The share of the regime's own vector in this cycle's weights.
+            metadata["regime_weight_blend"] = round(blend, 4)
         # ── BUILD PROVENANCE ─────────────────────────────────
         # Which engine produced this number. Without it, a deployed process
         # lagging the repo is detectable only by hand-reconstructing the
@@ -426,7 +452,9 @@ class CompositeStrategy(TradingAlgorithm):
            on the composite value (clamped to [0, 1.5]).  This makes gating
            semantics (e.g. event-window blackout) enforceable.
         """
-        weights = self._get_regime_weights(snapshot.regime.regime)
+        weights = self._get_regime_weights(
+            snapshot.regime.regime, getattr(snapshot.regime, "confidence", None)
+        )
         sub_signals = []
 
         for name, strategy in self._strategies.items():
@@ -693,12 +721,32 @@ class CompositeStrategy(TradingAlgorithm):
             participation_denominator=participation_denominator,
         )
 
-    def _get_regime_weights(self, regime: MarketRegime) -> dict[str, float]:
-        """Get strategy weights adjusted for the current market regime."""
+    def _regime_blend_factor(self, confidence: float | None) -> float | None:
+        """The regime vector's share under ``regime_weight_blend``; None when it is off."""
+        if not self._regime_adaptive or self._regime_weight_blend is None or confidence is None:
+            return None
+        return max(0.0, min(1.0, float(confidence)))
+
+    def _get_regime_weights(
+        self, regime: MarketRegime, confidence: float | None = None
+    ) -> dict[str, float]:
+        """Get strategy weights adjusted for the current market regime.
+
+        With ``regime_weight_blend`` set, the regime's vector is blended with
+        the flat weights by ``confidence``. Both are normalised, so the blend
+        sums to 1 too.
+        """
         if not self._regime_adaptive:
             return self._weights
 
-        return self._regime_weights_map.get(regime, self._weights)
+        regime_w = self._regime_weights_map.get(regime, self._weights)
+        c = self._regime_blend_factor(confidence)
+        if c is None:
+            return regime_w
+        return {
+            name: c * regime_w.get(name, 0.0) + (1.0 - c) * self._weights.get(name, 0.0)
+            for name in self._strategies
+        }
 
     def get_parameters(self) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -707,6 +755,8 @@ class CompositeStrategy(TradingAlgorithm):
         }
         if self._vote_scales:
             params["vote_scales"] = dict(self._vote_scales)
+        if self._regime_weight_blend:
+            params["regime_weight_blend"] = self._regime_weight_blend
         for name in self._strategies:
             params[f"{name}_weight"] = self._weights.get(name, 0.0)
         for name, strategy in self._strategies.items():
@@ -716,6 +766,8 @@ class CompositeStrategy(TradingAlgorithm):
     def set_parameters(self, params: dict[str, Any]) -> None:
         if isinstance(params.get("vote_scales"), dict):
             self._vote_scales = _valid_vote_scales(params["vote_scales"])
+        if "regime_weight_blend" in params:
+            self._regime_weight_blend = _valid_regime_weight_blend(params["regime_weight_blend"])
         if "regime_adaptive" in params:
             self._regime_adaptive = bool(params["regime_adaptive"])
         if "renormalize_on_abstain" in params:

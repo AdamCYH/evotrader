@@ -156,7 +156,11 @@ def _get_strategy_loader() -> Any:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def compute_indicators(ohlcv_json: str, forming_last_bar: bool = False) -> dict:
+def compute_indicators(
+    ohlcv_json: str,
+    forming_last_bar: bool = False,
+    regime_volatility_on_completed_bars: bool = False,
+) -> dict:
     """Compute all technical indicators from OHLCV price data.
 
     Takes raw OHLCV data (JSON array of {open, high, low, close, volume}
@@ -173,6 +177,9 @@ def compute_indicators(ohlcv_json: str, forming_last_bar: bool = False) -> dict:
             collapsed, so the volume-based readings (relative volume, the
             daily VWAP) come from the last COMPLETED bar, which their
             ``prior_session`` labels then describe exactly.
+        regime_volatility_on_completed_bars: With a forming last bar, the
+            regime's volatility test reads the completed bars (an algorithm
+            version's ``composite.regime_volatility_on_completed_bars``).
     """
     import pandas as pd
 
@@ -207,7 +214,13 @@ def compute_indicators(ohlcv_json: str, forming_last_bar: bool = False) -> dict:
     rvol = compute_relative_volume(volume)
 
     # Regime detection
-    regime = detect_regime_rule_based(close, high, low, volume)
+    regime = detect_regime_rule_based(
+        close,
+        high,
+        low,
+        volume,
+        volatility_on_completed_bars=forming_last_bar and regime_volatility_on_completed_bars,
+    )
 
     # Extract latest values
     i = len(close) - 1
@@ -1040,6 +1053,17 @@ async def _fetch_session_bars(ticker: str, start: datetime, end: datetime) -> li
     return _parse_hist_candles(raw, end, require_timestamp=True)
 
 
+def _regime_volatility_on_completed_bars() -> bool:
+    """Whether the active algorithm version reads the regime's volatility on completed bars."""
+    if not _algo_registry:
+        return False
+    try:
+        params = _algo_registry.load_parameters() or {}
+    except Exception:
+        return False
+    return bool((params.get("composite") or {}).get("regime_volatility_on_completed_bars"))
+
+
 async def gather_market_data(ticker: str) -> dict:
     """Fetch market data, compute indicators, and run the composite algo.
 
@@ -1113,9 +1137,12 @@ async def gather_market_data(ticker: str) -> dict:
 
     # ── 3. Compute indicators ──────────────────────────────────
     indicators: dict = {}
+    completed_bar_volatility = _regime_volatility_on_completed_bars()
     if candles:
         indicators = compute_indicators(
-            json.dumps(candles), forming_last_bar=daily_bar_mode == "forming_bar_appended"
+            json.dumps(candles),
+            forming_last_bar=daily_bar_mode == "forming_bar_appended",
+            regime_volatility_on_completed_bars=completed_bar_volatility,
         )
         if "error" in indicators:
             errors.append(f"Indicator computation failed: {indicators['error']}")
@@ -1282,6 +1309,8 @@ async def gather_market_data(ticker: str) -> dict:
             daily_change_pct=daily_change_pct,
             vwap=float(indicators["vwap"]),
             macd_histogram=float(indicators["macd_histogram"]),
+            volatility_on_completed_bars=completed_bar_volatility
+            and indicators.get("daily_bar_mode") == "forming_bar_appended",
         )
         if re_regime.regime.value != "range_bound":
             regime_type = re_regime.regime.value
