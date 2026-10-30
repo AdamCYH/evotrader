@@ -409,3 +409,54 @@ class TestWhenItRuns:
         )
         statuses = [(p["stop_price"], p["status"]) for p in await _plans(db)]
         assert statuses == [(90.0, "expired"), (91.0, "planned")]
+
+
+class TestWhetherItIsOn:
+    """Its state in the log, and a waiting plan named when it is off.
+
+    A filled entry once sat an hour with no stop: the follow-up was off,
+    nothing said so, and the next cycle found the shares bare with the plan's
+    levels nowhere in what it read.
+    """
+
+    def test_the_line_says_on_or_off_and_why(self, broker) -> None:
+        assert protection_followup.state_line() == (
+            "protection follow-up: ON (interval 300 s, window 60 min)"
+        )
+        broker.config.settings.protection_followup.enabled = False
+        assert "OFF (protection_followup.enabled is false" in protection_followup.state_line()
+        broker.config.settings.protection_followup.enabled = True
+        broker.config.settings.mode = TradingMode.SIM  # no practice broker
+        assert "OFF (a dry run with no practice broker" in protection_followup.state_line()
+
+    async def test_each_cycle_start_logs_it(self, broker, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.INFO, logger=protection_followup.__name__):
+            await protection_followup.protect_at_cycle_start()
+        assert "protection follow-up: ON" in caplog.text
+
+    async def test_off_a_filled_entrys_plan_is_named_for_the_agents(self, broker, db) -> None:
+        broker.config.settings.protection_followup.enabled = False
+        await tools.record_trade(_entry())
+        await _fill()
+        assert await protection_followup.protect_at_cycle_start() == 0
+        assert _placed(broker) == []
+        handoff = handoff_path(broker.config.data_dir).read_text()
+        assert (
+            "SYSTEM: PROTECTION PLAN WAITING for e1n7ry-0 (XYZ): stop 2 @ 90, take-profit 1 @ 108 "
+            "gtc; 3 shares are under no order and the follow-up is OFF: place these this cycle."
+        ) in handoff
+        assert (await _plans(db))[0]["status"] == "planned", "it only reads"
+
+    async def test_off_nothing_is_named_that_needs_nothing(self, broker, db) -> None:
+        broker.config.settings.protection_followup.enabled = False
+        await tools.record_trade(_entry())
+        assert await protection_followup.waiting_plan_lines() == [], "not filled yet"
+        await _fill()
+        later = datetime.now(UTC) + timedelta(minutes=121)
+        assert await protection_followup.waiting_plan_lines(later) == [], "too old to act on"
+        await tools.record_trade(
+            _protective("STOP_LOSS", 3, "st0p-0001", stop_price=90.0, related_trade_id=1)
+        )
+        assert await protection_followup.waiting_plan_lines() == [], "already covered"

@@ -63,8 +63,21 @@ class SourceScore:
 
     @property
     def is_informative(self) -> bool:
-        """True only when the edge clears significance after clustering."""
-        return bool(np.isfinite(self.t_stat) and self.t_stat > SIGNIFICANCE_T)
+        """True when the record clears significance after clustering, either way.
+
+        ``direction`` says which way. A witness that is reliably wrong
+        (t <= -2) is information too, the candidate for inversion, not chance;
+        under |t| 2 the honest reading is "not distinguishable from chance",
+        never "slightly better".
+        """
+        return bool(np.isfinite(self.t_stat) and abs(self.t_stat) >= SIGNIFICANCE_T)
+
+    @property
+    def direction(self) -> str | None:
+        """``predicts`` when the calls' t is above 0, ``anti_predicts`` below, else None."""
+        if not np.isfinite(self.t_stat) or self.t_stat == 0:
+            return None
+        return "predicts" if self.t_stat > 0 else "anti_predicts"
 
     @property
     def edge_over_baseline(self) -> float:
@@ -72,7 +85,11 @@ class SourceScore:
         return self.hit_rate - self.baseline_hit_rate
 
     def __str__(self) -> str:
-        mark = "informative" if self.is_informative else "not distinguishable from chance"
+        mark = (
+            f"informative ({self.direction})"
+            if self.is_informative
+            else "not distinguishable from chance"
+        )
         return (
             f"{self.source:<24} n={self.n_calls:<5} events={self.n_events:<5} "
             f"hit={self.hit_rate:.1%} (base {self.baseline_hit_rate:.1%})  "

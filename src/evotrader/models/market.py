@@ -243,6 +243,17 @@ class MarketSnapshot(BaseModel):
             "All _pct fields use percent units: 1.0 = 1%."
         ),
     )
+    session_day_change_pct: float | None = Field(
+        None,
+        description=(
+            "The regular session's change in percent, set after the close when the "
+            "quote's last is an after-hours trade and the active algorithm version "
+            "reads the day from the regular session "
+            "(composite.day_change_regular_after_hours). Momentum's divergence test "
+            "and the regime's intraday override read it in place of "
+            "daily_change_pct. None otherwise."
+        ),
+    )
     gap_pct: float | None = Field(
         None,
         description=(

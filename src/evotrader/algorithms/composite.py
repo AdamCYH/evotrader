@@ -452,9 +452,9 @@ class CompositeStrategy(TradingAlgorithm):
            on the composite value (clamped to [0, 1.5]).  This makes gating
            semantics (e.g. event-window blackout) enforceable.
         """
-        weights = self._get_regime_weights(
-            snapshot.regime.regime, getattr(snapshot.regime, "confidence", None)
-        )
+        confidence = getattr(snapshot.regime, "confidence", None)
+        weights = self._get_regime_weights(snapshot.regime.regime, confidence)
+        blend = self._regime_blend_factor(confidence)
         sub_signals = []
 
         for name, strategy in self._strategies.items():
@@ -719,6 +719,8 @@ class CompositeStrategy(TradingAlgorithm):
             participation_scale=participation_scale,
             participation_numerator=participation_numerator,
             participation_denominator=participation_denominator,
+            regime=snapshot.regime.regime.value,
+            regime_weight_blend=round(blend, 4) if blend is not None else None,
         )
 
     def _regime_blend_factor(self, confidence: float | None) -> float | None:

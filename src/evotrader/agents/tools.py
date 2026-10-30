@@ -9,6 +9,7 @@ uses the docstring to understand when and how to call each tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -349,7 +350,12 @@ async def _enrich_event_context(
 ) -> None:
     """Populate event context fields on the indicators dict.
 
-    Fetches earnings calendar data via MCP and computes:
+    Reads report dates from the broker's earnings calendar and, when the active
+    algorithm version sets ``composite.event_dates_every_source``, from the
+    broker's earnings results and every date remembered from earlier reads and
+    from the agents' tool replies (``tools.event_calendar``); the operator's
+    ``asset.known_events`` always count. ``event_context`` on the indicators
+    says what each source gave and which date was used. Computes:
     - ``hours_to_event``: hours until the nearest upcoming top-constituent
       earnings report (or None if no relevant event is near).
     - ``hours_since_event``: hours since the most recent top-constituent
@@ -365,49 +371,24 @@ async def _enrich_event_context(
     ``_event_state`` dict for cross-cycle persistence.
     """
     global _event_state
+    from evotrader.tools import event_calendar
 
-    # ── 1. Fetch earnings calendar ─────────────────────────────
-    try:
-        raw_earnings = await _call_mcp_tool("get_earnings_calendar", {})
-    except Exception as e:
-        logger.info("Event context: earnings calendar fetch failed: %s", e)
-        return
+    # What the event context found and why, on every path: the channel reads
+    # only "no event data", which cannot tell a rate-limited calendar from one
+    # that does not list the stock.
+    every_source = _composite_setting("event_dates_every_source")
+    diag: dict[str, Any] = {
+        "calendar": "ok",
+        "calendar_rows": 0,
+        "calendar_matched": 0,
+        "every_source": every_source,
+        "source": None,
+        "nearest_report_dt": None,
+        "latest_report_dt": None,
+    }
+    indicators["event_context"] = diag
 
-    if not raw_earnings:
-        logger.info("Event context: get_earnings_calendar returned empty/null")
-        return
-
-    # Detect Alpha Vantage rate-limit payloads that masquerade as valid
-    # 200 OK responses. These contain an "Information" or "Note" key
-    # instead of actual data, or return corrupted CSV-like strings.
-    if isinstance(raw_earnings, dict) and ("Information" in raw_earnings or "Note" in raw_earnings):
-        logger.info(
-            "Event context: earnings calendar rate-limited (payload keys: %s)",
-            list(raw_earnings.keys()),
-        )
-        return
-
-    # Parse earnings rows from the MCP response.
-    # Robinhood returns { data: { results: [ { symbol, report, ... }, ... ] } }
-    earnings_list = (
-        raw_earnings.get("data", {}).get("results", []) if isinstance(raw_earnings, dict) else []
-    )
-    if not earnings_list and isinstance(raw_earnings, dict):
-        # Alternate structure: flat list under "data"
-        data = raw_earnings.get("data")
-        if isinstance(data, list):
-            earnings_list = data
-
-    if not earnings_list:
-        logger.info(
-            "Event context: no earnings rows after parsing (raw keys: %s)",
-            list(raw_earnings.keys())
-            if isinstance(raw_earnings, dict)
-            else type(raw_earnings).__name__,
-        )
-        return
-
-    # ── 2. Filter to symbols that can actually move what we trade ──
+    # ── 1. Symbols that can actually move what we trade ────────
     # Resolved from the traded ticker's live holdings rather than a hardcoded
     # list, so this follows `asset.primary_ticker` wherever it points.
     relevant = await relevant_symbols(_config)
@@ -424,79 +405,114 @@ async def _enrich_event_context(
             ticker,
         )
     relevant_set = set(relevant)
+    diag["relevant_symbols"] = sorted(relevant_set)[:10]
 
-    upcoming: list[dict] = []
-    past: list[dict] = []
-
-    for row in earnings_list:
-        symbol = (row.get("symbol") or "").upper()
-        if symbol not in relevant_set:
-            continue
-
-        # Parse the report datetime.  Robinhood formats vary:
-        # "report_date" (date string) or "report" with nested fields.
-        report_dt = None
-        for dt_key in ("report_date", "expected_report_date", "date"):
-            raw_dt = row.get(dt_key)
-            if raw_dt:
-                try:
-                    # Try ISO datetime first, then date-only
-                    if "T" in str(raw_dt):
-                        report_dt = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
-                    else:
-                        # Date-only: assume 16:00 ET (after-market close)
-                        from evotrader.tools.market_hours import ET
-
-                        report_dt = datetime.strptime(str(raw_dt), "%Y-%m-%d").replace(
-                            hour=16, tzinfo=ET
-                        )
-                        report_dt = report_dt.astimezone(UTC)
-                except Exception:
-                    continue
-                break
-
-        if report_dt is None:
-            continue
-
-        # Determine if this is upcoming or past based on actual EPS
-        eps_actual = (
-            row.get("eps", {}).get("actual")
-            if isinstance(row.get("eps"), dict)
-            else row.get("eps_actual")
+    # ── 2. The broker's earnings calendar ──────────────────────
+    found: list[dict] = []
+    raw_earnings = None
+    try:
+        raw_earnings = await _call_mcp_tool("get_earnings_calendar", {})
+    except Exception as e:
+        diag["calendar"] = "fetch_failed"
+        logger.info("Event context: earnings calendar fetch failed: %s", e)
+    if diag["calendar"] == "ok":
+        # A rate-limit payload masquerades as a valid 200 OK reply: an
+        # "Information" or "Note" key instead of data.
+        if not raw_earnings:
+            diag["calendar"] = "calendar_empty"
+        elif isinstance(raw_earnings, dict) and (
+            "Information" in raw_earnings or "Note" in raw_earnings
+        ):
+            diag["calendar"] = "calendar_rate_limited"
+    if diag["calendar"] == "ok":
+        # Robinhood returns { data: { results: [ { symbol, report, ... }, ... ] } }
+        rows = event_calendar.calendar_rows(raw_earnings)
+        diag["calendar_rows"] = len(rows)
+        matched = [
+            r
+            for r in rows
+            if isinstance(r, dict) and str(r.get("symbol") or "").upper() in relevant_set
+        ]
+        dates, unparsed = event_calendar.dates_from_rows(matched, "broker_calendar")
+        diag["calendar_matched"] = len(matched)
+        found += dates
+        if not rows:
+            diag["calendar"] = "calendar_empty"
+        elif not matched:
+            diag["calendar"] = "no_symbol_match"
+        elif not dates and unparsed:
+            diag["calendar"] = "parse_failed"
+    if diag["calendar"] != "ok":
+        logger.info(
+            "Event context: broker earnings calendar gave no %s date (%s, %d rows)",
+            ticker,
+            diag["calendar"],
+            diag["calendar_rows"],
         )
 
-        if eps_actual is None and report_dt > now:
-            upcoming.append({"symbol": symbol, "report_dt": report_dt})
-        elif report_dt <= now:
-            past.append({"symbol": symbol, "report_dt": report_dt})
+    # ── 3. Every other source, when the algorithm version reads them ──
+    # The broker's per-symbol earnings results carry the next report date
+    # (with its am/pm timing) when the calendar lists nothing; a date once
+    # seen, here or in an agent's tool reply (event_calendar.note_reply), is
+    # remembered, so it resolves through an outage and after the print.
+    if every_source and _config is not None:
+        checked = []
+        for symbol in list(dict.fromkeys(relevant))[: event_calendar.MAX_RESULTS_SYMBOLS]:
+            if not event_calendar.needs_check(_config.data_dir, symbol, now):
+                continue
+            try:
+                raw_results = await _call_mcp_tool("get_earnings_results", {"symbol": symbol})
+            except Exception as e:
+                logger.info("Event context: earnings results for %s failed: %s", symbol, e)
+                continue
+            if raw_results is None:
+                continue
+            found += [
+                d
+                for d in event_calendar.dates_from_rows(
+                    event_calendar.calendar_rows(raw_results), "broker_earnings_results"
+                )[0]
+                if d["symbol"] == symbol
+            ]
+            checked.append(symbol)
+        event_calendar.remember(_config.data_dir, found, now=now, checked=tuple(checked))
+        found += event_calendar.recall(_config.data_dir, relevant_set)
+    # The operator's own dates count whatever the version.
+    known = event_calendar.known_events(_config, relevant_set)
+    found += known
+    if known:
+        diag["known_events"] = len(known)
 
-    # ── 3. Compute hours_to_event / hours_since_event ──────────
+    # ── 4. hours_to_event / hours_since_event ──────────────────
+    upcoming, latest = event_calendar.nearest(found, now)
     if upcoming:
-        nearest = min(upcoming, key=lambda r: r["report_dt"])
-        hours_to = (nearest["report_dt"] - now).total_seconds() / 3600
+        hours_to = (upcoming["report_dt"] - now).total_seconds() / 3600
         indicators["hours_to_event"] = round(hours_to, 2)
-        indicators["event_type"] = "earnings"
+        indicators["event_type"] = upcoming.get("type", "earnings")
+        diag["source"] = upcoming["source"]
+        diag["nearest_report_dt"] = upcoming["report_dt"].isoformat()
         logger.info(
-            "Event context: %s earnings in %.1fh",
-            nearest["symbol"],
+            "Event context: %s earnings in %.1fh (%s)",
+            upcoming["symbol"],
             hours_to,
+            upcoming["source"],
         )
     else:
         logger.info(
             "Event context: no upcoming top-constituent earnings found "
-            "(parsed %d total rows, %d matched constituents)",
-            len(earnings_list),
-            len(upcoming) + len(past),
+            "(parsed %d calendar rows, %d matched; %d dates from every source)",
+            diag["calendar_rows"],
+            diag["calendar_matched"],
+            len(found),
         )
-
-    if past:
-        latest = max(past, key=lambda r: r["report_dt"])
+    if latest:
         hours_since = (now - latest["report_dt"]).total_seconds() / 3600
         indicators["hours_since_event"] = round(hours_since, 2)
-        if "event_type" not in indicators:
-            indicators["event_type"] = "earnings"
+        indicators.setdefault("event_type", latest.get("type", "earnings"))
+        diag["latest_report_dt"] = latest["report_dt"].isoformat()
+        diag["source"] = diag["source"] or latest["source"]
 
-    # ── 4. Fetch ATM IV from option chain ──────────────────────
+    # ── 5. Fetch ATM IV from option chain ──────────────────────
     try:
         raw_chain = await _call_mcp_tool("get_option_chains", {"underlying_symbol": ticker})
         if raw_chain:
@@ -588,7 +604,7 @@ async def _enrich_event_context(
     except Exception as e:
         logger.info("Event context: IV fetch failed: %s", e)
 
-    # ── 5. Persist / recall atm_iv_pre_event ───────────────────
+    # ── 6. Persist / recall atm_iv_pre_event ───────────────────
     atm_iv = indicators.get("atm_iv_30dte")
     hours_to = indicators.get("hours_to_event")
     hours_since = indicators.get("hours_since_event")
@@ -716,6 +732,11 @@ def _composite_provenance(detailed) -> dict:
         "participation_numerator": getattr(detailed, "participation_numerator", None),
         "participation_denominator": getattr(detailed, "participation_denominator", None),
         "attenuation_applied": _scale < 1.0,
+        # The regime tag the weights were looked up for, and the regime
+        # vector's share of them under composite.regime_weight_blend (None
+        # when the blend is off): a blended cycle states its own weights.
+        "regime": getattr(detailed, "regime", None),
+        "regime_weight_blend": getattr(detailed, "regime_weight_blend", None),
     }
 
 
@@ -755,6 +776,65 @@ async def _agentic_portfolio() -> dict | None:
     }
 
 
+def _session_changes(quote_data: dict | None, *, regular_day_after_hours: bool) -> dict:
+    """The quote's session, the regular session's change and the move since its last trade.
+
+    After the close ``last`` can be an after-hours trade, and the day's change
+    from it mixes the session with the evening: a small fall in the session
+    and a larger one after the close read as one large fall "on the day". Returns
+    ``price_session``, ``regular_change_pct`` (the regular session's last trade
+    against the previous close), ``extended_change_pct`` (``last`` against that
+    trade, when ``last`` is an extended-hours price) and
+    ``session_day_change_pct``: the regular change, after hours, when
+    ``regular_day_after_hours`` (the active algorithm version's
+    ``composite.day_change_regular_after_hours``), else None. The regime's
+    intraday override and momentum read that one in place of the day's change.
+    """
+    q = quote_data or {}
+    price_session = q.get("price_session")
+    last, last_regular = q.get("last"), q.get("last_regular")
+    prev_close = q.get("previous_close") or q.get("adjusted_previous_close")
+    regular = extended = None
+    if last_regular and prev_close and prev_close > 0:
+        regular = round((last_regular - prev_close) / prev_close * 100, 4)
+    if (
+        price_session in ("pre_market", "after_hours", "overnight", "closed")
+        and last_regular
+        and last
+    ):
+        extended = round((last - last_regular) / last_regular * 100, 4)
+    return {
+        "price_session": price_session,
+        "regular_change_pct": regular,
+        "extended_change_pct": extended,
+        "session_day_change_pct": (
+            regular
+            if regular_day_after_hours and price_session == "after_hours" and regular is not None
+            else None
+        ),
+    }
+
+
+def _price_session(quote: McpEquityQuote, live: float, now: datetime) -> str:
+    """The session the quote's ``last`` was printed in.
+
+    ``regular`` in regular hours. Outside them ``regular_close`` when ``last``
+    is the regular session's last trade (there is no extended-hours trade or
+    live book to read), and otherwise the session now (``pre_market``,
+    ``after_hours``, ``overnight``, ``closed``): an extended-hours trade, or
+    that session's book. After the close ``last`` can be an after-hours trade
+    well away from the close, still stamped with the close's time.
+    """
+    from evotrader.tools.market_hours import MarketSession, get_current_session
+
+    session = get_current_session(now)
+    if session == MarketSession.REGULAR:
+        return "regular"
+    if quote.reg > 0 and live == quote.reg and quote.ext <= 0:
+        return "regular_close"
+    return session.value
+
+
 async def _fetch_quote(ticker: str, now: datetime) -> tuple[dict, list[str]]:
     """Current quote for *ticker*, plus any non-fatal problems fetching it.
 
@@ -773,11 +853,19 @@ async def _fetch_quote(ticker: str, now: datetime) -> tuple[dict, list[str]]:
         if results:
             q = results[0].get("quote") or {}
             quote = McpEquityQuote(**q)
+            live = quote.resolve_live_price()
             return {
                 "ticker": ticker,
                 "bid": quote.bid or quote.reg or 0.0,
                 "ask": quote.ask or quote.reg or 0.0,
-                "last": quote.resolve_live_price(),
+                "last": live,
+                # Which session `last` was printed in, and the two trades it was
+                # chosen from: after the close it can be an after-hours trade,
+                # and the regular session's last trade is then only here.
+                "price_session": _price_session(quote, live, now),
+                "last_regular": quote.reg or None,
+                "last_extended": quote.ext or None,
+                "last_extended_time": q.get("venue_last_non_reg_trade_time"),
                 "volume": float(q.get("volume") or 0),
                 "timestamp": q.get("updated_at")
                 or q.get("venue_last_trade_time")
@@ -1053,15 +1141,20 @@ async def _fetch_session_bars(ticker: str, start: datetime, end: datetime) -> li
     return _parse_hist_candles(raw, end, require_timestamp=True)
 
 
-def _regime_volatility_on_completed_bars() -> bool:
-    """Whether the active algorithm version reads the regime's volatility on completed bars."""
+def _composite_setting(key: str) -> bool:
+    """Whether the active algorithm version switches on ``composite.<key>``."""
     if not _algo_registry:
         return False
     try:
         params = _algo_registry.load_parameters() or {}
     except Exception:
         return False
-    return bool((params.get("composite") or {}).get("regime_volatility_on_completed_bars"))
+    return bool((params.get("composite") or {}).get(key))
+
+
+def _regime_volatility_on_completed_bars() -> bool:
+    """Whether the active algorithm version reads the regime's volatility on completed bars."""
+    return _composite_setting("regime_volatility_on_completed_bars")
 
 
 async def gather_market_data(ticker: str) -> dict:
@@ -1283,6 +1376,20 @@ async def gather_market_data(ticker: str) -> dict:
         if prev_close > 0:
             daily_change_pct = round(((curr_close - prev_close) / prev_close) * 100, 4)
 
+    # The regular session's change, and the move since its last trade when
+    # `last` is an extended-hours price (_session_changes).
+    changes = _session_changes(
+        quote_data,
+        regular_day_after_hours=_composite_setting("day_change_regular_after_hours"),
+    )
+    price_session = changes["price_session"]
+    regular_change_pct = changes["regular_change_pct"]
+    extended_change_pct = changes["extended_change_pct"]
+    session_day_change_pct = changes["session_day_change_pct"]
+    regime_day_change = (
+        session_day_change_pct if session_day_change_pct is not None else daily_change_pct
+    )
+
     # ── 4b. Re-detect regime with intraday trend override ──────
     # The initial regime was computed from daily OHLCV bars only (inside
     # compute_indicators). When daily ADX lags a strong single-session
@@ -1291,7 +1398,7 @@ async def gather_market_data(ticker: str) -> dict:
     # detection so the intraday override can fire.
     if (
         regime_type == "range_bound"
-        and daily_change_pct is not None
+        and regime_day_change is not None
         and indicators.get("vwap") is not None
         and indicators.get("macd_histogram") is not None
         and candles
@@ -1306,7 +1413,7 @@ async def gather_market_data(ticker: str) -> dict:
             high=df["high"].astype(float),
             low=df["low"].astype(float),
             volume=df["volume"].astype(float),
-            daily_change_pct=daily_change_pct,
+            daily_change_pct=regime_day_change,
             vwap=float(indicators["vwap"]),
             macd_histogram=float(indicators["macd_histogram"]),
             volatility_on_completed_bars=completed_bar_volatility
@@ -1336,6 +1443,7 @@ async def gather_market_data(ticker: str) -> dict:
         "recent_candles": intraday_candles if intraday_candles else [],
         "daily_candles": candles if candles else [],
         "daily_change_pct": daily_change_pct,
+        "session_day_change_pct": session_day_change_pct,
         "gap_pct": gap_pct,
     }
 
@@ -1576,6 +1684,13 @@ async def gather_market_data(ticker: str) -> dict:
         "indicators": indicators,
         "regime": regime_dict,
         "daily_change_pct": daily_change_pct,
+        # Which session the quote's last was printed in (regular, pre_market,
+        # after_hours, regular_close, ...), the regular session's change, and
+        # the move since its last trade when last is an extended-hours price.
+        # After the close, daily_change_pct can include an after-hours trade.
+        "price_session": price_session,
+        "regular_change_pct": regular_change_pct,
+        "extended_change_pct": extended_change_pct,
         "gap_pct": gap_pct,
         # The same two numbers as text, for anything that summarises them.
         "daily_change_display": _pct_display(daily_change_pct),
@@ -2321,6 +2436,7 @@ def normalize_market_snapshot(data: dict) -> dict:
             return None
 
     daily_change_pct = _coerce_pct(data.get("daily_change_pct"))
+    session_day_change_pct = _coerce_pct(data.get("session_day_change_pct"))
     gap_pct = _coerce_pct(data.get("gap_pct"))
 
     # Last-resort derivation so a missing field cannot silently disable
@@ -2338,6 +2454,7 @@ def normalize_market_snapshot(data: dict) -> dict:
         "indicators": normalized_ind,
         "regime": normalized_reg,
         "daily_change_pct": daily_change_pct,
+        "session_day_change_pct": session_day_change_pct,
         "gap_pct": gap_pct,
         "options_context": normalized_opt,
         "reference": _normalized_reference(data.get("reference")),
@@ -5671,6 +5788,77 @@ async def assess_order_book(ticker: str) -> dict:
     except Exception as e:
         logger.error("Level II assessment failed: %s", e, exc_info=True)
         return {"available": False, "error": str(e)}
+
+
+#: Order states that do not change again.
+_ORDER_ENDED_STATES = frozenset({"filled", "cancelled", "canceled", "rejected", "failed"})
+#: The longest await_order_state waits, so a turn cannot hang on it.
+_AWAIT_ORDER_MAX_SECONDS = 120.0
+
+
+async def await_order_state(
+    order_id: str,
+    account_number: str = "",
+    timeout_seconds: int = 90,
+    poll_seconds: int = 10,
+) -> dict:
+    """Wait for an order to fill or end, checking the broker every few seconds.
+
+    Use this after placing an entry instead of calling get_equity_orders again
+    and again: a turn cannot pause between calls, so repeated checks land
+    seconds apart and a limit order that fills a minute later looks unfilled.
+    This checks every ``poll_seconds`` for up to ``timeout_seconds`` and
+    returns as soon as the order is filled, cancelled, rejected or failed, or
+    with its last state when the time is up.
+
+    Returns ``state``, ``filled`` (true once filled), ``average_price`` (the
+    fill price), ``cumulative_quantity`` (shares filled so far), ``quantity``,
+    ``elapsed_seconds`` and ``polls``. ``state`` is null when the broker never
+    returned the order.
+
+    Args:
+        order_id: The broker's order id, as place_equity_order returned it.
+        account_number: The agentic account number the order was placed in.
+        timeout_seconds: The longest to wait, 5 to 120 seconds.
+        poll_seconds: Seconds between checks, 2 to 30.
+    """
+    timeout = max(
+        5.0,
+        min(float(90 if timeout_seconds is None else timeout_seconds), _AWAIT_ORDER_MAX_SECONDS),
+    )
+    poll = max(2.0, min(float(10 if poll_seconds is None else poll_seconds), 30.0))
+    arguments = {"order_id": order_id}
+    account = account_number or await _agentic_account_number()
+    if account:
+        arguments["account_number"] = account
+    started = time.monotonic()
+    order: dict = {}
+    polls = 0
+    while True:
+        polls += 1
+        raw = await _call_mcp_tool("get_equity_orders", arguments)
+        data = raw.get("data") if isinstance(raw, dict) else None
+        orders = (data.get("orders") or data.get("results") or []) if isinstance(data, dict) else []
+        found = next(
+            (o for o in orders if isinstance(o, dict) and _order_id_of(o) == order_id), None
+        )
+        if found is not None:
+            order = found
+        state = str(order.get("state") or "").lower() or None
+        elapsed = time.monotonic() - started
+        if state in _ORDER_ENDED_STATES or elapsed + poll > timeout:
+            break
+        await asyncio.sleep(poll)
+    return {
+        "order_id": order_id,
+        "state": state,
+        "filled": state == "filled",
+        "average_price": order.get("average_price"),
+        "cumulative_quantity": order.get("cumulative_quantity"),
+        "quantity": order.get("quantity"),
+        "elapsed_seconds": round(elapsed, 1),
+        "polls": polls,
+    }
 
 
 async def get_earnings_history(ticker: str) -> dict:

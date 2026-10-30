@@ -64,7 +64,7 @@ is gone).
 | news_sentiment | `create_news_sentiment_agent` | `get_trade_history`, `query_user_notes`, `get_earnings_history` | Research role (Alpha Vantage, Yahoo Finance), filtered by `mcp.tool_filter` |
 | strategy | `create_strategy_agent` | `_STRATEGY_TOOLS`: `compute_risk_budget`, `gather_market_data`, `get_open_positions`, `get_ticker_snapshot`, `log_signal_attribution`, `query_past_trades`, `query_user_notes`, `store_learning`, `update_trading_handoff` | None |
 | risk_manager | `create_risk_manager_agent` | `check_risk_limits`, `check_option_risk_limits`, `get_open_positions`, `get_performance_summary` | None |
-| execution (instructions in `executor/`) | `create_execution_agent` | `record_trade`, `get_open_positions`, `get_market_status`, `assess_order_book` | Trading role, filtered by `mcp.tool_filter`, behind the risk gate |
+| execution (instructions in `executor/`) | `create_execution_agent` | `record_trade`, `get_open_positions`, `get_market_status`, `assess_order_book`, `await_order_state` | Trading role, filtered by `mcp.tool_filter`, behind the risk gate |
 | evolution | `create_evolution_agent` | Its own set from `evolution/tools.py` plus a few read tools; nothing that trades | None |
 
 - The four stage agents are `LlmAgent`s with `mode="single_turn"` and no

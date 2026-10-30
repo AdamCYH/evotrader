@@ -129,6 +129,18 @@ class CompositeAlgoSignal(BaseModel):
         default_factory=list,
         description="Pool members whose effective weight hit MAX_AMPLIFICATION.",
     )
+    # The regime tag the weights were looked up for, and the share of that
+    # regime's own vector in them under ``composite.regime_weight_blend`` (the
+    # rest is the flat weights). The cycle's payload is built from this model,
+    # so without them a blended cycle's weights could only be reconstructed by
+    # hand.
+    regime: str | None = Field(default=None, description="The regime tag the weights used.")
+    regime_weight_blend: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="The regime vector's share of the weights; None when the blend is off.",
+    )
 
     @property
     def direction(self) -> SignalDirection:

@@ -16,6 +16,7 @@ either 1% or 100% — both humans and LLM agents found that confusing.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Any, Self
 
@@ -383,6 +384,19 @@ class InstrumentInfo(BaseModel):
     )
 
 
+class KnownEvent(BaseModel):
+    """A scheduled event the operator states (``asset.known_events``)."""
+
+    symbol: str = Field(description="The symbol whose event it is, e.g. the traded stock.")
+    at: datetime = Field(
+        description=(
+            "When it lands. A time with no zone is US Eastern; for an earnings report "
+            "after the close, 16:00 that day."
+        )
+    )
+    type: str = Field("earnings", description="What it is; the event channel reads earnings.")
+
+
 class AssetConfig(BaseModel):
     """Target asset configuration."""
 
@@ -422,6 +436,16 @@ class AssetConfig(BaseModel):
             "Pick one that trades in the primary's sessions, so both prior closes are "
             "the same moment. Null (the default) fetches nothing, and the channel "
             "abstains."
+        ),
+    )
+
+    known_events: list[KnownEvent] = Field(
+        default_factory=list,
+        description=(
+            "Scheduled events the operator states, for the event context: each a "
+            "symbol and when it lands. They count beside the broker's calendar "
+            "whatever the algorithm version (tools.event_calendar), so a report the "
+            "calendar does not list is still seen. Empty by default."
         ),
     )
 

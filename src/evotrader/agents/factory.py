@@ -41,6 +41,7 @@ from evotrader.agents.instruction_context import (
 from evotrader.agents.temporal_context import build_temporal_context
 from evotrader.agents.tools import (
     assess_order_book,
+    await_order_state,
     check_option_risk_limits,
     check_risk_limits,
     compute_risk_budget,
@@ -292,6 +293,12 @@ class SanitizedMcpTool(McpTool):
         args = _strip_unknown_params(args, self.raw_mcp_tool)
         args = _prefer_latest_sort(args, self.raw_mcp_tool, self._curation_config)
         result = await super().run_async(args=args, tool_context=tool_context)
+        # Report dates in a reply are remembered for the event context, whichever
+        # agent asked: a research calendar can list the traded stock's earnings
+        # when the broker's calendar does not (tools.event_calendar).
+        from evotrader.tools.event_calendar import note_reply
+
+        note_reply(getattr(self, "name", ""), args, result, self._app_config)
         # Shape unbounded payloads on receipt. Some endpoints (Alpha Vantage's
         # economic indicators) have no date-range parameter, so asking for less
         # is not an option — see evotrader.mcp.response_curators.
@@ -1096,7 +1103,13 @@ def create_execution_agent(
 
     MCP roles: ``trading`` (for placing orders via broker).
     """
-    tools: list = [record_trade, get_open_positions, get_market_status, assess_order_book]
+    tools: list = [
+        record_trade,
+        get_open_positions,
+        get_market_status,
+        assess_order_book,
+        await_order_state,
+    ]
     if mcp_toolsets:
         tools.extend(
             _filtered_for_agent(config, "execution", _tools_for_roles(mcp_toolsets, ["trading"]))
@@ -1802,6 +1815,7 @@ def get_tool_metadata(tool_name: str, config: AppConfig) -> dict[str, Any]:
     # Set of all local tools (including standard and evolution tools)
     local_tools = {
         # Standard tools
+        "await_order_state",
         "check_option_risk_limits",
         "check_risk_limits",
         "compute_indicators",

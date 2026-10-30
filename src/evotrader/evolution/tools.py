@@ -205,7 +205,9 @@ async def get_signal_calibration(
        70% of the time can make a coin flip look like an edge. ``baseline_hit_rate``
        is what always calling the majority direction would have scored.
     2. ``witnesses`` — ``t_stat`` is clustered by day, so several cycles inside
-       one move count once. ``informative`` is ``t > 2``; below that, the honest
+       one move count once. ``informative`` is ``|t| >= 2`` and ``direction``
+       says which way: ``predicts`` (t above 0) or ``anti_predicts`` (below, a
+       witness reliably wrong: the inversion candidate). Under |t| 2 the honest
        reading is "not distinguishable from chance", NOT "slightly better".
     3. ``by_side`` — a with-trend long record routinely hides a short record
        that loses every time, and vice versa.
@@ -371,6 +373,7 @@ async def calibration_report(
             "information_coefficient": _num(sc.information_coefficient),
             "t_stat": _num(sc.t_stat),
             "informative": sc.is_informative,
+            "direction": sc.direction,
             **({} if enough else {"note": f"fewer than {min_calls} calls — nothing to score yet"}),
         }
 

@@ -55,6 +55,12 @@ asset:
     top_n: 15               # largest holdings treated as relevant
     min_weight_pct: 1.0     # plus anything at or above this % of the fund
     cache_ttl_days: 7       # how long a resolved holdings list is reused
+  # Scheduled events you know of, for the event-window channel, beside the
+  # broker's earnings calendar: each a symbol and when it lands (a time with no
+  # zone is US Eastern; an after-the-close report at 16:00). Empty = none.
+  #   known_events:
+  #     - {symbol: "AAPL", at: "2026-04-30T16:00:00"}
+  known_events: []
 
 # Position sizing. The risk budget — the most capital a position may use — is
 # this target divided by the instrument's realised annual volatility, kept
@@ -251,7 +257,9 @@ require_trade_approval: true       # each order waits for your click in the cons
 # was approved with (record_trade's protection_plan) when the fill lands, instead
 # of at the next cycle. Places real orders without an agent, only adds orders
 # (never cancels one), and does nothing while the console asks for approval of
-# every order (above). Off until you switch it on.
+# every order (above). Off until you switch it on. The log says which at start-up
+# and at every cycle start; while it is off, a filled entry whose plan waits is
+# named, with its levels, in the trading handoff the agents read.
 protection_followup:
   enabled: false
   interval_seconds: 300            # how often it checks for the fill

@@ -153,6 +153,18 @@ class TestTheBlend:
         )
         assert sig.metadata["regime_weight_blend"] == 0.47
 
+    def test_the_detailed_signal_and_the_payload_carry_it(self) -> None:
+        """The cycle's payload is built from the detailed signal: it states its blend."""
+        from evotrader.agents.tools import _composite_provenance
+
+        snap = _snapshot(MarketRegime.RANGE_BOUND, 0.457)
+        detailed = _composite(regime_weight_blend="confidence").compute_detailed_signal(snap)
+        assert (detailed.regime, detailed.regime_weight_blend) == ("range_bound", 0.457)
+        payload = _composite_provenance(detailed)
+        assert (payload["regime"], payload["regime_weight_blend"]) == ("range_bound", 0.457)
+        off = _composite().compute_detailed_signal(snap)
+        assert (off.regime, off.regime_weight_blend) == ("range_bound", None)
+
     def test_not_regime_adaptive_ignores_it(self) -> None:
         comp = _composite(regime_weight_blend="confidence", regime_adaptive=False)
         assert comp._get_regime_weights(MarketRegime.RANGE_BOUND, 0.44) == pytest.approx(FLAT)

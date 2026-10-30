@@ -35,7 +35,12 @@ cycle's executor gets to it. The two never overlap: they take turns on one
 lock, so a plan is placed once.
 
 Off unless ``protection_followup.enabled``: it places real orders without an
-agent.
+agent. Which it is goes in the log at start-up and at every cycle start
+(``state_line``). While it is off, a cycle start names each filled entry whose
+plan waits in the trading handoff, with the plan's levels, so the cycle's
+agents place them instead of working the levels out again: a filled entry
+once sat an hour with no stop, the follow-up off, and the next cycle found the
+shares bare and the plan nowhere in what it read.
 """
 
 from __future__ import annotations
@@ -96,6 +101,29 @@ def _switched_on() -> bool:
     return not cfg.settings.dry_run.enabled or tools._sim_proxy is not None
 
 
+def state_line() -> str:
+    """Whether the follow-up is on, in one line for the log."""
+    tools = _tools()
+    cfg = tools._config
+    if cfg is None:
+        return "protection follow-up: OFF (not set up)"
+    settings = cfg.settings.protection_followup
+    if _switched_on():
+        return (
+            f"protection follow-up: ON (interval {settings.interval_seconds} s, "
+            f"window {settings.max_minutes} min)"
+        )
+    why = (
+        "protection_followup.enabled is false"
+        if not settings.enabled
+        else "a dry run with no practice broker"
+    )
+    return (
+        f"protection follow-up: OFF ({why}; a fill after its cycle is protected "
+        "by the next cycle's agents)"
+    )
+
+
 def _note(line: str) -> None:
     """A SYSTEM line in the trading handoff, for the next cycle."""
     from evotrader.tools.trading_handoff import append_system_line
@@ -121,10 +149,75 @@ async def start_followup() -> bool:
 
 
 async def protect_at_cycle_start() -> int:
-    """At a cycle's start, before its agents: protect fills that waited. Returns plans left."""
-    if not _switched_on() or not await ProtectionPlanStore(_tools()._db).planned():
+    """At a cycle's start, before its agents: protect fills that waited. Returns plans left.
+
+    Off, it places nothing and names the filled entries whose plans wait
+    (``waiting_plan_lines``) in the trading handoff the agents read.
+    """
+    logger.info(state_line())
+    if not _switched_on():
+        lines = await waiting_plan_lines()
+        if lines:
+            from evotrader.tools.trading_handoff import append_system_line
+
+            logger.warning(
+                "Protection follow-up is OFF and %d filled entr%s wait for protection: %s",
+                len(lines),
+                "y" if len(lines) == 1 else "ies",
+                " | ".join(lines),
+            )
+            for line in lines:
+                append_system_line(_tools()._config.data_dir, line)
+        return 0
+    if not await ProtectionPlanStore(_tools()._db).planned():
         return 0
     return await followup_once(at_cycle_start=True)
+
+
+async def waiting_plan_lines(now: datetime | None = None) -> list[str]:
+    """One line per filled entry whose plan waits and whose shares are under no order.
+
+    The plans the follow-up would act on now: the entry filled, the plan is
+    within the follow-up's window (an older one is the next cycle's to
+    decide), and some of the ticker's shares are under no stop or
+    take-profit. Reads only; places nothing.
+    """
+    tools = _tools()
+    cfg = tools._config
+    if cfg is None or tools._db is None or tools._journal is None:
+        return []
+    plans = await ProtectionPlanStore(tools._db).planned()
+    if not plans:
+        return []
+    now = now or datetime.now(UTC)
+    max_age = timedelta(minutes=cfg.settings.protection_followup.max_minutes + 60)
+    coverage: dict[str, dict] | None = None
+    lines = []
+    for plan in plans:
+        if plan.get("entry_trade_id") is None:
+            continue
+        if now - datetime.fromisoformat(plan["created_at"]) > max_age:
+            continue
+        entry = await tools._journal.get_trade_by_id(int(plan["entry_trade_id"]))
+        if not entry or str(entry.get("order_status") or "FILLED").upper() != "FILLED":
+            continue
+        if coverage is None:
+            coverage = await tools._protective_coverage()
+        need = float((coverage.get(plan["ticker"]) or {}).get("no_order_qty") or 0)
+        if need <= 0:
+            continue
+        take = (
+            f", take-profit {float(plan['tp_qty']):g} @ {float(plan['tp_limit_price']):g}"
+            if plan.get("tp_qty") and plan.get("tp_limit_price")
+            else ""
+        )
+        lines.append(
+            f"PROTECTION PLAN WAITING for {plan['entry_order_id'][:8]} ({plan['ticker']}): "
+            f"stop {float(plan['stop_qty']):g} @ {float(plan['stop_price']):g}{take} gtc; "
+            f"{need:g} shares are under no order and the follow-up is OFF: "
+            "place these this cycle."
+        )
+    return lines
 
 
 async def run_followup(interval_seconds: float, max_minutes: float) -> None:

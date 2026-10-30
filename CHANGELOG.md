@@ -29,6 +29,42 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **Which session the quote's price is from.** After the close the quote's
+  `last` is an after-hours trade whenever the book is wide (right for
+  pricing), but it kept the close's timestamp, nothing said which session it
+  came from, and the day's change was worked out from it, so a small fall in
+  the session and a larger one after the close read as one large fall. The
+  quote now carries `price_session` (`regular`, `pre_market`, `after_hours`,
+  `overnight`, or `regular_close` when the price is the regular session's
+  last trade), `last_regular`, `last_extended` and `last_extended_time`, and
+  the market data adds `regular_change_pct` (the regular session's last trade
+  against the previous close) and `extended_change_pct` (the price against
+  that trade, when it is an extended-hours price) beside `daily_change_pct`,
+  which is unchanged.
+- **What the event context found, on every path.** The event-window channel
+  read only "no event data" whether the earnings calendar was rate-limited,
+  empty, listed no row for the traded symbol or had a date that did not
+  parse. The indicators now carry `event_context`: what the calendar gave
+  (`calendar`, `calendar_rows`, `calendar_matched`), which date was used and
+  from which source (`source`, `nearest_report_dt`, `latest_report_dt`), and
+  whether the algorithm version reads every source (`every_source`). The
+  option-chain IV is now read even when the calendar fails.
+- **The payload states its regime blend.** `regime_weight_blend` was in the
+  composite's simple signal only, while the cycle's payload is built from the
+  detailed one, so a blended cycle's weights had to be reconstructed by hand.
+  The detailed signal and the payload's `algo_signal` now carry `regime` (the
+  tag the weights used) and `regime_weight_blend`.
+- **The executor can wait for a fill: `await_order_state`.** Its
+  instructions say to re-check a placed entry for about 90 seconds, but a
+  model's turn cannot pause: repeated status checks land seconds apart and
+  the turn ends long before a resting limit entry fills, so such an entry
+  always ended its cycle unfilled as far as the executor knew. The new
+  tool checks the broker every `poll_seconds` (2 to 30) for up to
+  `timeout_seconds` (5 to 120) and returns once the order is filled,
+  cancelled, rejected or failed, or with its last state when the time is up:
+  `state`, `filled`, `average_price`, `cumulative_quantity`, `quantity`,
+  `elapsed_seconds`, `polls`.
+
 - **The strategy agent reads the live channel record every cycle.** It had
   no read of the calibration record, so every base rate it reasoned from
   (which channel's calls have been right how often) was typed into its
@@ -191,6 +227,20 @@ folder layout; each entry says what you need to do.
 
 ### Added — off until you switch it on
 
+- **`asset.known_events`: event dates you state.** Each entry is a symbol
+  and when the event lands (`at`; a time with no zone is US Eastern, an
+  after-the-close report at 16:00) and an optional `type` (earnings). They
+  count for the event-window channel beside the broker's calendar, whatever
+  the algorithm version. Empty by default.
+- **Whether the protection follow-up is on, in the log.** The start-up log
+  and every cycle's record say `protection follow-up: ON (interval 300 s,
+  window 60 min)` or `OFF (...)` with the reason. While it is off, a cycle
+  start names each filled entry whose plan waits, with shares under no order,
+  in the trading handoff: `PROTECTION PLAN WAITING for <order> (<ticker>):
+  stop <qty> @ <price>, take-profit <qty> @ <price> gtc; ... place these this
+  cycle`, so the agents place the approved levels instead of working them out
+  again. It places nothing itself.
+
 - **A bitcoin-proxy channel, recording only.** `btc_lead_residual` reads the
   traded ticker against a second instrument named in `asset.reference_ticker`
   (for a bitcoin-holding stock, a spot bitcoin fund): the ticker's return
@@ -226,6 +276,27 @@ folder layout; each entry says what you need to do.
   Off by default: it places real orders without an agent.
 
 ### Added — off unless an algorithm version sets them
+
+- **`composite.event_dates_every_source`.** The event context's one source
+  was the broker's market-wide earnings calendar, which can list nothing for
+  the traded stock in the days before its report while the broker's own
+  earnings results have the date, verified, with its timing. Set to true,
+  the event context also reads the broker's earnings results for each
+  relevant symbol (at most twice a day each) and every report date seen
+  before, there or in an agent's tool reply (a research earnings calendar, an
+  events tool), kept in `trading/event_dates.json` in the data folder for a
+  week after the date passes, so a date resolves through an outage and after
+  the print, when a forward calendar drops it. A date-only report is placed
+  at 16:00 US Eastern, or 08:00 when its timing says before the open. Unset,
+  the calendar alone counts, as before; the dates seen are recorded either
+  way.
+- **`composite.day_change_regular_after_hours`.** Set to true, after the
+  close, when the quote's price is an after-hours trade, momentum's
+  divergence test and the regime's intraday override read the regular
+  session's change (`session_day_change_pct` on the snapshot; momentum
+  records `day_change_source`) instead of the day's change from the
+  after-hours trade. Every other channel, and `daily_change_pct`, are
+  unchanged. Unset, nothing changes.
 
 - **`composite.regime_weight_blend: confidence`.** The regime tag picks a
   whole weight vector, and the range-bound and trending vectors can order the
@@ -664,6 +735,14 @@ folder layout; each entry says what you need to do.
 
 ### Changed
 
+- **The calibration's `informative` reads both ways.** It was true only for a
+  record whose t-statistic was above 2, so a channel reliably wrong (t below
+  -2) read as "not informative" while the channel record marked the same row
+  as clear of chance, and it is exactly the inversion candidate a reviewer
+  looks for. `informative` is now `|t| >= 2`, and `get_signal_calibration`
+  rows add `direction`: `predicts` (t above 0) or `anti_predicts` (below).
+  The backtest's attribution summary says which (`informative
+  (anti_predicts)`).
 - **Telemetry keeps 30 days by default** (`logging.telemetry_retention_days`;
   0 keeps everything). `telemetry.db` holds the full text of every model call
   and nothing ever removed it, so it grew without limit. Older records are

@@ -37,12 +37,21 @@ class TestScoreSource:
         assert not s.is_informative
 
     def test_inverted_predictor_shows_negative_t(self) -> None:
+        """Reliably wrong is information too: informative, the other way."""
         rng = np.random.default_rng(2)
         f = rng.normal(0.001, 0.02, 300)
         d = -np.sign(f)  # always wrong
         s = score_source("inverted", d, f, _stamps(300))
         assert s.t_stat < 0
-        assert not s.is_informative
+        assert s.is_informative
+        assert s.direction == "anti_predicts"
+        assert "informative (anti_predicts)" in str(s)
+
+    def test_direction_follows_the_sign_of_t(self) -> None:
+        rng = np.random.default_rng(0)
+        f = rng.normal(0, 0.02, 300)
+        assert score_source("oracle", np.sign(f), f, _stamps(300)).direction == "predicts"
+        assert score_source("tiny", [1.0], [0.01], _stamps(1)).direction is None
 
     def test_abstentions_are_excluded(self) -> None:
         f = [0.01] * 100

@@ -229,7 +229,14 @@ class MomentumStrategy(TradingAlgorithm):
         # moved the composite across the strategy's strong band by itself
         # (2026-09-23: 0.275 <-> 0.555 with the MA/MACD internals constant).
         divergence_applied = False
-        day_change = snapshot.daily_change_pct
+        # After the close, the regular session's change when the market data
+        # set it (composite.day_change_regular_after_hours): an after-hours
+        # trade is the next session's move, not today's.
+        day_change = (
+            snapshot.session_day_change_pct
+            if getattr(snapshot, "session_day_change_pct", None) is not None
+            else snapshot.daily_change_pct
+        )
         day_change_available = day_change is not None
         atr = ind.atr_14
         prev_close = snapshot.quote.previous_close if snapshot.quote else None
@@ -369,6 +376,13 @@ class MomentumStrategy(TradingAlgorithm):
                 # could not be evaluated at all (None input).
                 "day_change_available": day_change_available,
                 "day_change_pct": day_change if day_change is not None else "N/A",
+                # "regular_session" after the close under
+                # composite.day_change_regular_after_hours, else "quote".
+                "day_change_source": (
+                    "regular_session"
+                    if getattr(snapshot, "session_day_change_pct", None) is not None
+                    else "quote"
+                ),
                 "divergence_threshold_pct": self._divergence_day_change_pct,
                 "divergence_threshold_atr": self._divergence_day_change_atr,
                 "divergence_threshold_source": threshold_source,

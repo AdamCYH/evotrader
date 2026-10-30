@@ -626,6 +626,11 @@ async def start(
             sim_proxy=sim_proxy,
             strategy_loader=strategy_loader,
         )
+        # Whether a fill after its cycle is protected without an agent
+        # (tools.protection_followup): said here and at every cycle start.
+        from evotrader.tools.protection_followup import state_line
+
+        logger.info(state_line())
 
         # ── Bind the asset context ──────────────────────────────
         # One source of truth for "what are we trading". Modules that need the
@@ -888,6 +893,20 @@ async def start(
                 )
             except Exception as e:
                 logger.warning("Could not refresh the agents' instructions: %s", e)
+
+            # Whether a fill after this cycle gets its protection without an
+            # agent (tools.protection_followup), in the cycle's own record.
+            try:
+                from evotrader.tools.protection_followup import state_line
+
+                await thought_logger.record_event(
+                    session_id=session.id,
+                    agent_name="orchestrator",
+                    event_type="runtime",
+                    content=f"[runtime] {state_line()}",
+                )
+            except Exception as e:
+                logger.warning("Could not record the protection follow-up's state: %s", e)
 
             # The live channel record the strategy agent reads this cycle
             # (evolution.channel_record), built once here from the scored

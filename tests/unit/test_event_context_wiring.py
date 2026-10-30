@@ -795,8 +795,11 @@ class TestEnrichEventContextHelper:
         with patch.object(tools, "_call_mcp_tool", side_effect=mock_mcp):
             await tools._enrich_event_context(indicators, "QQQ", now)
 
-        # Original indicators untouched, no event fields added
+        # No event fields added; the diagnostic says why
+        diag = indicators.pop("event_context")
         assert indicators == {"rsi_14": 45.0}
+        assert diag["calendar"] == "calendar_empty"
+        assert diag["source"] is None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -833,9 +836,10 @@ class TestEnrichAlphaVantageRateLimit:
         with patch.object(tools, "_call_mcp_tool", side_effect=mock_mcp):
             await tools._enrich_event_context(indicators, "QQQ", now)
 
-        # No event fields should be set — rate-limit was detected
+        # No event fields should be set — rate-limit was detected, and said
         assert "hours_to_event" not in indicators
         assert "event_type" not in indicators
+        assert indicators.pop("event_context")["calendar"] == "calendar_rate_limited"
         assert indicators == {"rsi_14": 45.0}
 
     @pytest.mark.asyncio
