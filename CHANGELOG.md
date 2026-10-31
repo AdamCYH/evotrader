@@ -8,6 +8,15 @@ folder layout; each entry says what you need to do.
 
 ### Added — in the console
 
+- **A log line for each slow console request.** When a page felt slow there
+  was no record of which request was slow or why. The console now logs each
+  request that takes longer than half a second
+  (`EVOTRADER_SLOW_REQUEST_SECONDS`; 0 turns it off): `Slow console request:
+  GET /api/trades?limit=500 200 took 2.31 s (first byte at 2.25 s, 240 KB;
+  3 other requests open; app running)`. The first byte says when the server
+  began its answer, so the rest of the time was spent sending it; the open
+  requests and the app's state (idle, running a cycle, evolving) say what else
+  was going on. The live event stream is never counted.
 - **The combined signal on the account chart.** A **Signal** button on the
   Account / P&L chart splits it into two panes on the same dates: the curve on
   top, each day lightly tinted green or red by the way the day's average signal

@@ -392,6 +392,7 @@ works for one run. An empty value (`KEY=`) means not set.
 | `DASHBOARD_PASSWORD` | Console password. Empty means no login at all — see [SECURITY.md](../SECURITY.md) |
 | `EVOTRADER_PORT` | Console port (default 8080) |
 | `EVOTRADER_HOST` | Where the console listens: empty = only this computer (`127.0.0.1`); `0.0.0.0` = other devices too, which requires `DASHBOARD_PASSWORD` |
+| `EVOTRADER_SLOW_REQUEST_SECONDS` | The console logs each request that takes longer than this many seconds, with what the app was doing at the time (default 0.5; 0 = off) |
 | `EVOTRADER_CORS_ORIGINS` | Comma-separated web addresses allowed cross-origin access to the API, for a separate front end in development (default: none) |
 | `EVOTRADER_DATA_DIR` | Data folder location (`--data-dir` overrides it for one run) |
 | `EVOTRADER_SIGNIN_DIR` | Where the broker sign-in is kept (default `~/.evotrader`); the test suite points it at a temporary folder |

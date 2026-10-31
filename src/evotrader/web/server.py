@@ -29,6 +29,8 @@ from evotrader.indicators import normalize_snapshot_payload
 from evotrader.tools.asset_context import primary_ticker
 from evotrader.tools.market_hours import ET
 from evotrader.utils import select_agentic_account, utc_timestamp_to_et_date
+from evotrader.web.slow_requests import SlowRequestLog
+from evotrader.web.slow_requests import limit_from_env as slow_request_limit
 
 logger = logging.getLogger("evotrader.web")
 
@@ -532,6 +534,14 @@ def create_app(
             allow_methods=["*"],
             allow_headers=["Authorization", "Content-Type"],
         )
+
+    # One log line for each request slower than EVOTRADER_SLOW_REQUEST_SECONDS
+    # (default half a second), with what the app was doing at the time.
+    app.add_middleware(
+        SlowRequestLog,
+        limit_seconds=slow_request_limit(),
+        app_status=lambda: getattr(app.state, "status", ""),
+    )
 
     # In-memory queues for state sharing
     app.state.db = db
