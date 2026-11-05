@@ -1382,6 +1382,27 @@ def create_execution_agent(
                     "fix": "Resubmit the identical order with time_in_force='gtc'.",
                 }
 
+            # 0b. A protective stop is stop_market: a stop_limit does not sell
+            #     through a gap. In code, like the time in force above.
+            from evotrader.callbacks.risk_gate import protective_stop_type_violation
+
+            type_violation = protective_stop_type_violation(args)
+            if type_violation:
+                logger.error(
+                    "[RISK GATE] BLOCKED: %s — %s", gate.summarise_order(args), type_violation
+                )
+                return {
+                    "allowed": False,
+                    "action": "PROTECTIVE_STOP_NOT_MARKET",
+                    "violations": [type_violation],
+                    "retryable": True,
+                    "error_class": "POLICY",
+                    "fix": (
+                        "Resubmit with type='stop_market', the same stop_price and "
+                        "quantity, and no limit_price."
+                    ),
+                }
+
             # 1. Check constitution violations
             # The held quantity is what lets the gate tell a position-reducing
             # sell from a short sale. Without it every exit reads as a short.

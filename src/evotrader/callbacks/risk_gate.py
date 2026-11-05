@@ -218,6 +218,30 @@ def enforce_protective_time_in_force(order_args: dict[str, Any]) -> str | None:
     return None
 
 
+def protective_stop_type_violation(order_args: dict[str, Any]) -> str | None:
+    """Refuse a sell ``stop_limit``: a protective stop is ``stop_market``.
+
+    Returns a violation string, or ``None``. A stop-limit order becomes a
+    limit order at its trigger, so when price gaps through the trigger it
+    rests unfilled below the market and sells nothing, where a stop_market
+    order sells at the open. The
+    account cannot sell short, so every sell stop is protection (or an exit
+    that must happen); a buy stop-limit opens a position and is not checked
+    here.
+    """
+    if _is_option_order(order_args):
+        return None
+    otype = str(order_args.get("type") or order_args.get("order_type") or "").lower()
+    side = str(order_args.get("side") or "").lower()
+    if otype != "stop_limit" or side != "sell":
+        return None
+    return (
+        "A sell stop_limit is not protection: when price gaps through its trigger it "
+        "becomes a limit order resting below the market and sells nothing. Protective "
+        "stops are 'stop_market' (a stop_price, no limit_price)."
+    )
+
+
 def _is_option_order(order_args: dict[str, Any]) -> bool:
     """Detect if the order arguments describe an option trade."""
     return "legs" in order_args

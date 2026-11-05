@@ -661,9 +661,11 @@ def algo_call_from_snapshot(composite: Any, sub_signals: Any) -> tuple[float, st
 #: momentum vote with its stack intact, decayed for a day against it, or under
 #: a fast dissent.
 _COHORT_FLAGS = ("divergence_applied", "fast_dissent", "fast_dissent_applied")
-#: Kept as reported, not as flags: the fast pair's direction (-1, 0, +1) and
-#: whether it agreed with the vote (None when either was neutral).
-_COHORT_READS = ("fast_read", "fast_read_agrees_value")
+#: Kept as reported, not as flags: the fast pair's direction (-1, 0, +1),
+#: whether it agreed with the vote (None when either was neutral), price's side
+#: of EMA 9 alone (-1, 0, +1), and a vote-scaled channel's emission before its
+#: scale (``raw_value``: how deep the read was, which the scaled value hides).
+_COHORT_READS = ("fast_read", "fast_read_agrees_value", "ema9_side", "raw_value", "vote_scale")
 
 
 def channel_votes_from_sub_signals(sub_signals: Any) -> dict[str, dict[str, Any]]:

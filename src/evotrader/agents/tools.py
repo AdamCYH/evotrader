@@ -4158,7 +4158,62 @@ async def _protective_coverage() -> dict[str, dict]:
         return {}
     positions = await _journal.get_open_trades()
     book = [_pending_order_view(row) for row in await _journal.get_pending_orders()]
-    return coverage_by_ticker(positions, book, unconfirmed=_unconfirmed_orders)
+    coverage = coverage_by_ticker(positions, book, unconfirmed=_unconfirmed_orders)
+    await _add_last_protective_cancel(coverage)
+    return coverage
+
+
+#: How far back ``last_protective_cancel`` looks, from when the cancel was seen.
+_LAST_CANCEL_HOURS = 24
+
+
+def _cancelled_by(reason: str) -> str:
+    """``agent``, ``outside_evotrader``, or ``not_recorded`` for a row from before the distinction."""
+    if reason.startswith(CANCELLED_BY_AGENT):
+        return "agent"
+    if reason.startswith(CANCELLED_OUTSIDE):
+        return "outside_evotrader"
+    return "not_recorded"
+
+
+async def _add_last_protective_cancel(coverage: dict[str, dict]) -> None:
+    """Each ticker's block gains ``last_protective_cancel`` when one was seen in the last day.
+
+    The newest stop or take-profit found cancelled: its order, size and level,
+    ``by`` (``agent``: an agent's logged cancel; ``outside_evotrader``: none,
+    so the broker or someone in its app; ``not_recorded``: from before the
+    journal told them apart), the journal's ``reason`` and ``seen_at``. A
+    missing stop an agent cancelled is a decision to read in that cycle's
+    reasoning; one cancelled outside the app is a gap to repair.
+    """
+    if not _journal or not coverage:
+        return
+    since = (datetime.now(UTC) - timedelta(hours=_LAST_CANCEL_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        latest = await _journal.last_protective_cancels(since)
+    except Exception as e:  # never break the coverage over it
+        logger.warning("last protective cancel unavailable: %s", e)
+        return
+    if not isinstance(latest, dict):
+        return
+    for ticker, block in coverage.items():
+        row = latest.get(str(ticker).upper())
+        if not isinstance(row, dict) or not isinstance(block, dict):
+            continue
+        reason = str(row.get("broker_status_reason") or "")
+        level = (
+            row.get("stop_price") if row.get("action") == "STOP_LOSS" else row.get("limit_price")
+        )
+        block["last_protective_cancel"] = {
+            "order_id": row.get("order_id"),
+            "trade_id": row.get("id"),
+            "action": row.get("action"),
+            "quantity": row.get("quantity"),
+            "level": level,
+            "by": _cancelled_by(reason),
+            "reason": reason or None,
+            "seen_at": row.get("seen_at"),
+        }
 
 
 async def get_open_positions() -> dict:
@@ -4176,7 +4231,11 @@ async def get_open_positions() -> dict:
     take-profit (``tp_only_qty`` shares have no stop: the tranche), and
     ``partial`` means ``no_order_qty`` shares are under neither. ``unknown``
     means a stop lacks its trigger price or time in force: treat it as
-    unverified, not as protected.
+    unverified, not as protected. ``last_protective_cancel``, when a stop or
+    take-profit was found cancelled in the last day, says which and ``by``
+    whom: ``agent`` (an agent's logged cancel: a decision, read its cycle) or
+    ``outside_evotrader`` (no agent cancelled it: the broker, or someone in
+    the broker's app; a gap to repair at the original level).
 
     ``take_profit_coverage`` is the upside half per ticker: ``status``
     (resting or none), ``tp_qty``, ``tp_qty_uncovered`` and each resting
@@ -4225,6 +4284,7 @@ async def get_open_positions() -> dict:
         from evotrader.db.protection_audit import coverage_by_ticker, take_profit_coverage
 
         coverage = coverage_by_ticker(positions, pending_orders, unconfirmed=_unconfirmed_orders)
+        await _add_last_protective_cancel(coverage)
         result["protective_coverage"] = coverage
         # The upside half: resting take-profits per ticker. Distances in ATRs
         # need the day's ATR and mark, so they are in gather_market_data.
@@ -4506,6 +4566,114 @@ def classify_cancelled_order(order_data: dict, now: datetime | None = None) -> t
     if (now or datetime.now(UTC)) >= session_end:
         return "expired", expired
     return "cancelled", "Order cancelled"
+
+
+def broker_fill_time(order_data: dict) -> str | None:
+    """When the broker filled an order (ISO 8601): its last execution, else its last transaction."""
+
+    def _at(value: object) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return t if t.tzinfo else t.replace(tzinfo=UTC)
+
+    times = [
+        t
+        for t in (
+            _at(e.get("timestamp"))
+            for e in order_data.get("executions") or []
+            if isinstance(e, dict) and e.get("timestamp")
+        )
+        if t is not None
+    ]
+    if not times and order_data.get("last_transaction_at"):
+        last = _at(order_data["last_transaction_at"])
+        times = [last] if last is not None else []
+    return max(times).astimezone(UTC).isoformat() if times else None
+
+
+#: The tools that cancel an order; an agent's call to one names the order.
+_CANCEL_TOOLS = ("cancel_equity_order", "cancel_option_order")
+
+
+async def _agent_cancel_of(order_id: str, since: str | None = None) -> dict | None:
+    """The agent call that cancelled *order_id*, from the thought log, or None.
+
+    Only the agents cancel orders from inside the app (the protection
+    follow-up never does), and every one of their tool calls is logged with
+    its arguments. So a cancelled order with no such call was cancelled
+    outside the app: by the broker, or by hand. ``since`` (ISO 8601, the
+    order's placement) bounds the search.
+    """
+    if _db is None or not order_id:
+        return None
+    try:
+        async with _db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT session_id, timestamp, agent_name FROM agent_thought_log "
+                "WHERE timestamp >= ? AND event_type = 'tool_call' "
+                f"AND content IN ({', '.join('?' for _ in _CANCEL_TOOLS)}) "
+                "AND json_extract(meta, '$.args.order_id') = ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (since or "", *_CANCEL_TOOLS, order_id),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.warning("[RECONCILE] Could not look up who cancelled %s: %s", order_id, e)
+        return None
+    return dict(row) if row else None
+
+
+def _et_clock(value: object) -> str | None:
+    """``2026-03-05 15:46 ET`` for an ISO time, or None."""
+    from evotrader.tools.market_hours import ET as _ET
+
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    t = t if t.tzinfo else t.replace(tzinfo=UTC)
+    return t.astimezone(_ET).strftime("%Y-%m-%d %H:%M ET")
+
+
+#: How a cancelled order's reason starts, so a reader (and
+#: ``last_protective_cancel``) can tell who cancelled it.
+CANCELLED_BY_AGENT = "cancelled by the "
+CANCELLED_OUTSIDE = "cancelled outside EvoTrader"
+
+
+async def who_cancelled(order_data: dict, placed_at: str | None = None) -> str:
+    """The journal's reason for a cancelled order: who cancelled it, and the broker's words.
+
+    ``reconcile_pending_orders`` wrote one reason for every cancelled gtc
+    order, "cancelled at the broker", whether an agent cancelled it to resize
+    or nothing in the app touched it: a week's stops the executor cancelled
+    itself read the same as two that disappeared between cycles, and neither
+    agent could tell a decision from a broken order. The thought log knows
+    which: an agent's cancel is a logged tool call naming the order. The
+    broker's own reason, when its order carries one, follows.
+    """
+    order_id = str(order_data.get("id") or "")
+    broker_said = order_data.get("cancel_reason")
+    tail = f"; the broker says: {broker_said}" if broker_said else ""
+    call = await _agent_cancel_of(order_id, since=placed_at)
+    if call:
+        at = _et_clock(call.get("timestamp"))
+        agent = str(call.get("agent_name") or "an")
+        session = str(call.get("session_id") or "")[:8]
+        return (
+            f"{CANCELLED_BY_AGENT}{agent} agent in session {session}"
+            + (f" at {at}" if at else "")
+            + tail
+        )
+    when = _et_clock(order_data.get("last_transaction_at"))
+    return (
+        CANCELLED_OUTSIDE
+        + (f" at {when}" if when else "")
+        + ": no agent cancelled it (the broker did, or someone in the broker's app)"
+        + tail
+    )
 
 
 #: Broker order states that mean "this order is still working".
@@ -5176,6 +5344,7 @@ async def reconcile_pending_orders() -> dict:
 
                 fill_price = None
                 filled_qty = None
+                filled_at = None
                 broker_reason = None
 
                 if state == "filled":
@@ -5185,6 +5354,7 @@ async def reconcile_pending_orders() -> dict:
                         fill_price = float(fp)
                     if fq:
                         filled_qty = float(fq)
+                    filled_at = broker_fill_time(order_data)
                 elif state == "rejected":
                     broker_reason = (
                         order_data.get("reject_reason")
@@ -5198,6 +5368,18 @@ async def reconcile_pending_orders() -> dict:
                     )
                 elif state == "cancelled":
                     state, broker_reason = classify_cancelled_order(order_data)
+                    if state == "cancelled":
+                        # Who cancelled it: an agent (a logged call), or
+                        # something outside the app. An hour's margin before
+                        # the row's time, which is when it was recorded.
+                        since = (
+                            (placed_at - timedelta(hours=1)).astimezone(UTC).isoformat()
+                            if placed_at is not None
+                            else None
+                        )
+                        broker_reason = await who_cancelled(
+                            {"id": order_id, **order_data}, placed_at=since
+                        )
 
                 # Update the existing trade in the trades table
                 try:
@@ -5207,6 +5389,7 @@ async def reconcile_pending_orders() -> dict:
                         fill_price=fill_price,
                         filled_quantity=filled_qty,
                         broker_status_reason=broker_reason,
+                        filled_at=filled_at,
                     )
                     adopted_ids: list[int] = []
                     if state == "filled" and not rows_updated:

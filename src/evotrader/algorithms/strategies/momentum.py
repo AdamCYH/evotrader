@@ -54,6 +54,21 @@ def fast_pair_direction(
     return 0
 
 
+def ema9_side(price_vs_ema9_atr: float | None, min_atr: float) -> int:
+    """Which side of EMA 9 price is by at least ``min_atr`` daily ATRs: +1, -1 or 0.
+
+    The price half of :func:`fast_pair_direction` on its own. The pair also
+    needs the MACD histogram, which lags price after a turn: on a day price
+    stood 0.6 ATR above EMA 9 while the histogram was still negative, the pair
+    read 0 and this reads +1. Price exactly at EMA 9 points nowhere.
+    """
+    if price_vs_ema9_atr is None or price_vs_ema9_atr == 0:
+        return 0
+    if abs(price_vs_ema9_atr) < min_atr:
+        return 0
+    return 1 if price_vs_ema9_atr > 0 else -1
+
+
 class MomentumStrategy(TradingAlgorithm):
     """Trend-following strategy based on moving average crossovers.
 
@@ -335,7 +350,11 @@ class MomentumStrategy(TradingAlgorithm):
                 "price_vs_ema9_atr": price_vs_ema9_atr,
                 # The fast pair's own direction (+1, -1, 0) whatever the MA
                 # term reads, and whether it agrees with this vote's sign.
+                # ``fast_read`` is the PAIR: price beyond EMA 9 AND the MACD
+                # histogram, both the same way. ``ema9_side`` is price against
+                # EMA 9 alone, by the same margin.
                 "fast_read": fast_read,
+                "ema9_side": ema9_side(price_vs_ema9_atr, self._fast_dissent_min_atr),
                 "fast_read_agrees_value": fast_read_agrees_value,
                 "fast_dissent": fast_dissent,
                 "fast_dissent_applied": fast_dissent_applied,

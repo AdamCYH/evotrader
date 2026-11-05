@@ -102,6 +102,30 @@ def is_broker_order_id(order_id: object) -> bool:
     return bool(text) and any(ch.isdigit() for ch in text)
 
 
+def _when(value: object) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=UTC)
+
+
+def holding_seconds(entry: dict[str, Any], exit_row: dict[str, Any]) -> int | None:
+    """Seconds from an entry's fill to its exit's fill, or None when the exit's is unknown.
+
+    The entry's fill is its ``filled_at`` when the broker reported one, else
+    when it was recorded (an entry is recorded as it is placed, and most fill
+    at once). The exit's must be its ``filled_at``: a stop or take-profit is
+    recorded when it is placed, which can be days before it fills.
+    """
+    closed = _when(exit_row.get("filled_at")) if exit_row.get("filled_at") else None
+    opened_at = entry.get("filled_at") or entry.get("timestamp")
+    opened = _when(opened_at) if opened_at else None
+    if closed is None or opened is None or closed < opened:
+        return None
+    return int((closed - opened).total_seconds())
+
+
 def _warn_on_exit_row_shape(
     proposal: TradeProposal,
     matching: list[dict],
@@ -1723,6 +1747,61 @@ class TradeJournal:
             rows = await cursor.fetchall()
             return list(rows)
 
+    async def order_book_states(self, order_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Where each of *order_ids* stands: its ``pending_orders`` status, and its journal row's.
+
+        ``status`` is PENDING while the broker works the order and the terminal
+        state the reconciliation found after (FILLED, CANCELLED, REJECTED,
+        FAILED, EXPIRED). The order book is the source: it holds the broker's
+        working orders whether or not anyone journaled them. ``reason`` and
+        ``related_trade_id`` come from the newest journal row for the order,
+        when there is one.
+        """
+        ids = [str(i) for i in order_ids if i]
+        if not ids:
+            return {}
+        marks = ", ".join("?" for _ in ids)
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT p.order_id, p.status,
+                       (SELECT t.broker_status_reason FROM trades t WHERE t.order_id = p.order_id
+                        ORDER BY t.id DESC LIMIT 1) AS reason,
+                       (SELECT t.related_trade_id FROM trades t WHERE t.order_id = p.order_id
+                        AND t.related_trade_id IS NOT NULL ORDER BY t.id DESC LIMIT 1)
+                        AS related_trade_id
+                FROM pending_orders p WHERE p.order_id IN ({marks})
+                """,
+                ids,
+            )
+            return {str(r["order_id"]): dict(r) for r in await cursor.fetchall()}
+
+    async def last_protective_cancels(self, since: str) -> dict[str, dict[str, Any]]:
+        """Per ticker, the newest cancelled stop or take-profit the reconciliation saw since *since*.
+
+        *since* is UTC, ``YYYY-MM-DD HH:MM:SS``: when an order was resolved is
+        kept on its ``pending_orders`` row in that form (``seen_at``), and a
+        row's own time is when it was placed, which can be days earlier.
+        """
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT t.id, t.ticker, t.action, t.quantity, t.stop_price, t.limit_price,
+                       t.order_id, t.broker_status_reason, p.updated_at AS seen_at
+                FROM trades t JOIN pending_orders p ON p.order_id = t.order_id
+                WHERE t.action IN ('STOP_LOSS', 'TAKE_PROFIT')
+                  AND t.order_status = 'CANCELLED' AND p.status = 'CANCELLED'
+                  AND p.updated_at >= ?
+                ORDER BY p.updated_at DESC, t.id DESC
+                """,
+                (since,),
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            latest.setdefault(str(row.get("ticker") or "").upper(), row)
+        return latest
+
     async def resolve_pending_order(self, order_id: str, terminal_status: str) -> None:
         """Mark a pending order as resolved (filled, rejected, cancelled, failed).
 
@@ -2017,6 +2096,7 @@ class TradeJournal:
         broker_status_reason: str | None = None,
         only_if_claimed_fill: bool = False,
         fill_source: str | None = None,
+        filled_at: str | None = None,
     ) -> int:
         """Update a trade's order lifecycle status by broker order_id.
 
@@ -2047,12 +2127,20 @@ class TradeJournal:
                 for FILLED, cleared otherwise. ``broker_position`` records a
                 fill the broker's position confirms while the price is still
                 the journal's own.
+            filled_at: When the broker filled the order (ISO 8601), for a
+                FILLED transition. A filled exit's holding period runs from
+                its entry's fill to this, not from when the exit was placed:
+                a take-profit placed with its entry and filled days later
+                otherwise read as held for seconds.
 
         Returns:
             Number of rows updated.
         """
         updates = ["order_status = ?"]
         params: list[Any] = [new_status.upper()]
+        if filled_at and new_status.upper() == "FILLED":
+            updates.append("filled_at = ?")
+            params.append(filled_at)
 
         # A row in any of these states closed nothing, so it cannot carry
         # realized P&L. PENDING and EXPIRED joined the list on 2026-09-25:
@@ -2162,7 +2250,7 @@ class TradeJournal:
                         cursor = await conn.execute(
                             # Only the rows this update made FILLED: a row a
                             # repair closed out, or a second copy, keeps no P&L.
-                            "SELECT id, action, direction, quantity, price, fill_price, option_id, related_trade_id, timestamp, realized_pnl, holding_period_s FROM trades WHERE order_id = ? AND order_status = 'FILLED'",
+                            "SELECT id, action, direction, quantity, price, fill_price, option_id, related_trade_id, timestamp, filled_at, realized_pnl, holding_period_s FROM trades WHERE order_id = ? AND order_status = 'FILLED'",
                             (order_id,),
                         )
                         close_rows = [dict(r) for r in await cursor.fetchall()]
@@ -2198,7 +2286,12 @@ class TradeJournal:
                                 )
 
                                 held_s = crow.get("holding_period_s")
-                                if (
+                                fill_held_s = holding_seconds(entry_row, crow)
+                                if fill_held_s is not None:
+                                    # The fill's own time wins over the period
+                                    # worked out when the exit was placed.
+                                    held_s = fill_held_s
+                                elif (
                                     not held_s
                                     and crow.get("timestamp")
                                     and entry_row.get("timestamp")

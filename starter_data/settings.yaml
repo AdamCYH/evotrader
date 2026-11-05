@@ -257,9 +257,12 @@ require_trade_approval: true       # each order waits for your click in the cons
 # was approved with (record_trade's protection_plan) when the fill lands, instead
 # of at the next cycle. Places real orders without an agent, only adds orders
 # (never cancels one), and does nothing while the console asks for approval of
-# every order (above). Off until you switch it on. The log says which at start-up
-# and at every cycle start; while it is off, a filled entry whose plan waits is
-# named, with its levels, in the trading handoff the agents read.
+# every order (above). Once the shares are protected it keeps watching their
+# stops until max_minutes have passed, and puts back, once, a stop that ends
+# (cancelled outside the app) while the shares are still held. Off until you
+# switch it on. The log says which at start-up and at every cycle start; while it
+# is off, a filled entry whose plan waits is named, with its levels, in the
+# trading handoff the agents read.
 protection_followup:
   enabled: false
   interval_seconds: 300            # how often it checks for the fill

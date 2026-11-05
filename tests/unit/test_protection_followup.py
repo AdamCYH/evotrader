@@ -185,7 +185,7 @@ class TestTheFollowUp:
     async def test_after_the_fill_the_new_shares_are_protected(self, broker, db) -> None:
         out = await tools.record_trade(_entry())
         await _fill()
-        assert await protection_followup.followup_once() == 0
+        assert await protection_followup.followup_once() == 1, "placed, then watched"
         stop, take = _placed(broker)
         assert stop == {
             "symbol": "XYZ",
@@ -203,7 +203,8 @@ class TestTheFollowUp:
         assert protective["STOP_LOSS"]["session_id"] == "s-entry"
         assert protective["TAKE_PROFIT"]["quantity"] == 1.0
         (plan,) = await _plans(db)
-        assert plan["status"] == "placed"
+        assert plan["status"] == "watching"
+        assert plan["status_reason"].startswith("placed: stop 2 @ 90.00")
         note = handoff_path(broker.config.data_dir).read_text()
         assert "protected the fill of e1n7ry-0" in note and "stop 2 @ 90.00" in note
         coverage = (await tools._protective_coverage())["XYZ"]
@@ -213,9 +214,10 @@ class TestTheFollowUp:
         await tools.record_trade(_entry())
         await _fill()
         await tools.record_trade(_protective("STOP_LOSS", 3, "st0p-0001", stop_price=90.0))
-        assert await protection_followup.followup_once() == 0
+        assert await protection_followup.followup_once() == 1, "covered, then watched"
         assert _placed(broker) == []
-        assert (await _plans(db))[0]["status"] == "covered"
+        (plan,) = await _plans(db)
+        assert (plan["status"], plan["status_reason"][:8]) == ("watching", "covered:")
 
     async def test_only_the_unprotected_shares_and_the_stop_first(self, broker, db) -> None:
         await tools.record_trade(_entry())
@@ -310,10 +312,10 @@ class TestAtTheStartOfACycle:
         assert await protection_followup.followup_once() == 1, "a stop cannot rest yet"
         monkeypatch.setattr(market_hours, "get_current_session", session("REGULAR"))
         monkeypatch.setattr(protection_followup, "_cycle_running", lambda: True)  # its own
-        assert await protection_followup.protect_at_cycle_start() == 0
+        assert await protection_followup.protect_at_cycle_start() == 1, "now watched"
         stop, take = _placed(broker)
         assert (stop["type"], stop["quantity"], take["quantity"]) == ("stop_market", "2", "1")
-        assert (await _plans(db))[0]["status"] == "placed"
+        assert (await _plans(db))[0]["status"] == "watching"
 
     async def test_the_cycle_has_just_synced_the_orders(self, broker, monkeypatch) -> None:
         synced = []
@@ -353,7 +355,7 @@ class TestAtTheStartOfACycle:
             protection_followup.followup_once(), protection_followup.protect_at_cycle_start()
         )
         assert [a["type"] for a in _placed(broker)] == ["stop_market", "limit"]
-        assert [p["status"] for p in await _plans(db)] == ["placed"]
+        assert [p["status"] for p in await _plans(db)] == ["watching"]
 
 
 class TestWhenItRuns:

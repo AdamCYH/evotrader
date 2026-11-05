@@ -38,6 +38,39 @@ folder layout; each entry says what you need to do.
 
 ### Added — in what the agents read
 
+- **Who cancelled an order.** Every cancelled gtc order was journaled "gtc
+  order cancelled at the broker", whether the executor had cancelled it to
+  resize or nothing in the app had touched it, so neither the strategy agent
+  nor the evolution agent could tell a decision from a broken order. The
+  reconciliation now looks for the agent's cancel call in the thought log: the
+  reason reads `cancelled by the execution agent in session <id> at <time> ET`,
+  or `cancelled outside EvoTrader at <time> ET: no agent cancelled it (the
+  broker did, or someone in the broker's app)`, then the broker's own reason
+  when its order carries one. A day order that expired still reads as expired;
+  rows from before keep the old text. `protective_coverage` (in
+  `get_open_positions` and the reconciliation's reply) gains
+  `last_protective_cancel` per ticker when a stop or take-profit was found
+  cancelled in the last day: its order, size and level, `by` (`agent`,
+  `outside_evotrader`, or `not_recorded` for a row from before), the reason and
+  `seen_at`.
+- **The calibration splits a vote-scaled channel by depth.** A vote scale
+  enlarges a channel's emission before the vote, so a read once too shallow to
+  matter can now author the composite, and the pooled channel row, which mixes
+  shallow reads with deep ones, could not say whether the shallow ones carry
+  the record. `get_signal_calibration` adds `by_depth`: each vote-scaled
+  channel's own votes (`channel`) and the calls it authored (`author`) in
+  buckets of its emission before the scale (under 0.02, 0.02 to 0.05, 0.05 and
+  over), each with calls, independent days, hit rate, mean signed return, t,
+  and the long and short counts. Each vote now keeps the emission
+  (`raw_value`) and its `vote_scale`; for older rows the emission is the
+  stored value times the version's scale, and a value clipped at a scale under
+  the top edge is counted in `depth_unknown`, not guessed.
+- **`ema9_side` beside `fast_read`.** Momentum's `fast_read` is the fast PAIR
+  (price beyond EMA 9 and the MACD histogram, both the same way), which reads 0
+  while the histogram lags a turn; read as "price against EMA 9" it gave the
+  opposite answer on the same data. Momentum's metadata adds `ema9_side` (+1,
+  -1 or 0: price at least `fast_dissent_min_atr` ATRs above or below EMA 9,
+  alone), and the calibration record keeps it with each vote. No vote changes.
 - **Which session the quote's price is from.** After the close the quote's
   `last` is an after-hours trade whenever the book is wide (right for
   pricing), but it kept the close's timestamp, nothing said which session it
@@ -236,6 +269,21 @@ folder layout; each entry says what you need to do.
 
 ### Added — off until you switch it on
 
+- **The protection follow-up keeps watching after it protects.** It ended a
+  plan at its first check, once the new shares were under a stop or a
+  take-profit, so a protective order that ended after that check went unseen
+  until the next cycle: a confirmed stop cancelled outside the app between
+  cycles left its shares with no stop until then. A protected plan now stays
+  `watching` until `max_minutes` from its entry have passed, then ends `done`.
+  Each check, when shares are under no order and a stop it watches has ended
+  without filling (cancelled, rejected, failed or expired), it puts that stop
+  back, once, at its level and size (no more than the shares left bare), as
+  `stop_market` gtc, after the same checks as a plan's stop (the loss cap from
+  its lot's fill, the price not already through it, approval, the risk gate).
+  A take-profit that ended is named in the trading handoff, not re-placed.
+  What it does, or refuses to do, is a SYSTEM line in the handoff;
+  `protection_plans.watch` keeps the orders it watches and the ones it put
+  back (migration 0033).
 - **`asset.known_events`: event dates you state.** Each entry is a symbol
   and when the event lands (`at`; a time with no zone is US Eastern, an
   after-the-close report at 16:00) and an optional `type` (earnings). They
@@ -440,6 +488,14 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The holding period of an exit that filled later.** A stop or take-profit is
+  journaled when it is placed, and its holding period was worked out from that,
+  so one placed with its entry and filled days later read as held for seconds,
+  in the trade history, the performance analysis and the trade memories. The
+  reconciliation now keeps the broker's fill time (`trades.filled_at`,
+  migration 0032: the order's last execution, else its last transaction), and
+  the holding period runs from the lot's fill to it. Rows filled before keep
+  theirs.
 - **An activated instruction version is used from the next cycle.** The
   agents read their instructions once, when the app started, and activating
   a version (in the console, or by the evolution agent) only moved the active
@@ -744,6 +800,13 @@ folder layout; each entry says what you need to do.
 
 ### Changed
 
+- **A sell `stop_limit` is refused.** A stop-limit order becomes a limit order
+  at its trigger, so when price gaps through it, it rests below the market and
+  sells nothing, where a stop_market order sells at the open. The executor's
+  order gate refuses a sell `stop_limit` (`PROTECTIVE_STOP_NOT_MARKET`,
+  retryable: resubmit as `stop_market` with the same stop price), beside the
+  rule that protective orders are good-till-cancelled. The account cannot sell
+  short, so every sell stop is protection; a buy stop-limit is not checked.
 - **The calibration's `informative` reads both ways.** It was true only for a
   record whose t-statistic was above 2, so a channel reliably wrong (t below
   -2) read as "not informative" while the channel record marked the same row

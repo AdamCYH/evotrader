@@ -1,12 +1,15 @@
-"""An entry's approved protection, kept as data until the entry fills.
+"""An entry's approved protection, kept as data until the entry fills, then watched.
 
 See ``tools.protection_followup``. ``record_trade`` saves the plan an entry
 carries (``protection_plan``); the follow-up reads the waiting plans and marks
-each one with what happened to it.
+each one with what happened to it. Once the shares are protected the plan is
+watched for the follow-up's window (``watching``, with the protective orders
+in ``watch``) and then ends ``done``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +22,9 @@ logger = logging.getLogger(__name__)
 PLANNED = "planned"
 #: How a plan can end; ``status_reason`` says the rest.
 PLACED, COVERED, REFUSED, FAILED, EXPIRED = "placed", "covered", "refused", "failed", "expired"
+#: The shares are protected (placed or covered) and the plan's protective
+#: orders are watched until the window closes; then the plan is done.
+WATCHING, DONE = "watching", "done"
 
 
 def plan_problems(
@@ -140,6 +146,31 @@ class ProtectionPlanStore:
                 "SELECT * FROM protection_plans WHERE status = ? ORDER BY id", (PLANNED,)
             )
             return [dict(r) for r in await cursor.fetchall()]
+
+    async def watching(self) -> list[dict[str, Any]]:
+        """Every plan whose protective orders are being watched, oldest first."""
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM protection_plans WHERE status = ? ORDER BY id", (WATCHING,)
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def watch(self, plan_id: int, reason: str, watch: dict[str, Any]) -> None:
+        """Watch a plan's protective orders (``watch``: the orders, what was put back)."""
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "UPDATE protection_plans SET status = ?, status_reason = ?, watch = ?, "
+                "updated_at = ? WHERE id = ?",
+                (WATCHING, reason, json.dumps(watch), datetime.now(UTC).isoformat(), plan_id),
+            )
+        logger.info("Protection plan #%d: %s (%s)", plan_id, WATCHING, reason)
+
+    async def update_watch(self, plan_id: int, watch: dict[str, Any]) -> None:
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "UPDATE protection_plans SET watch = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(watch), datetime.now(UTC).isoformat(), plan_id),
+            )
 
     async def mark(self, plan_id: int, status: str, reason: str) -> None:
         async with self._db.transaction() as conn:

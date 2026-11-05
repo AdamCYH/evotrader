@@ -28,6 +28,19 @@ for up to ``max_minutes``. For each waiting plan:
 * an entry that ended without filling ends its plan, and a plan older than the
   window plus an hour is too old to act on.
 
+Once the shares are protected (the follow-up placed the plan, or they were
+already under a stop or a take-profit) the plan is not finished: it is
+``watching`` until the window closes, then ``done``. A plan used to end at its
+first check, so a stop that ended after that moment went unseen until the next
+cycle: a confirmed stop cancelled outside the app between cycles left its
+shares with no stop until then. Each check, a watched plan reads its ticker's
+coverage; when shares are under no order and one of the stops it watches has
+ended (cancelled, rejected, failed or expired, not filled), it puts that stop
+back, once, at its level and size (no more than the bare shares), as
+``stop_market`` gtc, after the same checks as a plan's stop. A take-profit
+that ended is named in the handoff, not re-placed. Whatever it does, or
+refuses to do, goes in a SYSTEM line.
+
 It also runs once at the start of every cycle, before the agents read the
 book: an entry that filled before the open (a stop cannot rest then) is
 protected as the first regular-hours cycle starts, not minutes later when that
@@ -53,10 +66,12 @@ from typing import Any
 
 from evotrader.db.protection_plans import (
     COVERED,
+    DONE,
     EXPIRED,
     FAILED,
     PLACED,
     REFUSED,
+    WATCHING,
     ProtectionPlanStore,
 )
 
@@ -64,6 +79,8 @@ logger = logging.getLogger(__name__)
 
 #: Entry statuses that mean it will never fill.
 _ENTRY_ENDED = {"CANCELLED", "REJECTED", "EXPIRED", "FAILED", "DUPLICATE"}
+#: Order book statuses of a protective order that ended without filling.
+_ORDER_ENDED = {"CANCELLED", "REJECTED", "FAILED", "EXPIRED"}
 
 _task: asyncio.Task | None = None
 #: One check at a time (the follow-up's, or a cycle start's), with its loop.
@@ -141,7 +158,8 @@ async def start_followup() -> bool:
         return False
     if _task is not None and not _task.done():
         return False  # one at a time; each check reads every waiting plan
-    if not await ProtectionPlanStore(tools._db).planned():
+    store = ProtectionPlanStore(tools._db)
+    if not await store.planned() and not await store.watching():
         return False
     settings = tools._config.settings.protection_followup
     _task = asyncio.create_task(run_followup(settings.interval_seconds, settings.max_minutes))
@@ -169,7 +187,8 @@ async def protect_at_cycle_start() -> int:
             for line in lines:
                 append_system_line(_tools()._config.data_dir, line)
         return 0
-    if not await ProtectionPlanStore(_tools()._db).planned():
+    store = ProtectionPlanStore(_tools()._db)
+    if not await store.planned() and not await store.watching():
         return 0
     return await followup_once(at_cycle_start=True)
 
@@ -235,7 +254,7 @@ async def run_followup(interval_seconds: float, max_minutes: float) -> None:
 
 
 async def followup_once(now: datetime | None = None, *, at_cycle_start: bool = False) -> int:
-    """One check of every waiting plan. Returns how many still wait.
+    """One check of every waiting and watched plan. Returns how many still wait or watch.
 
     ``at_cycle_start``: called by the cycle that is starting, which has just
     reconciled the orders and whose agents have not started yet.
@@ -244,7 +263,8 @@ async def followup_once(now: datetime | None = None, *, at_cycle_start: bool = F
     store = ProtectionPlanStore(tools._db)
     async with _one_at_a_time():
         plans = await store.planned()
-        if not plans:
+        watched = await store.watching()
+        if not plans and not watched:
             return 0
         if not at_cycle_start:
             try:
@@ -255,10 +275,17 @@ async def followup_once(now: datetime | None = None, *, at_cycle_start: bool = F
         waiting = 0
         for plan in plans:
             try:
-                if await _handle(plan, store, now, at_cycle_start) is None:
+                if await _handle(plan, store, now, at_cycle_start) in (None, WATCHING):
                     waiting += 1
             except Exception as e:
                 logger.error("Protection plan #%s: %s", plan.get("id"), e, exc_info=True)
+                waiting += 1
+        for plan in watched:
+            try:
+                if await _rewatch(plan, store, now, at_cycle_start) is None:
+                    waiting += 1
+            except Exception as e:
+                logger.error("Protection plan #%s (watching): %s", plan.get("id"), e, exc_info=True)
                 waiting += 1
         return waiting
 
@@ -321,10 +348,9 @@ async def _protect(
     coverage = (await tools._protective_coverage()).get(ticker) or {}
     need = float(coverage.get("no_order_qty") or 0)
     if need <= 0:
-        await store.mark(
-            plan["id"], COVERED, "the shares were already under a stop or a take-profit"
+        return await _start_watch(
+            store, plan, COVERED, "the shares were already under a stop or a take-profit"
         )
-        return COVERED
     stop_qty, tp_qty = float(plan["stop_qty"]), float(plan["tp_qty"] or 0)
     notes = []
     if need < stop_qty + tp_qty:
@@ -408,6 +434,7 @@ async def _protect(
 
     # 5. Place them, journal them against the entry.
     placed: list[str] = []
+    placed_orders: list[dict[str, Any]] = []
     session_before = tools._current_session_id
     tools._current_session_id = plan.get("session_id") or session_before
     try:
@@ -460,10 +487,311 @@ async def _protect(
                 )
             )
             placed.append(f"{label} {args['quantity']} @ {level} ({order_id[:8]})")
+            placed_orders.append(
+                {
+                    "order_id": order_id,
+                    "role": "stop" if action == "STOP_LOSS" else "take_profit",
+                    "quantity": float(args["quantity"]),
+                    "stop_price": float(args["stop_price"]) if "stop_price" in args else None,
+                    "limit_price": float(args["limit_price"]) if "limit_price" in args else None,
+                }
+            )
     finally:
         tools._current_session_id = session_before
 
     summary = ", ".join(placed) + (f" — {'; '.join(notes)}" if notes else "")
-    await store.mark(plan["id"], PLACED, summary)
     _note(f"protected the fill of {plan['entry_order_id'][:8]} ({ticker} @ {fill:g}): {summary}.")
-    return PLACED
+    return await _start_watch(store, plan, PLACED, summary, placed_orders)
+
+
+def _clock(when: datetime) -> str:
+    from evotrader.tools.market_hours import ET
+
+    return when.astimezone(ET).strftime("%H:%M ET")
+
+
+async def _start_watch(
+    store: ProtectionPlanStore,
+    plan: dict[str, Any],
+    outcome: str,
+    summary: str,
+    placed: list[dict[str, Any]] | None = None,
+) -> str:
+    """Watch the ticker's protective orders until the window closes. Returns WATCHING."""
+    tools = _tools()
+    settings = tools._config.settings.protection_followup
+    block = (await tools._protective_coverage()).get(plan["ticker"]) or {}
+    orders: dict[str, dict[str, Any]] = {}
+    for o in [*(block.get("orders") or []), *(placed or [])]:
+        if o.get("order_id") and o.get("role") in ("stop", "take_profit"):
+            orders.setdefault(
+                str(o["order_id"]),
+                {
+                    "order_id": str(o["order_id"]),
+                    "role": o["role"],
+                    "quantity": float(o.get("quantity") or 0),
+                    "stop_price": o.get("stop_price"),
+                    "limit_price": o.get("limit_price"),
+                },
+            )
+    until = datetime.fromisoformat(plan["created_at"]) + timedelta(minutes=settings.max_minutes)
+    watch = {
+        "outcome": outcome,
+        "summary": summary,
+        "orders": list(orders.values()),
+        "put_back": [],
+        "reported": [],
+    }
+    await store.watch(
+        plan["id"],
+        f"{outcome}: {summary}; watching {len(orders)} protective order(s) until {_clock(until)}",
+        watch,
+    )
+    return WATCHING
+
+
+async def _end_watch(
+    store: ProtectionPlanStore, plan: dict[str, Any], watch: dict[str, Any], why: str
+) -> str:
+    put_back = watch.get("put_back") or []
+    after = (
+        "put back "
+        + ", ".join(
+            f"stop {p['quantity']:g} @ {p['stop_price']:g} ({p['order_id'][:8]}) "
+            f"after {p['after'][:8]} ended"
+            for p in put_back
+        )
+        if put_back
+        else "no protective order ended"
+    )
+    await store.mark(
+        plan["id"],
+        DONE,
+        f"{watch.get('outcome')}: {watch.get('summary')}; watched: {after}; {why}",
+    )
+    return DONE
+
+
+def _watch_of(plan: dict[str, Any]) -> dict[str, Any]:
+    try:
+        watch = json.loads(plan.get("watch") or "{}")
+    except (TypeError, ValueError):
+        watch = {}
+    watch.setdefault("orders", [])
+    watch.setdefault("put_back", [])
+    watch.setdefault("reported", [])
+    return watch
+
+
+async def _rewatch(
+    plan: dict[str, Any], store: ProtectionPlanStore, now: datetime, at_cycle_start: bool = False
+) -> str | None:
+    """One check of a watched plan. Returns DONE when it ends, None while it watches."""
+    tools = _tools()
+    settings = tools._config.settings.protection_followup
+    watch = _watch_of(plan)
+    ticker = plan["ticker"]
+    block = (await tools._protective_coverage()).get(ticker) or {}
+    if now - datetime.fromisoformat(plan["created_at"]) > timedelta(minutes=settings.max_minutes):
+        return await _end_watch(
+            store,
+            plan,
+            watch,
+            f"the window closed with coverage {block.get('status') or 'unknown'}",
+        )
+    if float(block.get("held_qty") or 0) <= 0:
+        return await _end_watch(store, plan, watch, f"no {ticker} shares are held")
+    need = float(block.get("no_order_qty") or 0)
+    if need <= 0:
+        return None
+
+    from evotrader.tools.market_hours import MarketSession, get_current_session
+
+    if get_current_session() != MarketSession.REGULAR:
+        return None  # a stop cannot rest outside regular hours
+
+    # The watched orders that ended without filling, not yet put back or
+    # reported by this plan or another one watching the same ticker: once.
+    settled = {p["after"] for p in watch["put_back"]} | set(watch["reported"])
+    for other in await store.watching():
+        if other["id"] != plan["id"] and other["ticker"] == ticker:
+            seen = _watch_of(other)
+            settled |= {p["after"] for p in seen["put_back"]} | set(seen["reported"])
+    candidates = [
+        o for o in watch["orders"] if o["order_id"] not in settled and not o.get("put_back_of")
+    ]
+    states = await tools._journal.order_book_states([o["order_id"] for o in candidates])
+    ended = [
+        (o, states[o["order_id"]])
+        for o in candidates
+        if str((states.get(o["order_id"]) or {}).get("status") or "").upper() in _ORDER_ENDED
+    ]
+    changed = False
+    for order, state in ended:
+        if need <= 0:
+            break
+        status = str(state.get("status")).lower()
+        reason = state.get("reason") or "no reason recorded"
+        if order["role"] != "stop":
+            watch["reported"].append(order["order_id"])
+            changed = True
+            _note(
+                f"the take-profit {order['quantity']:g} @ {order.get('limit_price')} "
+                f"({order['order_id'][:8]}) for {ticker} ended {status} ({reason}); "
+                f"{need:g} shares are under no order. A take-profit is not put back: the "
+                "next cycle decides."
+            )
+            continue
+        put = await _put_back(plan, order, state, min(need, order["quantity"]), at_cycle_start)
+        if put is None:
+            break  # no quote, or a cycle started: check again next time
+        changed = True
+        if "order_id" in put:
+            watch["put_back"].append(put)
+            watch["orders"].append(
+                {
+                    "order_id": put["order_id"],
+                    "role": "stop",
+                    "quantity": put["quantity"],
+                    "stop_price": put["stop_price"],
+                    "limit_price": None,
+                    "put_back_of": order["order_id"],
+                }
+            )
+            need -= put["quantity"]
+        else:
+            watch["reported"].append(order["order_id"])
+    if changed:
+        await store.update_watch(plan["id"], watch)
+    return None
+
+
+async def _put_back(
+    plan: dict[str, Any],
+    order: dict[str, Any],
+    state: dict[str, Any],
+    quantity: float,
+    at_cycle_start: bool = False,
+) -> dict[str, Any] | None:
+    """Re-place one ended stop. ``{order_id, ...}`` when placed, ``{refused}`` when not, None to retry."""
+    tools = _tools()
+    cfg = tools._config
+    ticker = plan["ticker"]
+    long = str(plan["direction"]).upper() != "SHORT"
+    stop = float(order.get("stop_price") or 0)
+    status = str(state.get("status")).lower()
+    reason = state.get("reason") or "no reason recorded"
+    what = f"the stop {order['quantity']:g} @ {stop:g} ({order['order_id'][:8]}) for {ticker}"
+
+    def refused(why: str) -> dict[str, Any]:
+        _note(
+            f"{what} ended {status} ({reason}) with shares still held; it is NOT put back: "
+            f"{why}. The next cycle decides."
+        )
+        return {"refused": why}
+
+    if stop <= 0:
+        return refused("its stop price is not known")
+    # The cap from the fill of the lot the stop protected, else the plan's entry.
+    related = state.get("related_trade_id") or plan.get("entry_trade_id")
+    entry = await tools._journal.get_trade_by_id(int(related)) if related else None
+    fill = float((entry or {}).get("fill_price") or (entry or {}).get("price") or 0)
+    from evotrader.tools.stop_geometry import stop_cap_check
+
+    if fill > 0:
+        problem, _ = stop_cap_check(
+            fill, stop, plan["direction"], cfg.constitution.risk_limits.max_stop_loss_pct
+        )
+        if problem:
+            return refused(problem)
+
+    from evotrader.tools.market_hours import _resolve_now
+
+    quote, _ = await tools._fetch_quote(ticker, _resolve_now().astimezone(UTC))
+    last = float((quote or {}).get("last") or 0)
+    if last <= 0:
+        return None
+    if (last <= stop) if long else (last >= stop):
+        return refused(f"the price {last:g} is already through the stop {stop:g}")
+    if cfg.settings.require_trade_approval:
+        return refused(
+            "the console asks for approval of every order and no one is there to give it"
+        )
+
+    from evotrader.callbacks.risk_gate import (
+        create_risk_gate,
+        enforce_protective_time_in_force,
+        protective_stop_type_violation,
+    )
+
+    args = {
+        "symbol": ticker,
+        "side": "sell" if long else "buy",
+        "type": "stop_market",
+        "quantity": f"{quantity:g}",
+        "stop_price": f"{stop:.2f}",
+        "time_in_force": "gtc",
+    }
+    account = await tools._agentic_account_number()
+    if account:
+        args["account_number"] = account
+    gate = create_risk_gate(cfg.constitution, dry_run=cfg.settings.dry_run.enabled)
+    block = (await tools._protective_coverage()).get(ticker) or {}
+    held = float(block.get("held_qty") or 0) or None
+    problems = [
+        v
+        for v in (enforce_protective_time_in_force(args), protective_stop_type_violation(args))
+        if v
+    ] + gate.check_violations(args, held_quantity=held)
+    if problems:
+        return refused("; ".join(problems))
+    if not at_cycle_start and _cycle_running():
+        return None  # its executor reads the book now
+
+    response = await tools._call_mcp_tool("place_equity_order", args)
+    placed = ((response or {}).get("data") or {}).get("order") or {}
+    order_id = placed.get("id")
+    if not order_id:
+        return refused(f"the broker did not accept it: {json.dumps(response)[:200]}")
+    session_before = tools._current_session_id
+    tools._current_session_id = plan.get("session_id") or session_before
+    try:
+        await tools.record_trade(
+            json.dumps(
+                {
+                    "ticker": ticker,
+                    "action": "STOP_LOSS",
+                    "direction": "LONG" if long else "SHORT",
+                    "quantity": quantity,
+                    "order_type": "stop_market",
+                    "stop_price": stop,
+                    "time_in_force": "gtc",
+                    "order_id": order_id,
+                    "status": "PENDING",
+                    "related_trade_id": int(related) if related else None,
+                    "algo_signal": (entry or {}).get("algo_signal"),
+                    "hybrid_score": (entry or {}).get("hybrid_score"),
+                    "llm_signal": (entry or {}).get("llm_signal"),
+                    "confidence": (entry or {}).get("confidence"),
+                    "regime": (entry or {}).get("regime"),
+                    "algo_version": (entry or {}).get("algo_version"),
+                    "reasoning": (
+                        f"SYSTEM: stop put back by the protection follow-up after order "
+                        f"{order['order_id']} ended {status} ({reason}) while its shares "
+                        "were still held."
+                    ),
+                }
+            )
+        )
+    finally:
+        tools._current_session_id = session_before
+    _note(
+        f"{what} ended {status} ({reason}) with shares still held: put back stop "
+        f"{quantity:g} @ {stop:g} gtc ({order_id[:8]})."
+    )
+    return {
+        "order_id": order_id,
+        "quantity": quantity,
+        "stop_price": stop,
+        "after": order["order_id"],
+    }

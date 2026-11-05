@@ -179,6 +179,154 @@ def _base_channel(author: str, known: list[str]) -> str:
     return author.split("(")[0].strip() or "unattributed"
 
 
+#: Where the depth buckets of a vote-scaled channel's emission split.
+DEPTH_EDGES = (0.02, 0.05)
+_DEPTH_LABELS = ("under_0.02", "0.02_to_0.05", "0.05_and_over")
+
+
+def _vote_scales_of(version: str | None, cache: dict[str, dict[str, float]]) -> dict[str, float]:
+    """``composite.vote_scales`` of an algorithm version, from the registry (``{}`` when unknown)."""
+    if not version:
+        return {}
+    if version not in cache:
+        scales: dict[str, float] = {}
+        if _algo_registry is not None:
+            try:
+                raw = (_algo_registry.load_parameters(version).get("composite") or {}).get(
+                    "vote_scales"
+                ) or {}
+                scales = {str(k): float(v) for k, v in raw.items() if 0 < float(v) < 1}
+            except Exception:
+                scales = {}
+        cache[version] = scales
+    return cache[version]
+
+
+def _depth_of(vote: dict, scale: float | None) -> tuple[float | None, bool]:
+    """``(how deep the emission was, exact)`` for one channel vote.
+
+    The emission before its vote scale is stored as ``raw_value`` on rows
+    recorded since it was kept. Before that the scaled value is all there is:
+    the emission is that value times the scale, unless the value was clipped
+    at +/-1, when only its lower bound (the scale) is known. A version with no
+    scale for the channel voted its emission as it was.
+    """
+    try:
+        if vote.get("raw_value") is not None:
+            return abs(float(vote["raw_value"])), True
+        value = abs(float(vote.get("value") or 0.0))
+    except (TypeError, ValueError):
+        return None, False
+    if not scale:
+        return value, True
+    if value >= 1.0 - 1e-9:
+        return scale, False
+    return value * scale, True
+
+
+def _depth_bucket(depth: float | None, exact: bool) -> str | None:
+    if depth is None:
+        return None
+    if not exact and depth < DEPTH_EDGES[-1]:
+        return None  # clipped below the top edge: which bucket is unknown
+    for edge, label in zip(DEPTH_EDGES, _DEPTH_LABELS, strict=False):
+        if depth < edge:
+            return label
+    return _DEPTH_LABELS[-1]
+
+
+def _depth_report(
+    rows: list[dict],
+    voted: list[tuple[int, dict]],
+    algo: list[float],
+    returns: list[float],
+    stamps: list,
+    score: Any,
+    known: list[str],
+) -> dict | None:
+    """Each vote-scaled channel's record split by how deep its emission was.
+
+    A vote scale enlarges a channel's emission before the vote (at a scale of
+    0.1 an emission of 0.013 votes 0.13), so a read once too shallow to matter
+    can author the composite. Whether the shallow reads earn the record the
+    deep ones built is a question the pooled channel row cannot answer. ``channel`` scores the channel's own votes per bucket of its
+    emission (absolute, before the scale); ``author`` the calls it authored.
+    Rows whose depth cannot be known (a value clipped at the scale under the
+    top edge) are counted in ``depth_unknown``, not guessed.
+    """
+    from evotrader.algorithms.composite import SIGNAL_EPSILON
+
+    cache: dict[str, dict[str, float]] = {}
+    scaled: set[str] = set()
+    for i, votes in voted:
+        scales = _vote_scales_of(rows[i].get("algo_version"), cache)
+        scaled |= {n for n, v in votes.items() if n in scales or v.get("vote_scale")}
+    if not scaled:
+        return None
+
+    def _bucket_row(name: str, label: str, calls: list[tuple[int, float]]) -> dict:
+        idx = [i for i, _ in calls]
+        entry = score(
+            f"{name}:{label}",
+            [d for _, d in calls],
+            [returns[i] for i in idx],
+            [stamps[i] for i in idx],
+        )
+        keep = (
+            "n_calls",
+            "n_independent_days",
+            "hit_rate",
+            "mean_signed_return_pct",
+            "t_stat",
+            "n_long",
+            "n_short",
+            "informative",
+            "direction",
+            "note",
+        )
+        return {"bucket": label, **{k: entry[k] for k in keep if k in entry}}
+
+    channels: dict[str, dict] = {}
+    for name in sorted(scaled):
+        own: dict[str, list[tuple[int, float]]] = {label: [] for label in _DEPTH_LABELS}
+        authored: dict[str, list[tuple[int, float]]] = {label: [] for label in _DEPTH_LABELS}
+        unknown = 0
+        for i, votes in voted:
+            vote = votes.get(name)
+            if not isinstance(vote, dict):
+                continue
+            try:
+                value = float(vote.get("value") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(value) < SIGNAL_EPSILON:
+                continue
+            scale = vote.get("vote_scale") or _vote_scales_of(
+                rows[i].get("algo_version"), cache
+            ).get(name)
+            label = _depth_bucket(*_depth_of(vote, float(scale) if scale else None))
+            if label is None:
+                unknown += 1
+                continue
+            own[label].append((i, value))
+            author = _base_channel(str(rows[i].get("algo_author") or "").strip(), known)
+            if author == name and abs(algo[i]) > 1e-9:
+                authored[label].append((i, algo[i]))
+        channels[name] = {
+            "channel": [_bucket_row(name, label, calls) for label, calls in own.items()],
+            "author": [_bucket_row(name, label, calls) for label, calls in authored.items()],
+            "depth_unknown": unknown,
+        }
+    return {
+        "note": (
+            "Depth is the channel's emission before its vote scale (absolute), split at "
+            f"{DEPTH_EDGES[0]:g} and {DEPTH_EDGES[1]:g}. 'channel' scores its own votes, "
+            "'author' the calls it authored. Read each bucket with its days."
+        ),
+        "channels": channels,
+    }
+
+
 async def get_signal_calibration(
     lookback_days: int = 60,
     ticker: str = "",
@@ -215,6 +363,11 @@ async def get_signal_calibration(
        channel that should be re-weighted or deprecated shows up.
     5. ``conviction_calibration`` — conviction drives position size, so
        persistent overconfidence in the high bands is the expensive failure.
+    6. ``by_depth`` — each vote-scaled channel split by how deep its emission
+       was before the scale (under 0.02, 0.02 to 0.05, 0.05 and over), for
+       its own votes (``channel``) and the calls it authored (``author``). A
+       scale lets a read once too shallow to matter author the call, so the
+       pooled row cannot say whether the shallow reads carry the edge.
 
     Args:
         lookback_days: How far back to score (default 60). Older cycles may
@@ -464,6 +617,8 @@ async def calibration_report(
         entry.pop("source")
         by_channel.append({"channel": name, **entry})
 
+    by_depth = _depth_report(rows, voted, sources["algo"], returns, stamps, _score, known)
+
     return {
         "window": {
             "lookback_days": int(lookback_days),
@@ -509,6 +664,7 @@ async def calibration_report(
         "by_side": by_side,
         "by_author": by_author,
         "by_channel": by_channel,
+        "by_depth": by_depth,
         "rows_with_channel_votes": len(voted),
         # Cycles the strategy agent never logged (provider outage, crash): the
         # algorithm's call is scored, the agent-side witnesses are not.
