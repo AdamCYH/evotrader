@@ -18,7 +18,14 @@ call either side.
 
 Gates: a reference quote older than ``max_reference_age_minutes`` (a quiet
 pre-market) and the first ``min_minutes_since_open`` minutes of the session
-(the opening auction) abstain. At the session's extremes the vote is scaled by
+(the opening auction) abstain. Outside the fund's hours a fund quote is always
+that old; when the snapshot's ``reference`` carries a ``spot`` leg (the
+underlying, priced around the clock: ``asset.reference_spot_symbol``) no older
+than the same limit, the reference's return is read from it instead, from its
+price at 16:00 ET of the primary's last completed session, the moment the
+primary's prior close was made. Beta still comes from the fund's daily closes.
+``reference_leg`` (``fund`` or ``spot``) says which, so the calibration record
+can score the two apart. At the session's extremes the vote is scaled by
 ``extreme_dampener``: a long with the session's IBS at or below
 ``extreme_ibs``, a short at or above one minus it, as for
 ``intraday_vwap_zscore``. Without a reference on the snapshot it abstains
@@ -170,10 +177,23 @@ class BtcLeadResidualStrategy(TradingAlgorithm):
         if not ref_price or not ref_prior or not ref_closes:
             return self._abstain("no_reference_feed")
         age = ref.get("quote_age_minutes")
+        spot = ref.get("spot") or {}
+        leg = "fund"
         if age is not None and age > p["max_reference_age_minutes"]:
-            return self._abstain(
-                "stale_reference", reference_ticker=ref.get("ticker"), reference_age_minutes=age
-            )
+            spot_age = spot.get("age_minutes")
+            if (
+                not spot.get("price")
+                or not spot.get("close_1600_et")
+                or spot_age is None
+                or spot_age > p["max_reference_age_minutes"]
+            ):
+                return self._abstain(
+                    "stale_reference",
+                    reference_ticker=ref.get("ticker"),
+                    reference_age_minutes=age,
+                    spot_age_minutes=spot_age,
+                )
+            leg = "spot"
 
         atr = snapshot.indicators.atr_14
         price = snapshot.quote.last
@@ -204,6 +224,27 @@ class BtcLeadResidualStrategy(TradingAlgorithm):
             )
         beta_c = min(max(beta, p["beta_min"]), p["beta_max"])
 
+        spot_meta: dict[str, Any] = {}
+        if leg == "spot":
+            # The primary's prior close is its last completed session's.
+            anchor = max(primary)
+            spot_prior = (spot.get("close_1600_et") or {}).get(anchor)
+            if not spot_prior:
+                return self._abstain(
+                    "stale_reference",
+                    reference_ticker=ref.get("ticker"),
+                    reference_age_minutes=age,
+                    spot_anchor_missing=anchor,
+                )
+            ref_price, ref_prior = spot["price"], spot_prior
+            spot_meta = {
+                "spot_symbol": spot.get("symbol"),
+                "spot_price": round(float(ref_price), 4),
+                "spot_at_prior_close": round(float(ref_prior), 4),
+                "spot_anchor_date": anchor,
+                "spot_age_minutes": spot.get("age_minutes"),
+            }
+
         r_primary = price / prior - 1.0
         r_reference = float(ref_price) / float(ref_prior) - 1.0
         residual_atr = (r_primary - beta_c * r_reference) * price / atr
@@ -211,9 +252,11 @@ class BtcLeadResidualStrategy(TradingAlgorithm):
             "applicable": True,
             "resolution": "intraday",
             "reference_ticker": ref.get("ticker"),
-            "reference_price": round(float(ref_price), 4),
-            "reference_previous_close": round(float(ref_prior), 4),
+            "reference_leg": leg,
+            "reference_price": round(float(ref.get("price")), 4),
+            "reference_previous_close": round(float(ref.get("previous_close")), 4),
             "reference_age_minutes": age,
+            **spot_meta,
             "beta": round(beta, 3),
             "beta_clamped": round(beta_c, 3),
             "r2": round(r2, 3),

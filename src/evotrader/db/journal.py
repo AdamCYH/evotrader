@@ -1802,6 +1802,62 @@ class TradeJournal:
             latest.setdefault(str(row.get("ticker") or "").upper(), row)
         return latest
 
+    async def recent_stop_levels(self, ticker: str, since: str) -> tuple[float, ...]:
+        """Stop levels of *ticker* that already rested: placed since *since*, or still resting.
+
+        *since* is UTC ISO, compared with the row's own time. For the gate's
+        fidelity check: a stop cancelled to resize a lot is put back at its own
+        level, which is not the level a new approval carries.
+        """
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT DISTINCT stop_price FROM trades
+                WHERE action = 'STOP_LOSS' AND UPPER(ticker) = UPPER(?)
+                  AND stop_price IS NOT NULL AND stop_price > 0
+                  AND (order_status = 'PENDING' OR timestamp >= ?)
+                """,
+                (ticker, since),
+            )
+            return tuple(float(r["stop_price"]) for r in await cursor.fetchall())
+
+    async def stamp_fill_time(self, order_id: str, filled_at: str) -> int:
+        """Set the broker's fill time on an order's FILLED rows that have none.
+
+        For a fill the executor recorded itself, when the reconciliation will
+        never see the order (it is not pending). An exit's holding period is
+        worked out again from its lot's fill to this; nothing else changes.
+        Returns the rows stamped.
+        """
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "UPDATE trades SET filled_at = ? WHERE order_id = ? "
+                "AND order_status = 'FILLED' AND filled_at IS NULL",
+                (filled_at, order_id),
+            )
+            stamped = cursor.rowcount
+            if not stamped:
+                return 0
+            cursor = await conn.execute(
+                "SELECT id, related_trade_id, filled_at FROM trades WHERE order_id = ? "
+                "AND order_status = 'FILLED' AND related_trade_id IS NOT NULL "
+                f"AND action IN ({', '.join('?' for _ in _EXIT_ACTIONS)})",
+                (order_id, *_EXIT_ACTIONS),
+            )
+            for row in [dict(r) for r in await cursor.fetchall()]:
+                entry = await (
+                    await conn.execute(
+                        "SELECT filled_at, timestamp FROM trades WHERE id = ?",
+                        (row["related_trade_id"],),
+                    )
+                ).fetchone()
+                held = holding_seconds(dict(entry), row) if entry else None
+                if held is not None:
+                    await conn.execute(
+                        "UPDATE trades SET holding_period_s = ? WHERE id = ?", (held, row["id"])
+                    )
+        return stamped
+
     async def resolve_pending_order(self, order_id: str, terminal_status: str) -> None:
         """Mark a pending order as resolved (filled, rejected, cancelled, failed).
 

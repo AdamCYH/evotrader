@@ -438,6 +438,18 @@ class AssetConfig(BaseModel):
             "abstains."
         ),
     )
+    reference_spot_symbol: str | None = Field(
+        None,
+        description=(
+            "The reference's own underlying, priced around the clock (Yahoo Finance's "
+            "symbol, e.g. 'BTC-USD'), for the hours the reference fund does not trade. "
+            "When the fund's quote is older than 15 minutes (before the open, after "
+            "the close) its price now and at 16:00 ET of the primary's last completed "
+            "session go on the snapshot's ``reference`` as ``spot``, and the "
+            "btc_lead_residual channel reads that leg instead. Null (the default) "
+            "fetches nothing: outside the fund's hours the channel abstains."
+        ),
+    )
 
     known_events: list[KnownEvent] = Field(
         default_factory=list,

@@ -1403,6 +1403,39 @@ def create_execution_agent(
                     ),
                 }
 
+            # 0c. A protective stop rests at the level the risk manager approved
+            #     in this cycle: a hand-off that drops the level must not leave
+            #     the executor to make one up.
+            from evotrader.agents import tools as _tools_mod
+            from evotrader.callbacks.risk_gate import (
+                is_protective_sell_stop,
+                protective_stop_level_violation,
+            )
+
+            if tool.name == "place_equity_order" and is_protective_sell_stop(args):
+                symbol = str(args.get("symbol") or args.get("ticker") or "")
+                approved, atr, known = await _tools_mod.approved_stop_for(symbol)
+                level_violation = protective_stop_level_violation(args, approved, atr, known)
+                if level_violation:
+                    logger.error(
+                        "[RISK GATE] BLOCKED: %s — %s", gate.summarise_order(args), level_violation
+                    )
+                    return {
+                        "allowed": False,
+                        "action": "PROTECTIVE_STOP_NOT_APPROVED",
+                        "violations": [level_violation],
+                        "retryable": True,
+                        "error_class": "POLICY",
+                        "fix": f"Resubmit the identical order with stop_price {approved:g}.",
+                    }
+                if approved is None:
+                    logger.warning(
+                        "[RISK GATE] %s: no approved stop for %s in this cycle; its level "
+                        "is not checked.",
+                        gate.summarise_order(args),
+                        symbol or "the symbol",
+                    )
+
             # 1. Check constitution violations
             # The held quantity is what lets the gate tell a position-reducing
             # sell from a short sale. Without it every exit reads as a short.

@@ -909,7 +909,7 @@ async def _reference_reading(ticker: str, now: datetime) -> dict | None:
 
     stamp = _parse_when(quote.get("timestamp"))
     today = now.astimezone(ET).date().isoformat()
-    return {
+    reading = {
         "ticker": ticker.upper(),
         "price": price,
         "previous_close": prior,
@@ -922,6 +922,65 @@ async def _reference_reading(ticker: str, now: datetime) -> dict | None:
             for c in candles
             if str(c.get("timestamp") or "")[:10] < today and float(c.get("close") or 0) > 0
         ],
+    }
+    spot_symbol = _config.settings.asset.reference_spot_symbol if _config else None
+    age = reading["quote_age_minutes"]
+    if spot_symbol and age is not None and age > _SPOT_LEG_AFTER_MINUTES:
+        reading["spot"] = await _spot_reading(spot_symbol, now)
+    return reading
+
+
+#: A reference quote older than this has its spot leg fetched beside it: the
+#: btc_lead_residual channel's own default age limit.
+_SPOT_LEG_AFTER_MINUTES = 15.0
+#: Seconds the spot price may take before the snapshot goes without it.
+_SPOT_TIMEOUT_SECONDS = 20.0
+
+
+def _spot_bars(symbol: str) -> list[tuple[datetime, float]]:
+    """Five-minute closes of *symbol* over the last five days, from Yahoo Finance. Blocking."""
+    import yfinance as yf
+
+    frame = yf.Ticker(symbol).history(period="5d", interval="5m", auto_adjust=False)
+    bars = []
+    for stamp, row in frame.iterrows():
+        close = float(row.get("Close") or 0)
+        if close > 0:
+            t = stamp.to_pydatetime()
+            bars.append((t if t.tzinfo else t.replace(tzinfo=UTC), close))
+    return bars
+
+
+async def _spot_reading(symbol: str, now: datetime) -> dict | None:
+    """The spot price of the reference's underlying now, and at 16:00 ET of each recent day.
+
+    ``close_1600_et`` maps a US Eastern date to the close of its 15:55 bar (a
+    bar is stamped by its start), the price when the primary's regular session
+    ended. None when Yahoo Finance gives nothing in time; the channel then
+    abstains as before.
+    """
+    from evotrader.tools.market_hours import ET
+
+    try:
+        bars = await asyncio.wait_for(
+            asyncio.to_thread(_spot_bars, symbol), timeout=_SPOT_TIMEOUT_SECONDS
+        )
+    except Exception as e:
+        logger.warning("Spot %s unavailable: %s", symbol, e)
+        return None
+    if not bars:
+        return None
+    at_close: dict[str, float] = {}
+    for t, close in bars:
+        et = t.astimezone(ET)
+        if et.hour < 16:
+            at_close[et.date().isoformat()] = close  # the last bar before 16:00 wins
+    last_at, last = bars[-1]
+    return {
+        "symbol": symbol.upper(),
+        "price": last,
+        "age_minutes": round(max(0.0, (now - last_at).total_seconds()) / 60.0, 1),
+        "close_1600_et": at_close,
     }
 
 
@@ -3408,6 +3467,10 @@ async def record_trade(trade_json: str) -> dict:
     the stop and the take-profit are placed for those shares then, instead of
     an hour later. The response says ``plan_recorded``, or ``plan_problems``.
 
+    A fill (status FILLED) may carry ``filled_at``, the broker's fill time as
+    await_order_state returns it; without it the broker is asked for the
+    order, so the fill keeps the broker's time either way.
+
     Args:
         trade_json: JSON string of a TradeProposal object.
     """
@@ -3863,6 +3926,13 @@ async def record_trade(trade_json: str) -> dict:
         ),
         fill_source=fill_source,
     )
+
+    # ── The broker's fill time, on a fill recorded here ──
+    # The reconciliation stamps filled_at on the orders it resolves; a fill
+    # the executor records as FILLED never reaches it (it is not pending), and
+    # an exit's holding period then ran from when the row was written.
+    if resolved_order_status == "FILLED" and order_id and trade_ids and not option_id:
+        await _stamp_fill_time(str(order_id), data)
 
     # ── Populate ChromaDB trade_experiences for semantic recall ──
     # (once per trade: a re-record stored nothing new)
@@ -4591,6 +4661,101 @@ def broker_fill_time(order_data: dict) -> str | None:
         last = _at(order_data["last_transaction_at"])
         times = [last] if last is not None else []
     return max(times).astimezone(UTC).isoformat() if times else None
+
+
+def _iso_utc(value: object) -> str | None:
+    """*value* as a UTC ISO 8601 time, or None when it is not a time."""
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
+
+
+async def _stamp_fill_time(order_id: str, data: dict) -> str | None:
+    """Put the broker's fill time on a fill the executor recorded; the time, or None.
+
+    From the payload (``filled_at``, as await_order_state returns it, or the
+    broker order's own executions), else from the broker, asked for the order
+    by id. Never raises: a fill with no time keeps the time it was written.
+    """
+    from evotrader.db.journal import is_broker_order_id
+
+    if _journal is None or not is_broker_order_id(order_id):
+        return None
+    try:
+        filled_at = (
+            _iso_utc(data.get("filled_at")) if data.get("filled_at") else None
+        ) or broker_fill_time(data)
+        if filled_at is None:
+            account = await _agentic_account_number()
+            order = await _lookup_broker_order(account, order_id) if account else None
+            if order and str(order.get("state") or "").lower() == "filled":
+                filled_at = broker_fill_time(order)
+        if filled_at is None:
+            logger.info("Fill time of %s not known: it keeps the time it was recorded.", order_id)
+            return None
+        await _journal.stamp_fill_time(order_id, filled_at)
+        return filled_at
+    except Exception as e:
+        logger.warning("Fill time of %s not stamped: %s", order_id, e)
+        return None
+
+
+#: How far back a stop that already rested counts as a known level for the gate.
+_KNOWN_STOP_HOURS = 24
+
+
+async def approved_stop_for(symbol: str) -> tuple[float | None, float | None, tuple[float, ...]]:
+    """This cycle's approved stop for *symbol*, the cycle's ATR, and its stops that already rested.
+
+    For the gate's fidelity check (``risk_gate.protective_stop_level_violation``).
+    The approval is the risk manager's last review in THIS session, APPROVED or
+    MODIFIED, whose check was for *symbol*: a stop placed in a later cycle (one
+    raised to lock in a gain) is not held to an older approval. ``(None, None,
+    ())`` when there is no such approval or the record cannot be read; the gate
+    then checks nothing.
+    """
+    if _db is None or not _current_session_id or not symbol:
+        return None, None, ()
+    from evotrader.tools.risk_verdict import latest_risk_review
+
+    try:
+        review = await latest_risk_review(_db, session_id=_current_session_id)
+    except Exception as e:
+        logger.warning("Approved stop for %s unreadable: %s", symbol, e)
+        return None, None, ()
+    trade = (review or {}).get("trade") or {}
+    if (
+        not review
+        or review.get("verdict") not in ("APPROVED", "MODIFIED")
+        or str(trade.get("ticker") or "").upper() != symbol.upper()
+    ):
+        return None, None, ()
+    try:
+        approved = float(trade.get("stop_price") or 0) or None
+    except (TypeError, ValueError):
+        approved = None
+    if approved is None:
+        return None, None, ()
+    atr = None
+    known: tuple[float, ...] = ()
+    try:
+        async with _db.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT json_extract(indicators_json, '$.atr_14') AS atr FROM market_snapshots "
+                    "WHERE session_id = ? AND UPPER(ticker) = UPPER(?) ORDER BY timestamp DESC LIMIT 1",
+                    (_current_session_id, symbol),
+                )
+            ).fetchone()
+        atr = float(row["atr"]) if row and row["atr"] else None
+        if _journal is not None:
+            since = (datetime.now(UTC) - timedelta(hours=_KNOWN_STOP_HOURS)).isoformat()
+            known = await _journal.recent_stop_levels(symbol, since)
+    except Exception as e:
+        logger.warning("ATR or known stops for %s unreadable: %s", symbol, e)
+    return approved, atr, known
 
 
 #: The tools that cancel an order; an agent's call to one names the order.
@@ -5995,7 +6160,8 @@ async def await_order_state(
     with its last state when the time is up.
 
     Returns ``state``, ``filled`` (true once filled), ``average_price`` (the
-    fill price), ``cumulative_quantity`` (shares filled so far), ``quantity``,
+    fill price), ``cumulative_quantity`` (shares filled so far), ``filled_at``
+    (the broker's fill time, for record_trade), ``quantity``,
     ``elapsed_seconds`` and ``polls``. ``state`` is null when the broker never
     returned the order.
 
@@ -6038,6 +6204,7 @@ async def await_order_state(
         "filled": state == "filled",
         "average_price": order.get("average_price"),
         "cumulative_quantity": order.get("cumulative_quantity"),
+        "filled_at": broker_fill_time(order) if state == "filled" else None,
         "quantity": order.get("quantity"),
         "elapsed_seconds": round(elapsed, 1),
         "polls": polls,

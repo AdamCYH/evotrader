@@ -664,8 +664,16 @@ _COHORT_FLAGS = ("divergence_applied", "fast_dissent", "fast_dissent_applied")
 #: Kept as reported, not as flags: the fast pair's direction (-1, 0, +1),
 #: whether it agreed with the vote (None when either was neutral), price's side
 #: of EMA 9 alone (-1, 0, +1), and a vote-scaled channel's emission before its
-#: scale (``raw_value``: how deep the read was, which the scaled value hides).
-_COHORT_READS = ("fast_read", "fast_read_agrees_value", "ema9_side", "raw_value", "vote_scale")
+#: scale (``raw_value``: how deep the read was, which the scaled value hides),
+#: and which leg of its reference btc_lead_residual read (``fund`` or ``spot``).
+_COHORT_READS = (
+    "fast_read",
+    "fast_read_agrees_value",
+    "ema9_side",
+    "raw_value",
+    "vote_scale",
+    "reference_leg",
+)
 
 
 def channel_votes_from_sub_signals(sub_signals: Any) -> dict[str, dict[str, Any]]:

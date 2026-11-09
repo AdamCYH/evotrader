@@ -343,3 +343,129 @@ class TestThePlumbing:
             await tools.gather_market_data("XYZ")
         asked = [json.dumps(c) for c in calls if "REF" in json.dumps(c)]
         assert bool(asked) is configured
+
+
+# ── The spot leg: the hours the fund does not trade ────────────────────────
+#
+# Found by the evolution agent's code review: a fund quote is hours old before
+# the open and after the close, so the channel abstained at every such cycle,
+# the hour bitcoin's overnight move is already known. The snapshot's reference
+# can carry the underlying's spot price (``asset.reference_spot_symbol``), now
+# and at 16:00 ET of the primary's last completed session.
+
+PRE_MARKET = datetime(2026, 3, 4, 8, 30, tzinfo=ET)
+LAST_SESSION = "2026-03-03"
+
+
+def _with_spot(snapshot: MarketSnapshot, **spot) -> MarketSnapshot:
+    leg = {
+        "symbol": "SPOT-USD",
+        "price": 71_400.0,
+        "age_minutes": 3.0,
+        "close_1600_et": {LAST_SESSION: 70_000.0, "2026-03-04": 71_300.0},
+        **spot,
+    }
+    snapshot.model_extra["reference"]["spot"] = leg
+    return snapshot
+
+
+class TestTheSpotLeg:
+    def test_a_stale_fund_reads_the_spot_pair(self) -> None:
+        signal = CHANNEL.compute_signal(_with_spot(_snapshot(ref_age=900.0, at=PRE_MARKET)))
+        meta = signal.metadata
+        assert meta["applicable"] is True and meta["reference_leg"] == "spot"
+        assert meta["r_reference_pct"] == pytest.approx(2.0)
+        assert meta["spot_anchor_date"] == LAST_SESSION
+        assert meta["spot_at_prior_close"] == 70_000.0
+        # The primary is up 1 percent where about 2x the spot's 2 implies 4: it lags, a long.
+        assert meta["residual_atr"] < 0 and signal.value > 0 and meta["leg"] == "lagging"
+
+    def test_a_fresh_fund_is_read_as_before(self) -> None:
+        plain = CHANNEL.compute_signal(_snapshot())
+        with_spot = CHANNEL.compute_signal(_with_spot(_snapshot()))
+        assert with_spot.value == plain.value
+        assert with_spot.metadata["reference_leg"] == "fund"
+        assert "spot_price" not in with_spot.metadata
+
+    @pytest.mark.parametrize(
+        ("spot", "detail"),
+        [
+            ({"age_minutes": 30.0}, {"spot_age_minutes": 30.0}),
+            ({"price": None}, {}),
+            ({"close_1600_et": {}}, {}),
+            ({"close_1600_et": {"2026-03-02": 69_000.0}}, {"spot_anchor_missing": LAST_SESSION}),
+        ],
+    )
+    def test_without_a_usable_spot_pair_it_abstains(self, spot, detail) -> None:
+        signal = CHANNEL.compute_signal(_with_spot(_snapshot(ref_age=900.0, at=PRE_MARKET), **spot))
+        assert signal.value == 0.0 and signal.metadata["reason"] == "stale_reference"
+        for key, value in detail.items():
+            assert signal.metadata[key] == value
+
+    def test_without_a_spot_leg_it_abstains_as_before(self) -> None:
+        signal = CHANNEL.compute_signal(_snapshot(ref_age=900.0, at=PRE_MARKET))
+        assert signal.metadata["reason"] == "stale_reference"
+
+
+class TestTheSpotReading:
+    async def test_the_price_at_each_days_close(self, monkeypatch) -> None:
+        from evotrader.agents import tools
+
+        def bar(day: int, hour: int, minute: int, close: float):
+            return (datetime(2026, 3, day, hour, minute, tzinfo=ET).astimezone(UTC), close)
+
+        bars = [
+            bar(3, 15, 50, 69_900.0),
+            bar(3, 15, 55, 70_000.0),  # closes at 16:00
+            bar(3, 16, 0, 70_200.0),
+            bar(4, 8, 25, 71_400.0),
+        ]
+        monkeypatch.setattr(tools, "_spot_bars", lambda symbol: bars)
+        now = datetime(2026, 3, 4, 8, 30, tzinfo=ET).astimezone(UTC)
+        spot = await tools._spot_reading("spot-usd", now)
+        assert spot["symbol"] == "SPOT-USD" and spot["price"] == 71_400.0
+        assert spot["age_minutes"] == 5.0
+        assert spot["close_1600_et"][LAST_SESSION] == 70_000.0
+
+    async def test_nothing_from_the_provider_is_none(self, monkeypatch) -> None:
+        from evotrader.agents import tools
+
+        def broken(symbol):
+            raise RuntimeError("no data")
+
+        monkeypatch.setattr(tools, "_spot_bars", broken)
+        assert await tools._spot_reading("SPOT-USD", datetime.now(UTC)) is None
+
+    @pytest.mark.parametrize(("age", "fetched"), [(2.0, False), (900.0, True)])
+    async def test_fetched_only_when_the_fund_is_stale(self, monkeypatch, age, fetched) -> None:
+        from types import SimpleNamespace
+
+        from evotrader.agents import tools
+
+        now = datetime(2026, 3, 4, 13, 30, tzinfo=UTC)
+
+        async def quote(ticker, when):
+            return {
+                "last": 51.0,
+                "previous_close": 50.0,
+                "timestamp": (now - timedelta(minutes=age)).isoformat(),
+            }, []
+
+        async def candles(ticker, when):
+            return [{"timestamp": "2026-03-03T00:00:00Z", "close": 50.0}]
+
+        calls = []
+
+        async def spot(symbol, when):
+            calls.append(symbol)
+            return {"symbol": symbol, "price": 1.0}
+
+        config = SimpleNamespace(
+            settings=SimpleNamespace(asset=SimpleNamespace(reference_spot_symbol="SPOT-USD"))
+        )
+        monkeypatch.setattr(tools, "_config", config)
+        monkeypatch.setattr(tools, "_fetch_quote", quote)
+        monkeypatch.setattr(tools, "_fetch_daily_candles", candles)
+        monkeypatch.setattr(tools, "_spot_reading", spot)
+        reading = await tools._reference_reading("REF", now)
+        assert ("spot" in reading) is fetched and bool(calls) is fetched

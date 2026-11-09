@@ -242,6 +242,61 @@ def protective_stop_type_violation(order_args: dict[str, Any]) -> str | None:
     )
 
 
+#: How far a protective stop may sit from the approved level: the larger of a
+#: quarter ATR and 1 percent of the level (rounding, a tick, a re-quote).
+STOP_LEVEL_TOLERANCE_ATR = 0.25
+STOP_LEVEL_TOLERANCE_PCT = 0.01
+
+
+def stop_level_tolerance(level: float, atr: float | None = None) -> float:
+    """The distance from ``level`` a protective stop may sit and still be it."""
+    by_atr = STOP_LEVEL_TOLERANCE_ATR * atr if atr and atr > 0 else 0.0
+    return max(STOP_LEVEL_TOLERANCE_PCT * level, by_atr)
+
+
+def is_protective_sell_stop(order_args: dict[str, Any]) -> bool:
+    """An equity sell whose type is a stop: protection, since the account cannot sell short."""
+    if _is_option_order(order_args):
+        return False
+    otype = str(order_args.get("type") or order_args.get("order_type") or "").lower()
+    return otype in _PROTECTIVE_ORDER_TYPES and str(order_args.get("side") or "").lower() == "sell"
+
+
+def protective_stop_level_violation(
+    order_args: dict[str, Any],
+    approved_stop: float | None,
+    atr: float | None = None,
+    known_levels: tuple[float, ...] = (),
+) -> str | None:
+    """Refuse a protective sell stop placed away from the level the risk manager approved.
+
+    Returns a violation string, or ``None``. ``approved_stop`` is the stop of
+    this cycle's approved proposal for the same symbol; ``None`` (no approval
+    on record: a follow-up placement, a repair) checks nothing, since this is
+    fidelity to an approval, not a new limit. ``known_levels`` are stops of
+    the same symbol that already rested (one cancelled to resize a lot is put
+    back at its own level), which pass too. Within
+    :func:`stop_level_tolerance` of either counts as the level.
+    """
+    if approved_stop is None or approved_stop <= 0 or not is_protective_sell_stop(order_args):
+        return None
+    try:
+        placed = float(order_args.get("stop_price") or 0)
+    except (TypeError, ValueError):
+        return None
+    if placed <= 0:
+        return None
+    for level in (approved_stop, *known_levels):
+        if level and abs(placed - level) <= stop_level_tolerance(level, atr):
+            return None
+    tolerance = stop_level_tolerance(approved_stop, atr)
+    return (
+        f"Protective stop at {placed:.2f} is not the approved level {approved_stop:.2f} "
+        f"(within {tolerance:.2f}). Place the stop the risk manager approved; a level "
+        "the request did not carry is read back from the approval, never made up."
+    )
+
+
 def _is_option_order(order_args: dict[str, Any]) -> bool:
     """Detect if the order arguments describe an option trade."""
     return "legs" in order_args

@@ -41,6 +41,12 @@ asset:
   # and need not be in allowed_tickers. null = none: nothing is fetched and the
   # channel abstains. Pick one that trades in the same sessions.
   reference_ticker: null
+  # The reference's underlying, priced around the clock (a Yahoo Finance
+  # symbol, e.g. "BTC-USD"), read when the reference's own quote is over 15
+  # minutes old (before the open, after the close), so the channel can still
+  # read the primary against it then. null = none: outside the reference's
+  # hours the channel abstains.
+  reference_spot_symbol: null
   # What each permitted symbol is, shown to the agents beside the ticker.
   # `leverage` goes into their sizing guidance for a leveraged fund (-2.0 for a
   # fund that moves -2x the traded ticker).

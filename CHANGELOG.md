@@ -269,6 +269,19 @@ folder layout; each entry says what you need to do.
 
 ### Added — off until you switch it on
 
+- **The bitcoin channel reads spot outside the fund's hours.**
+  `btc_lead_residual` reads the primary against a reference fund, whose quote
+  is hours old before the open and after the close, so the channel abstained
+  (`stale_reference`) at every cycle then. `asset.reference_spot_symbol` (a
+  Yahoo Finance symbol such as `BTC-USD`; null by default) adds a spot leg:
+  when the fund's quote is over 15 minutes old, the snapshot's `reference`
+  gains `spot`, the underlying's price now and at 16:00 ET of each recent day
+  (one request, from five-minute bars), and the channel reads the reference's
+  return from it, from 16:00 ET of the primary's last completed session, the
+  moment its prior close was made. Beta still comes from the fund's daily
+  closes. The vote's `reference_leg` (`fund` or `spot`) is kept in the
+  calibration record, so the two legs can be scored apart. The channel stays
+  at weight 0 unless an algorithm version gives it one.
 - **The protection follow-up keeps watching after it protects.** It ended a
   plan at its first check, once the new shares were under a stop or a
   take-profit, so a protective order that ended after that check went unseen
@@ -488,6 +501,13 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The fill time of a fill the executor records.** The reconciliation keeps
+  the broker's fill time (`trades.filled_at`) on the orders it resolves, but a
+  fill the executor records as FILLED is never pending, so it had none, and an
+  exit's holding period ran from when its row was written. `await_order_state`
+  now returns `filled_at`, `record_trade` takes it, and when a FILLED broker
+  order arrives without it the broker is asked for the order by id. Rows
+  recorded before keep theirs.
 - **The holding period of an exit that filled later.** A stop or take-profit is
   journaled when it is placed, and its holding period was worked out from that,
   so one placed with its entry and filled days later read as held for seconds,
@@ -800,6 +820,19 @@ folder layout; each entry says what you need to do.
 
 ### Changed
 
+- **A protective stop rests at the approved level.** The executor's order gate
+  checked a protective stop's type and time in force but not its level, so
+  when the request it was handed carried no stop, it placed one at a level of
+  its own, far tighter than the approved stop, and nothing compared the two.
+  The gate now reads the risk manager's last review in the same cycle
+  (approved or modified, for the same symbol) and refuses a protective sell
+  stop more than the larger of a quarter ATR and 1 percent away from its stop
+  (`PROTECTIVE_STOP_NOT_APPROVED`, retryable: resubmit with the approved stop
+  price). A stop that already rested for the symbol in the last day, or still
+  rests (one cancelled to resize a lot and put back), passes at its own level.
+  With no approval in the cycle (a follow-up placement, a repair, a stop
+  raised in a later cycle) the level is not checked, and the log says so: this
+  holds the executor to an approval, it is not a new limit.
 - **A sell `stop_limit` is refused.** A stop-limit order becomes a limit order
   at its trigger, so when price gaps through it, it rests below the market and
   sells nothing, where a stop_market order sells at the open. The executor's
