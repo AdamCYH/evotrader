@@ -347,6 +347,18 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **`mean_reversion` can guard its vote instead of its reading
+  (`trend_guard_on_vote`).** The trend guard multiplies a reading against a
+  confirmed moving-average stack by `trend_guard_decay`, and the composite
+  then divides the reading by the channel's vote scale and clips it to ±1.
+  With a scale of 0.1, for example, any guarded reading of 0.1 or more still
+  made a full vote, so on the deeper readings the guard was written for it
+  changed nothing. With `trend_guard_on_vote: true` the reading is left whole
+  and the composite multiplies the vote by the guard after the clip
+  (`pre_guard_vote` in the channel's metadata), so a guarded reading is at
+  most that share of a vote. Off by default; an algorithm version turns it on
+  in its `mean_reversion` parameters.
+
 - **`composite.event_dates_every_source`.** The event context's one source
   was the broker's market-wide earnings calendar, which can list nothing for
   the traded stock in the days before its report while the broker's own
@@ -500,6 +512,23 @@ folder layout; each entry says what you need to do.
   no-stack scale otherwise) instead of vetoing it; `leg` records which.
 
 ### Fixed
+
+- **A sale that fills after the executor's turn closes its lot once.** The
+  executor can record a sale PENDING and end its turn before the order fills.
+  The next position check then found the broker holding fewer shares than the
+  journal, and it counted the pending sale by its lot's direction, as shares
+  coming in rather than going out, so the gap looked unexplained and it wrote a
+  sync row closing the lot. When the sale's own fill was recorded, the lot was
+  closed twice and both rows booked a loss. Now the check asks the broker about
+  every pending exit (sale, stop, take-profit) before it measures, and a filled
+  one closes its lot through its own order, at its own price; a pending exit
+  counts as shares going out; and while an exit that could explain the gap
+  cannot be looked up, no sync row is written (status `DRIFT_DEFERRED`) for up
+  to a day after it was placed. A filled exit that finds a sync row already
+  closed the same shares marks that row `DUPLICATE`, with no P&L and a reason
+  naming the row that stayed. A journal written before this can hold such a
+  pair: look for a `fill_source = 'sync'` CLOSE on a lot that a broker order
+  also closed, and mark the sync row `DUPLICATE` with `realized_pnl` NULL.
 
 - **The fill time of a fill the executor records.** The reconciliation keeps
   the broker's fill time (`trades.filled_at`) on the orders it resolves, but a

@@ -62,6 +62,14 @@ class MeanReversionStrategy(TradingAlgorithm):
         # version) or "location" (the regime classifier's reading). See
         # algorithms.units.stack_context.
         stack_mode: str = "slow",
+        # Where the trend guard applies. False (every existing version): to
+        # the emission, before the composite's vote scale divides and clips
+        # it, so under a scale any guarded read deep enough still clips to a
+        # full vote. True: the emission is left whole and the composite
+        # multiplies the VOTE by the guard after the clip
+        # (``trend_guard_vote_factor``), so a guarded read is at most that
+        # factor of a vote.
+        trend_guard_on_vote: bool = False,
         version: str = "v001",
     ) -> None:
         self._rsi_period = rsi_period
@@ -77,6 +85,7 @@ class MeanReversionStrategy(TradingAlgorithm):
         self._trend_fade_decay = trend_fade_decay
         self._trend_guard_decay = trend_guard_decay
         self._stack_mode = stack_mode
+        self._trend_guard_on_vote = bool(trend_guard_on_vote)
         self._version = version
 
     @property
@@ -196,7 +205,8 @@ class MeanReversionStrategy(TradingAlgorithm):
             if (trend_stack == "bear" and signal_value > 0) or (
                 trend_stack == "bull" and signal_value < 0
             ):
-                signal_value *= guard_decay
+                if not self._trend_guard_on_vote:
+                    signal_value *= guard_decay
                 trend_guard_applied = True
 
         # Build metadata by component name — immune to ordering shifts.
@@ -209,6 +219,10 @@ class MeanReversionStrategy(TradingAlgorithm):
         # rather than indistinguishable from a build that lacks the guard.
         metadata["trend_guard_applied"] = trend_guard_applied
         metadata["trend_guard_decay"] = guard_decay
+        if self._trend_guard_on_vote:
+            metadata["trend_guard_on_vote"] = True
+            if trend_guard_applied:
+                metadata["trend_guard_vote_factor"] = guard_decay
         metadata["trend_stack"] = trend_stack
         metadata["stack_mode"] = self._stack_mode
         metadata["sma_cross"] = sma_cross(ind)
@@ -235,6 +249,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "trend_fade_decay": self._trend_fade_decay,
             "trend_guard_decay": self._trend_guard_decay,
             "stack_mode": self._stack_mode,
+            "trend_guard_on_vote": self._trend_guard_on_vote,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -252,6 +267,7 @@ class MeanReversionStrategy(TradingAlgorithm):
             "trend_fade_decay",
             "trend_guard_decay",
             "stack_mode",
+            "trend_guard_on_vote",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])

@@ -479,6 +479,15 @@ class CompositeStrategy(TradingAlgorithm):
                 # A read below the vote threshold stays a non-vote.
                 metadata = {**metadata, "vote_scale": scale, "raw_value": sig.value}
                 value = max(-1.0, min(1.0, value / scale))
+            vote_factor = metadata.get("trend_guard_vote_factor")
+            if vote_factor is not None and abs(value) >= SIGNAL_EPSILON:
+                # A channel that guards its VOTE (mean_reversion with
+                # trend_guard_on_vote) asks for the factor here, after the
+                # scale and the clip: applied to the emission before them,
+                # under a 0.1 scale any guarded read of 0.1 or more still
+                # clipped to a full vote.
+                metadata = {**metadata, "pre_guard_vote": value}
+                value *= float(vote_factor)
             weighted_sig = AlgoSignal(
                 name=sig.name,
                 value=value,

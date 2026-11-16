@@ -37,8 +37,10 @@ SYNC_ALGO_VERSION = "system_sync"
 # Reusable SQL predicate (append to WHERE clauses).
 EXCLUDE_RECONCILIATION_SQL = " AND regime != 'reconciliation' AND algo_version != 'system_sync' "
 
-#: A row a data repair marked as a second copy of another row's broker order.
-#: It records nothing that happened: no position, no P&L, no status updates.
+#: A row a data repair marked as a second copy of another row's broker order,
+#: or a sync close a filled exit order showed to be the same sale
+#: (``_supersede_sync_closes``). It records nothing that happened: no
+#: position, no P&L, no status updates.
 DUPLICATE_STATUS = "DUPLICATE"
 
 #: The actions that sell (or cover) shares of a lot.
@@ -1998,6 +2000,100 @@ class TradeJournal:
             row = await cursor.fetchone()
         return float(row["pending"] or 0.0) if row else 0.0
 
+    async def _supersede_sync_closes(self, order_id: str) -> list[int]:
+        """Mark a sync close DUPLICATE when its lot's own exit order fills.
+
+        A position check that finds the broker short of the journal closes
+        lots with sync rows (``fill_source`` 'sync'). When the shortfall was a
+        pending exit that filled before the check heard of it, the sync row and
+        the exit close the same shares: the lot reads closed twice, and both
+        rows book a loss. The broker's order
+        is the fact and the sync row the stand-in, so when a filled exit leaves
+        its lot closed more than it held, the sync closes on that lot written
+        after the exit are marked ``DUPLICATE_STATUS`` with no P&L, newest
+        first, while the excess covers each whole row. A sync row the excess
+        does not fully cover is left as it is, with a warning.
+
+        Runs before the exit is spread over lots (``_spread_filled_exits``),
+        which would otherwise move the order's shares to another lot because
+        the sync row had emptied this one. Returns the rows marked.
+        """
+        marked: list[int] = []
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id, quantity, related_trade_id, timestamp FROM trades "
+                "WHERE order_id = ? AND order_status = 'FILLED' "
+                "AND action IN ('CLOSE', 'STOP_LOSS', 'TAKE_PROFIT') "
+                "AND related_trade_id IS NOT NULL ORDER BY id",
+                (order_id,),
+            )
+            exits = [dict(r) for r in await cursor.fetchall()]
+        for exit_row in exits:
+            lot_id = int(exit_row["related_trade_id"])
+            async with self._db.connection() as conn:
+                cursor = await conn.execute(
+                    """
+                    SELECT t.quantity AS lot_qty, COALESCE((
+                        SELECT SUM(c.quantity) FROM trades c
+                        WHERE c.related_trade_id = t.id
+                          AND c.action IN ('CLOSE', 'STOP_LOSS', 'TAKE_PROFIT')
+                          AND COALESCE(c.order_status, 'FILLED') = 'FILLED'
+                    ), 0) AS closed
+                    FROM trades t WHERE t.id = ?
+                    """,
+                    (lot_id,),
+                )
+                lot = await cursor.fetchone()
+                cursor = await conn.execute(
+                    "SELECT id, quantity FROM trades WHERE related_trade_id = ? "
+                    "AND fill_source = 'sync' AND action = 'CLOSE' "
+                    "AND COALESCE(order_status, 'FILLED') = 'FILLED' AND timestamp >= ? "
+                    "ORDER BY id DESC",
+                    (lot_id, exit_row["timestamp"]),
+                )
+                sync_rows = [dict(r) for r in await cursor.fetchall()]
+            if lot is None or not sync_rows:
+                continue
+            excess = float(lot["closed"] or 0.0) - float(lot["lot_qty"] or 0.0)
+            for sync in sync_rows:
+                if excess <= 1e-4:
+                    break
+                qty = float(sync["quantity"] or 0.0)
+                if qty > excess + 1e-4:
+                    logger.warning(
+                        "Lot #%s is closed %.4f shares beyond what it held after order %s "
+                        "filled; sync row #%s (%.4f shares) is larger than that and is left "
+                        "as it is. The position check measures the lot.",
+                        lot_id,
+                        excess,
+                        order_id,
+                        sync["id"],
+                        qty,
+                    )
+                    break
+                reason = (
+                    f"DUPLICATE_OF_{exit_row['id']}: a position sync closed lot #{lot_id} "
+                    f"while order {order_id}'s own exit was pending; the order filled"
+                )
+                async with self._db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE trades SET order_status = ?, realized_pnl = NULL, "
+                        "broker_status_reason = ? WHERE id = ?",
+                        (DUPLICATE_STATUS, reason, sync["id"]),
+                    )
+                excess -= qty
+                marked.append(int(sync["id"]))
+                logger.warning(
+                    "Sync close #%s on lot #%s marked %s: order %s (row #%s) closed the "
+                    "same shares.",
+                    sync["id"],
+                    lot_id,
+                    DUPLICATE_STATUS,
+                    order_id,
+                    exit_row["id"],
+                )
+        return marked
+
     async def _spread_filled_exits(self, order_id: str) -> list[int]:
         """Match each filled exit row of one order to the lots it sold (see below)."""
         async with self._db.connection() as conn:
@@ -2297,6 +2393,10 @@ class TradeJournal:
             # rows used to get one here, so a resting stop that filled closed
             # its lot with no P&L on record, and the loss was in no total.
             if new_status.upper() == "FILLED":
+                try:
+                    await self._supersede_sync_closes(order_id)
+                except Exception as ex:
+                    logger.warning("Could not check sync closes for order %s: %s", order_id, ex)
                 try:
                     await self._spread_filled_exits(order_id)
                 except Exception as ex:

@@ -8,11 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from evotrader.db.journal import TradeJournal
+from evotrader.db.journal import TradeJournal, is_broker_order_id
 from evotrader.models.mcp import McpEquityQuote, McpOptionQuote, McpPosition
 from evotrader.models.trade import (
     OrderResult,
@@ -74,6 +74,41 @@ def root_cause(exc: BaseException) -> BaseException:
         else:
             break
     return exc
+
+
+_EXIT_ACTIONS = frozenset({"CLOSE", "STOP_LOSS", "TAKE_PROFIT"})
+
+
+def signed_pending_quantity(row: dict[str, Any]) -> float:
+    """What a PENDING row will do to the position once it fills, signed.
+
+    An exit carries its lot's direction, so the direction alone reads a
+    pending sale of a long lot as shares coming in. Once, a whole lot's sale
+    whose order had filled was counted against the very drift it caused, the
+    drift read as unexplained, and a sync row closed the lot a second time. An entry adds
+    to its side; an exit takes away from it.
+    """
+    quantity = float(row.get("quantity") or 0.0)
+    if str(row.get("action") or "").upper() in _EXIT_ACTIONS:
+        quantity = -quantity
+    return quantity if row.get("direction") != "SHORT" else -quantity
+
+
+#: How long a pending exit whose broker state cannot be read holds off a sync
+#: row. Past it the order is taken as one the broker no longer knows (purged,
+#: mistyped), and the drift is resolved as before rather than never.
+_DEFER_UNKNOWN_EXIT = timedelta(hours=24)
+
+
+def _placed_recently(row: dict[str, Any], now: datetime | None = None) -> bool:
+    """Whether *row* was written within ``_DEFER_UNKNOWN_EXIT`` of *now*."""
+    try:
+        placed = datetime.fromisoformat(str(row.get("timestamp")))
+    except (TypeError, ValueError):
+        return False
+    if placed.tzinfo is None:
+        placed = placed.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - placed < _DEFER_UNKNOWN_EXIT
 
 
 class ReconciliationService:
@@ -444,6 +479,48 @@ class ReconciliationService:
             )
         return voided
 
+    async def _promote_filled_pending_exits(
+        self, ticker: str, pending_rows: list[dict[str, Any]], broker_cost: float
+    ) -> tuple[set[str], list[dict[str, Any]]]:
+        """Promote each pending exit whose order the broker reports filled.
+
+        The mirror of ``_void_unfilled_close_rows`` for the PENDING side. An
+        exit the executor recorded PENDING can fill after its turn ends, and
+        the next position check used to find the broker short of the journal
+        and close the lot with a sync row, beside the order that had closed it.
+        A resting stop and its take-profit are both pending exits, so when one
+        of them fills the pending rows together never match the drift either.
+        So the broker is asked about every pending exit first; a filled one
+        closes its lot through its own order, at its own price.
+
+        Returns the promoted order ids, and the pending exits whose state could
+        not be read (the caller does not write a sync row against those).
+        """
+        promoted: set[str] = set()
+        unknown: list[dict[str, Any]] = []
+        asked: dict[str, str | None] = {}
+        for row in pending_rows:
+            if str(row.get("action") or "").upper() not in _EXIT_ACTIONS:
+                continue
+            order_id = str(row.get("order_id") or "")
+            if not is_broker_order_id(order_id):
+                continue
+            if order_id not in asked:
+                asked[order_id] = await self.get_order_state(order_id)
+            state = asked[order_id]
+            if state is None:
+                unknown.append(row)
+            elif state == "filled" and order_id not in promoted:
+                await self._promote_pending(order_id, broker_cost, whole_position=False)
+                promoted.add(order_id)
+                logger.info(
+                    "[RECONCILE] Pending exit %s on %s filled at the broker: promoted "
+                    "through its own order before the position was measured.",
+                    order_id,
+                    ticker,
+                )
+        return promoted, unknown
+
     async def _reconcile_one_ticker(
         self,
         ticker: str,
@@ -533,20 +610,49 @@ class ReconciliationService:
         # Track reconciliation status & mismatches
         mismatches = []
         promoted_pending = 0
+        deferred = False
         # The cost-basis checks ride along on every result below: a flag for a
         # person, never a correction (see _verify_fill_prices).
         checks: dict[str, Any] = {}
 
         # Check Equity Drift
         equity_diff = broker_equity_qty - db_equity_qty
+        unknown_exits: list[dict[str, Any]] = []
+        if abs(equity_diff) >= 1e-4 and not self._dry_run:
+            # A pending exit the broker has already filled closes its lot
+            # through its own order. Asked first, so the drift it explains
+            # never reaches the sync path (see _promote_filled_pending_exits).
+            promoted, unknown_exits = await self._promote_filled_pending_exits(
+                _t, pending_equity, broker_equity_cost
+            )
+            if promoted:
+                promoted_pending += len(promoted)
+                pending_equity = [pt for pt in pending_equity if pt.get("order_id") not in promoted]
+                try:
+                    refreshed = await self._journal.get_open_trades()
+                    ticker_db_trades = [
+                        t for t in refreshed if (t.get("ticker") or "").upper() == _t
+                    ]
+                    db_equity_trades = [t for t in ticker_db_trades if t.get("option_id") is None]
+                    db_equity_qty = sum(
+                        float(t.get("remaining_quantity", 0.0))
+                        if t.get("direction") == "LONG"
+                        else -float(t.get("remaining_quantity", 0.0))
+                        for t in db_equity_trades
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[RECONCILE] Could not re-read open trades after promoting: %s", e
+                    )
+                equity_diff = broker_equity_qty - db_equity_qty
         if abs(equity_diff) >= 1e-4:
             # Check if PENDING equity trades explain the drift
-            pending_eq_qty = sum(
-                float(pt.get("quantity", 0))
-                if pt.get("direction") == "LONG"
-                else -float(pt.get("quantity", 0))
-                for pt in pending_equity
-            )
+            pending_eq_qty = sum(signed_pending_quantity(pt) for pt in pending_equity)
+            deferring = [
+                pt
+                for pt in unknown_exits
+                if signed_pending_quantity(pt) * equity_diff > 0 and _placed_recently(pt)
+            ]
             if abs(equity_diff - pending_eq_qty) < 1e-4 and pending_equity:
                 # Drift is fully explained by PENDING trades — promote them
                 for pt in pending_equity:
@@ -560,6 +666,21 @@ class ReconciliationService:
                             "[RECONCILE] Promoted PENDING equity trade (order=%s) to FILLED",
                             order_id,
                         )
+            elif deferring:
+                # An exit in the drift's direction whose order the broker could
+                # not be asked about: it may be the fill that explains the drift.
+                # A sync row now could close its lot a second time, so measure
+                # again next time instead.
+                deferred = True
+                logger.warning(
+                    "[RECONCILE] %s: broker %.4f vs journal %.4f, and the state of "
+                    "pending exit order(s) %s is unknown. No sync row written; the "
+                    "next check measures again.",
+                    _t,
+                    broker_equity_qty,
+                    db_equity_qty,
+                    ", ".join(str(pt.get("order_id")) for pt in deferring),
+                )
             else:
                 mismatches.append(
                     {
@@ -598,12 +719,7 @@ class ReconciliationService:
             if abs(opt_diff) >= 1e-4:
                 # Check if PENDING trades for this option explain the drift
                 pending_for_opt = pending_by_option_id.get(opt_id, [])
-                pending_opt_qty = sum(
-                    float(pt.get("quantity", 0))
-                    if pt.get("direction") == "LONG"
-                    else -float(pt.get("quantity", 0))
-                    for pt in pending_for_opt
-                )
+                pending_opt_qty = sum(signed_pending_quantity(pt) for pt in pending_for_opt)
                 if abs(opt_diff - pending_opt_qty) < 1e-4 and pending_for_opt:
                     # Drift is fully explained by PENDING trades — promote them
                     for pt in pending_for_opt:
@@ -657,6 +773,19 @@ class ReconciliationService:
             len([m for m in mismatches if m["asset_type"] == "OPTION"]),
             promoted_pending,
         )
+
+        if deferred and not mismatches:
+            return {
+                "status": "DRIFT_DEFERRED",
+                "broker_qty": broker_equity_qty,
+                "db_qty": db_equity_qty,
+                "ticker": ticker,
+                "message": (
+                    "Drift found while a pending exit's broker state is unknown; "
+                    "measured again at the next check, nothing written."
+                ),
+                **checks,
+            }
 
         # If no mismatches, we are in sync!
         if not mismatches:
