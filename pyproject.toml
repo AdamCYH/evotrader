@@ -56,6 +56,10 @@ dependencies = [
     "fastapi>=0.100",
     "uvicorn>=0.20",
     "stock-analysis",
+    # Market data and Yahoo news (the backtester, the universe and the news
+    # helper all read it). 1.8.0 is the floor: Yahoo moved its news endpoint,
+    # and older versions report every news request as "Yahoo is down".
+    "yfinance>=1.8.0",
 ]
 
 [project.optional-dependencies]
