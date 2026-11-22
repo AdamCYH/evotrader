@@ -665,13 +665,17 @@ _COHORT_FLAGS = ("divergence_applied", "fast_dissent", "fast_dissent_applied")
 #: whether it agreed with the vote (None when either was neutral), price's side
 #: of EMA 9 alone (-1, 0, +1), and a vote-scaled channel's emission before its
 #: scale (``raw_value``: how deep the read was, which the scaled value hides),
-#: and which leg of its reference btc_lead_residual read (``fund`` or ``spot``).
+#: the factor a channel that guards its vote asked the composite to apply after
+#: the scale (``trend_guard_vote_factor``: with it, ``raw_value`` is the read
+#: before the guard), and which leg of its reference btc_lead_residual read
+#: (``fund`` or ``spot``).
 _COHORT_READS = (
     "fast_read",
     "fast_read_agrees_value",
     "ema9_side",
     "raw_value",
     "vote_scale",
+    "trend_guard_vote_factor",
     "reference_leg",
 )
 

@@ -210,10 +210,21 @@ def _depth_of(vote: dict, scale: float | None) -> tuple[float | None, bool]:
     the emission is that value times the scale, unless the value was clipped
     at +/-1, when only its lower bound (the scale) is known. A version with no
     scale for the channel voted its emission as it was.
+
+    The depth is the read AFTER the channel's trend guard, wherever the guard
+    was applied. mean_reversion guards its emission by default, so the guard
+    is inside ``raw_value``; with ``trend_guard_on_vote`` it leaves the
+    emission whole and the composite multiplies the vote by
+    ``trend_guard_vote_factor`` after the scale, so ``raw_value`` is the read
+    before the guard and is multiplied by the factor here. One read then lands
+    in one bucket whichever way its algorithm version applied the guard.
     """
     try:
         if vote.get("raw_value") is not None:
-            return abs(float(vote["raw_value"])), True
+            depth = abs(float(vote["raw_value"]))
+            if vote.get("trend_guard_vote_factor") is not None:
+                depth *= float(vote["trend_guard_vote_factor"])
+            return depth, True
         value = abs(float(vote.get("value") or 0.0))
     except (TypeError, ValueError):
         return None, False
@@ -320,8 +331,11 @@ def _depth_report(
     return {
         "note": (
             "Depth is the channel's emission before its vote scale (absolute), split at "
-            f"{DEPTH_EDGES[0]:g} and {DEPTH_EDGES[1]:g}. 'channel' scores its own votes, "
-            "'author' the calls it authored. Read each bucket with its days."
+            f"{DEPTH_EDGES[0]:g} and {DEPTH_EDGES[1]:g}, after mean_reversion's trend "
+            "guard (a read guarded on the vote, trend_guard_vote_factor present, is "
+            "bucketed at its guarded depth, as when the guard was applied to the "
+            "emission). 'channel' scores its own votes, 'author' the calls it authored. "
+            "Read each bucket with its days."
         ),
         "channels": channels,
     }

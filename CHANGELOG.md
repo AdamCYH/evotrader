@@ -513,6 +513,17 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **The calibration's depth for a read guarded on its vote.**
+  `get_signal_calibration`'s `by_depth` buckets a vote-scaled channel by how
+  deep its read was before the scale (`raw_value`). mean_reversion's trend
+  guard normally multiplies that read, so a guarded read's `raw_value` is
+  already guarded; with `trend_guard_on_vote` the read is left whole and the
+  guard applies to the vote, so the same market read landed in a deeper
+  bucket, and a table spanning both kinds of algorithm version mixed them.
+  The attribution now keeps `trend_guard_vote_factor` with each vote, and a
+  read that carries it is bucketed at `raw_value` times the factor: one read,
+  one bucket, whichever way its version applied the guard. Rows recorded
+  before this carry no factor and are bucketed as before.
 - **A sale that fills after the executor's turn closes its lot once.** The
   executor can record a sale PENDING and end its turn before the order fills.
   The next position check then found the broker holding fewer shares than the
