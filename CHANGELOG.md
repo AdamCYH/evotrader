@@ -513,6 +513,34 @@ folder layout; each entry says what you need to do.
 
 ### Fixed
 
+- **A sale is never recorded as a purchase.** `record_trade` remapped a SELL
+  or TRIM to an exit but trusted a literal `action: OPEN`, so a resting
+  take-profit the executor recorded as OPEN LONG became a lot the account
+  never bought. Once it filled, the journal held twice its shares more than
+  the broker, the protection check reported shares uncovered that did not
+  exist, and the day's position check closed the surplus at the day's price:
+  a loss that never happened, with the sale's own result never booked. The
+  broker's side of the order now decides, wherever the journal meets the
+  broker (`db/order_side.py`):
+  - `record_trade` asks the broker for an equity order's side when it records
+    an explicit LONG with a broker id: a sell recorded as OPEN is recorded as
+    the TAKE_PROFIT (a gtc limit), STOP_LOSS (a stop) or CLOSE it is, against
+    the oldest open lot; a buy recorded as an exit is an OPEN. The row's
+    reason starts `SIDE_CORRECTED`, the response says `side_corrected`, and a
+    sale keeps no entry plan (`plan_recorded: false`). When the broker cannot
+    be asked the row is recorded as given and the response says
+    `side_unverified: true`.
+  - The pending-order check reads each pending order's side from the broker's
+    answer it already fetches, and relabels a contradicting PENDING row
+    before it fills (`TradeJournal.correct_pending_side`); a wrong row whose
+    order already has a right one is a second record of it and is marked
+    DUPLICATE. Its result lists them under `side_corrected`.
+  - The position check no longer closes a journal surplus that a sale
+    explains: when an open lot's broker order is a sell it writes no sync row
+    and returns `SIDE_MISMATCH` with the lot ids (`side_mismatch`), for a
+    repair. Each order's side is asked once.
+  Rows already filled are not rewritten; a journal that has one needs a
+  one-off repair.
 - **The calibration's depth for a read guarded on its vote.**
   `get_signal_calibration`'s `by_depth` buckets a vote-scaled channel by how
   deep its read was before the scale (`raw_value`). mean_reversion's trend

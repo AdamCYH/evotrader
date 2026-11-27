@@ -3571,6 +3571,59 @@ async def record_trade(trade_json: str) -> dict:
             except ValueError:
                 pass
 
+    # ── Phase 2b: the broker's side outranks the label ───────────────
+    # A sell recorded as action OPEN became a lot the account never bought:
+    # the journal then held more shares than the broker, the protection check
+    # reported shares uncovered that did not exist, and the day's position
+    # check closed the surplus at the day's price — a loss that never
+    # happened, while the sale's own result went unbooked. The aliases above
+    # remap SELL/TRIM; a literal OPEN was trusted. So for an equity row with a
+    # broker id and an explicit LONG, the order's own side decides
+    # (db/order_side.py). When the broker cannot be asked, the row is recorded
+    # as given and the response says side_unverified.
+    side_corrected: str | None = None
+    side_unverified = False
+    side_known: str | None = None
+    side_order_id = data.get("order_id") or data.get("id")
+    if (
+        side_order_id
+        and not data.get("option_id")
+        and direction == TradeDirection.LONG
+        and action
+        in (TradeAction.OPEN, TradeAction.CLOSE, TradeAction.TAKE_PROFIT, TradeAction.STOP_LOSS)
+        and (_mcp_toolset is not None or _sim_proxy is not None)
+    ):
+        from evotrader.db.journal import is_broker_order_id
+        from evotrader.db.order_side import action_for_side, side_note
+
+        if is_broker_order_id(side_order_id):
+            side = side_known = await _broker_order_side(str(side_order_id))
+            if side is None:
+                side_unverified = True
+                logger.warning(
+                    "record_trade: the broker's side of order %s (%s %s) could not be read; "
+                    "recorded as given.",
+                    side_order_id,
+                    action.value,
+                    ticker,
+                )
+            else:
+                implied = action_for_side(
+                    action.value, direction.value, side, order_type_raw, data.get("time_in_force")
+                )
+                if implied:
+                    side_corrected = side_note(action.value, implied, side)
+                    logger.warning(
+                        "record_trade: %s order %s recorded as %s LONG is a broker %s: "
+                        "recording it as %s.",
+                        ticker,
+                        side_order_id,
+                        action.value,
+                        side,
+                        implied,
+                    )
+                    action = TradeAction(implied)
+
     # ── Phase 3: Infer missing action/direction from context ─────────
     # Only runs when Phase 1/2 left gaps. Uses open positions to decide
     # whether a buy/sell is opening or closing.
@@ -3922,10 +3975,21 @@ async def record_trade(trade_json: str) -> dict:
         order_status=resolved_order_status,
         order_id=str(order_id) if order_id else None,
         broker_status_reason=_compose_broker_reason(
-            broker_reason, resolved_order_status, downgrade_reason
+            broker_reason,
+            resolved_order_status,
+            "; ".join(p for p in (side_corrected, downgrade_reason) if p) or None,
         ),
         fill_source=fill_source,
     )
+
+    # An earlier record of this order that the broker could not check then
+    # (side_unverified) is set right now that it can: relabelled, or marked
+    # DUPLICATE when this row already records the order.
+    if side_known and side_order_id and trade_ids:
+        try:
+            await _journal.correct_pending_side(str(side_order_id), side_known)
+        except Exception as e:
+            logger.warning("Could not check the other rows of order %s: %s", side_order_id, e)
 
     # ── The broker's fill time, on a fill recorded here ──
     # The reconciliation stamps filled_at on the orders it resolves; a fill
@@ -4036,6 +4100,16 @@ async def record_trade(trade_json: str) -> dict:
         "order_status": resolved_order_status,
         "coverage_after": coverage_after,
     }
+    if side_corrected:
+        response["side_corrected"] = side_corrected
+    if side_unverified:
+        response["side_unverified"] = True
+    if side_corrected and data.get("protection_plan") is not None:
+        # A sale is not an entry: the plan it carried protects nothing.
+        response["plan_recorded"] = False
+        response["plan_problems"] = [
+            "not kept: the order is a sale (the broker's side), not an entry"
+        ]
     # ── The entry's protection, kept as data (tools.protection_followup) ──
     # The stop and take-profit approved with an entry lived only in prose, so
     # an entry that filled after its cycle ended stayed unprotected until the
@@ -5281,13 +5355,18 @@ async def sync_open_orders_from_broker(
     }
 
 
-async def _lookup_broker_order(account_number: str, order_id: str) -> dict | None:
+async def _lookup_broker_order(
+    account_number: str,
+    order_id: str,
+    tools: tuple[str, ...] = ("get_option_orders", "get_equity_orders"),
+) -> dict | None:
     """The broker's record of one order, asked for by id; None unless an answer names it.
 
     An answer about another order is not this order's: one that carries an
-    id must carry this one.
+    id must carry this one. *tools* are asked in order (an equity order needs
+    only ``get_equity_orders``).
     """
-    for tool_name in ("get_option_orders", "get_equity_orders"):
+    for tool_name in tools:
         try:
             raw = await _call_mcp_tool(
                 tool_name, {"account_number": account_number, "order_id": order_id}
@@ -5307,6 +5386,25 @@ async def _lookup_broker_order(account_number: str, order_id: str) -> dict | Non
         if orders and not _order_id_of(orders[0]):
             return orders[0]  # an answer without ids, to a question about one order
     return None
+
+
+async def _broker_order_side(order_id: str) -> str | None:
+    """The broker's side (``"buy"``/``"sell"``) of one equity order; None if unknown.
+
+    For record_trade's side check. Never raises: a failed read is "unknown",
+    and the row is recorded as given.
+    """
+    from evotrader.db.order_side import broker_side
+
+    try:
+        account = await _agentic_account_number()
+        if not account:
+            return None
+        order = await _lookup_broker_order(account, order_id, tools=("get_equity_orders",))
+    except Exception as e:
+        logger.warning("Could not read the side of order %s: %s", order_id, e)
+        return None
+    return broker_side(order)
 
 
 def _set_unconfirmed(orders: dict[str, str]) -> None:
@@ -5426,6 +5524,7 @@ async def reconcile_pending_orders() -> dict:
     reconciled: list[dict] = []
     unconfirmed: dict[str, str] = {}
     unverified: list[dict] = []
+    side_corrected: list[dict] = []
     errors: list[str] = []
 
     for row in pending_rows:
@@ -5498,6 +5597,22 @@ async def reconcile_pending_orders() -> dict:
                     errors.append(f"Failed to mark missing order {order_id} as CANCELLED: {e}")
                     logger.error("[RECONCILE] Failed to mark missing order %s: %s", order_id, e)
                 continue
+
+            # The broker's side outranks the recorded action (record_trade's
+            # Phase 2b, for an order it could not check then): a pending sale
+            # recorded as an entry is relabelled before it fills.
+            if not is_option:
+                from evotrader.db.order_side import broker_side
+
+                relabelled = await _journal.correct_pending_side(order_id, broker_side(order_data))
+                if relabelled:
+                    side_corrected.append(
+                        {
+                            "order_id": order_id,
+                            "trade_ids": relabelled,
+                            "side": order_data.get("side"),
+                        }
+                    )
 
             state = str(order_data.get("state", "") or "").lower()
 
@@ -5641,7 +5756,7 @@ async def reconcile_pending_orders() -> dict:
             unconfirmed.setdefault(order_id, f"the check failed: {e}")
 
     # Invalidate positions cache since state may have changed
-    if reconciled:
+    if reconciled or side_corrected:
         global _open_positions_cache
         _open_positions_cache = None
     _set_unconfirmed(unconfirmed)
@@ -5652,6 +5767,7 @@ async def reconcile_pending_orders() -> dict:
         "reconciled_count": len(reconciled),
         "still_pending_count": max(0, still_pending),
         "unverified": unverified or None,
+        **({"side_corrected": side_corrected} if side_corrected else {}),
         "order_book": order_book,
         "protective_coverage": await _coverage(),
         "errors": errors if errors else None,

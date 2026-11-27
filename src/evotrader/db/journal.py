@@ -2474,6 +2474,92 @@ class TradeJournal:
             logger.warning("update_order_status: no trade found with order_id=%s", order_id)
         return rows_affected
 
+    async def correct_pending_side(self, order_id: str, side: str | None) -> list[int]:
+        """Relabel this order's PENDING equity rows whose action contradicts *side*.
+
+        The pending-order check reads each pending order from the broker; the
+        order's side (``buy``/``sell``) is in that answer. A sale the executor
+        recorded as an entry (OPEN LONG) is relabelled as the exit it is
+        (``order_side.action_for_side``) against the oldest open lot, before it
+        fills, so the fill is matched to lots the normal way; a buy recorded
+        as an exit becomes an OPEN. When the order already has a row with the
+        right action (the executor recorded it again, correctly), the wrong row
+        is a second record of the same order and is marked DUPLICATE instead:
+        relabelled, the one sale would close its shares twice. Returns the ids
+        changed.
+        """
+        from evotrader.db.order_side import EXIT_ACTIONS, action_for_side, side_note
+
+        if side not in ("buy", "sell") or not order_id:
+            return []
+        async with self._db.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id, ticker, action, direction, order_type, time_in_force, "
+                "broker_status_reason FROM trades WHERE order_id = ? "
+                "AND order_status = 'PENDING' AND option_id IS NULL",
+                (order_id,),
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+        changes: list[tuple[int, str, int | None, str]] = []
+        duplicates: list[tuple[int, str]] = []
+        for row in rows:
+            implied = action_for_side(
+                row["action"], row["direction"], side, row["order_type"], row["time_in_force"]
+            )
+            if not implied:
+                continue
+            twin = [r for r in await self.rows_for_order(order_id, implied) if r["id"] != row["id"]]
+            if twin:
+                note = (
+                    f"{DUPLICATE_STATUS}_OF_{twin[0]['id']}: recorded as {row['action']}, "
+                    f"the broker's order is a {side} and row #{twin[0]['id']} records it"
+                )
+                reason = "; ".join(p for p in (row.get("broker_status_reason"), note) if p)
+                duplicates.append((int(row["id"]), reason))
+                continue
+            lot_id = None
+            if implied in EXIT_ACTIONS:
+                lots = [
+                    t
+                    for t in await self.get_open_trades()
+                    if t.get("ticker") == row["ticker"]
+                    and t.get("option_id") is None
+                    and t.get("direction") == "LONG"
+                ]
+                lot_id = int(lots[0]["id"]) if lots else None
+            note = side_note(str(row["action"]), implied, side)
+            reason = "; ".join(p for p in (row.get("broker_status_reason"), note) if p)
+            changes.append((int(row["id"]), implied, lot_id, reason))
+        if not changes and not duplicates:
+            return []
+        async with self._db.transaction() as conn:
+            for trade_id, implied, lot_id, reason in changes:
+                await conn.execute(
+                    "UPDATE trades SET action = ?, related_trade_id = ?, "
+                    "broker_status_reason = ? WHERE id = ?",
+                    (implied, lot_id, reason, trade_id),
+                )
+            for trade_id, reason in duplicates:
+                await conn.execute(
+                    "UPDATE trades SET order_status = ?, realized_pnl = NULL, "
+                    "broker_status_reason = ? WHERE id = ?",
+                    (DUPLICATE_STATUS, reason, trade_id),
+                )
+        for trade_id, reason in duplicates:
+            logger.warning("Order %s: pending row #%s marked %s.", order_id, trade_id, reason)
+        for trade_id, implied, lot_id, _ in changes:
+            logger.warning(
+                "Order %s is a broker %s: pending row #%s relabelled %s%s.",
+                order_id,
+                side,
+                trade_id,
+                implied,
+                f" against lot #{lot_id}"
+                if lot_id
+                else (" (no open lot)" if implied != "OPEN" else ""),
+            )
+        return [c[0] for c in changes] + [d[0] for d in duplicates]
+
     async def get_trades_by_order_status(self, status: str, limit: int = 100) -> list[dict]:  # type: ignore[type-arg]
         """Query trades by their order lifecycle status.
 

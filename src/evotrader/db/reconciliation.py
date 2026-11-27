@@ -125,6 +125,8 @@ class ReconciliationService:
         self._journal = journal
         self._mcp_toolset = mcp_toolset
         self._dry_run = dry_run
+        # The broker's side of an order never changes: asked once per order.
+        self._order_sides: dict[str, str] = {}
 
     async def get_broker_positions(self, account_number: str | None = None) -> list[dict[str, Any]]:
         """Fetch all stock and option positions from the broker.
@@ -405,6 +407,34 @@ class ReconciliationService:
             return None
         return price if price > 0 else None
 
+    async def _lots_that_are_sales(self, lots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Open LONG equity lots whose broker order is a sell (order_side.py).
+
+        A lot with no broker id, or whose order cannot be read, is not judged.
+        """
+        from evotrader.db.journal import is_broker_order_id
+        from evotrader.db.order_side import broker_side
+
+        found: list[dict[str, Any]] = []
+        for lot in lots:
+            order_id = str(lot.get("order_id") or "")
+            if (
+                lot.get("direction") != "LONG"
+                or lot.get("option_id")
+                or lot.get("action") not in (None, "OPEN")
+                or order_id.startswith("sync_")
+                or not is_broker_order_id(order_id)
+            ):
+                continue
+            side = self._order_sides.get(order_id)
+            if side is None:
+                side = broker_side(await self.get_order(order_id))
+                if side:
+                    self._order_sides[order_id] = side
+            if side == "sell":
+                found.append(lot)
+        return found
+
     async def _void_unfilled_close_rows(
         self, ticker: str, db_equity_trades: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -618,6 +648,7 @@ class ReconciliationService:
         # Check Equity Drift
         equity_diff = broker_equity_qty - db_equity_qty
         unknown_exits: list[dict[str, Any]] = []
+        side_mismatch: dict[str, Any] | None = None
         if abs(equity_diff) >= 1e-4 and not self._dry_run:
             # A pending exit the broker has already filled closes its lot
             # through its own order. Asked first, so the drift it explains
@@ -682,16 +713,41 @@ class ReconciliationService:
                     ", ".join(str(pt.get("order_id")) for pt in deferring),
                 )
             else:
-                mismatches.append(
-                    {
-                        "asset_type": "EQUITY",
-                        "option_id": None,
+                # A surplus a sale explains is a labelling error, not a
+                # position: a sale recorded as an entry counts its shares in
+                # instead of out. Closing that surplus at the day's price books
+                # a loss that never happened and leaves the sale unbooked.
+                # Such a lot is reported for repair instead.
+                sold = (
+                    await self._lots_that_are_sales(db_equity_trades)
+                    if equity_diff < 0 and not self._dry_run
+                    else []
+                )
+                if sold:
+                    side_mismatch = {
                         "broker_qty": broker_equity_qty,
                         "db_qty": db_equity_qty,
-                        "broker_cost": broker_equity_cost,
-                        "trades": db_equity_trades,
+                        "trade_ids": [int(t["id"]) for t in sold],
+                        "message": (
+                            "Open lot(s) "
+                            + ", ".join(f"#{t['id']}" for t in sold)
+                            + " are broker sells recorded as entries: no sync row written. "
+                            "The journal needs a repair (relabel the sale and re-match the "
+                            "later exits); until then it counts those shares in."
+                        ),
                     }
-                )
+                    logger.warning("[RECONCILE] %s: %s", _t, side_mismatch["message"])
+                else:
+                    mismatches.append(
+                        {
+                            "asset_type": "EQUITY",
+                            "option_id": None,
+                            "broker_qty": broker_equity_qty,
+                            "db_qty": db_equity_qty,
+                            "broker_cost": broker_equity_cost,
+                            "trades": db_equity_trades,
+                        }
+                    )
         else:
             # Quantities match — verify fill-price integrity.
             # A journaled fill_price sourced from a limit price can differ
@@ -786,6 +842,18 @@ class ReconciliationService:
                 ),
                 **checks,
             }
+
+        if side_mismatch is not None:
+            checks["side_mismatch"] = side_mismatch
+            if not mismatches:
+                return {
+                    "status": "SIDE_MISMATCH",
+                    "broker_qty": broker_equity_qty,
+                    "db_qty": db_equity_qty,
+                    "ticker": ticker,
+                    "message": side_mismatch["message"],
+                    **checks,
+                }
 
         # If no mismatches, we are in sync!
         if not mismatches:
