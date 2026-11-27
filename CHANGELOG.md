@@ -347,6 +347,25 @@ folder layout; each entry says what you need to do.
 
 ### Added — off unless an algorithm version sets them
 
+- **Three `swing_failure_reversal` gates for a capitulation day.** On a day
+  that gaps down and flushes, the channel stayed silent through the rebound
+  for reasons of its gates, not the market. All three are off by default;
+  unset, every reading is unchanged.
+  - `min_stretch_ema9_atr`: the stretch was measured only from the session
+    VWAP, which on such a day sits near the low by construction. With this
+    set, the gate also passes when EMA9 is at least that many ATRs above the
+    flush low; votes record `stretch_basis` (`vwap` or `ema9`) and
+    `stretch_ema9_atr`. The vote's strength is still measured from the VWAP
+    stretch.
+  - `min_window_bars`: `lookback_bars` was both the memory and the warm-up,
+    so with 5-minute bars a window long enough to keep a two- or three-hour
+    reversal in view kept the channel silent until about noon. With this set,
+    the channel reads from that many bars on, over the bars there are, and
+    `lookback_bars` stays the memory. Must lie between 3 and `lookback_bars`.
+  - `min_reclaim_quality`: a close a hair over the flush bar's high read
+    `confirmed_reversal` at half strength, and the reason is what the strategy
+    agent reads. Below this floor the channel votes 0 with reason
+    `reclaim_too_shallow`. Must lie between 0 and 1.
 - **`mean_reversion` can guard its vote instead of its reading
   (`trend_guard_on_vote`).** The trend guard multiplies a reading against a
   confirmed moving-average stack by `trend_guard_decay`, and the composite

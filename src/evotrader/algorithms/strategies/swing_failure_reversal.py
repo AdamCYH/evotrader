@@ -47,6 +47,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
     - Reclaim quality scales signal by how cleanly price reclaimed
     - The stretch's magnitude is measured from ``stretch_anchor_atr``
       (default: the gate itself, ``min_stretch_atr``)
+    - Optional, off by default: a second stretch gate measured from EMA9
+      (``min_stretch_ema9_atr``), a first read before the window has filled
+      (``min_window_bars``) and a floor on the reclaim (``min_reclaim_quality``)
     """
 
     def __init__(
@@ -61,6 +64,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         base_strength: float = 0.8,
         require_current_session_anchor: bool = True,
         stretch_anchor_atr: float | None = None,
+        min_stretch_ema9_atr: float | None = None,
+        min_window_bars: int | None = None,
+        min_reclaim_quality: float = 0.0,
         version: str = "v001",
     ) -> None:
         self._lookback_bars = lookback_bars
@@ -73,6 +79,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         self._base_strength = base_strength
         self._require_current_session_anchor = require_current_session_anchor
         self._stretch_anchor_atr = stretch_anchor_atr
+        self._min_stretch_ema9_atr = min_stretch_ema9_atr
+        self._min_window_bars = min_window_bars
+        self._min_reclaim_quality = min_reclaim_quality
         self._version = version
 
     @property
@@ -117,7 +126,12 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
         atr = snapshot.indicators.atr_14
 
         # ── 1. ABSTAIN GUARDS ──
-        if not candles or len(candles) < self._lookback_bars or atr is None or atr <= 0:
+        # The bars needed before the first read. By default the whole window,
+        # so with 5-minute bars a 3-hour memory (lookback 36) would keep the
+        # channel silent until noon. min_window_bars reads from that many bars
+        # on, over the bars there are, and keeps lookback_bars as the memory.
+        need = self._lookback_bars if self._min_window_bars is None else self._min_window_bars
+        if not candles or len(candles) < need or atr is None or atr <= 0:
             meta: dict[str, Any] = {"applicable": False, "reason": "insufficient_data"}
             # Early in a session in progress the lookback has not filled yet;
             # the channel is on duty and the composite counts it in the
@@ -126,9 +140,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 atr is not None
                 and atr > 0
                 and snapshot.indicators.vwap_anchor == "current_session"
-                and warming_up(candles or [], self._lookback_bars)
+                and warming_up(candles or [], need)
             ):
-                meta.update(warming_up=True, bars=len(candles), bars_needed=self._lookback_bars)
+                meta.update(warming_up=True, bars=len(candles), bars_needed=need)
             return AlgoSignal(name=self.name, value=0.0, weight=1.0, metadata=meta)
 
         if vwap is None:
@@ -159,7 +173,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 )
 
         # ── 2. LOCATE THE FLUSH ──
-        window = candles[-self._lookback_bars :]
+        window = candles[-min(self._lookback_bars, len(candles)) :]
         flush_idx = 0
         flush_low = window[0].low
         for i, bar in enumerate(window):
@@ -199,8 +213,31 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             )
 
         # ── 3. REQUIRE THE STRETCH TO HAVE BEEN REAL ──
+        # Measured from the session VWAP. On a day that gaps down and flushes,
+        # the VWAP sits near the low by construction, so this reads shallow
+        # however far the day has fallen. min_stretch_ema9_atr adds a second
+        # measure from EMA9 (a daily-scale anchor): the gate passes on either,
+        # and stretch_basis says which.
         stretch_atr = (vwap - flush_low) / atr
-        if stretch_atr < self._min_stretch_atr:
+        ema9 = snapshot.indicators.ema_9
+        stretch_ema9_atr = (ema9 - flush_low) / atr if ema9 else None
+        if stretch_atr >= self._min_stretch_atr:
+            stretch_basis = "vwap"
+        elif (
+            self._min_stretch_ema9_atr is not None
+            and stretch_ema9_atr is not None
+            and stretch_ema9_atr >= self._min_stretch_ema9_atr
+        ):
+            stretch_basis = "ema9"
+        else:
+            stretch_basis = None
+        stretch_meta: dict[str, Any] = {"stretch_atr": round(stretch_atr, 4)}
+        if self._min_stretch_ema9_atr is not None:
+            stretch_meta["stretch_ema9_atr"] = (
+                round(stretch_ema9_atr, 4) if stretch_ema9_atr is not None else None
+            )
+            stretch_meta["stretch_basis"] = stretch_basis
+        if stretch_basis is None:
             return AlgoSignal(
                 name=self.name,
                 value=0.0,
@@ -208,8 +245,13 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 metadata={
                     "applicable": True,
                     "reason": "stretch_too_shallow",
-                    "stretch_atr": round(stretch_atr, 4),
+                    **stretch_meta,
                     "min_stretch_atr": self._min_stretch_atr,
+                    **(
+                        {"min_stretch_ema9_atr": self._min_stretch_ema9_atr}
+                        if self._min_stretch_ema9_atr is not None
+                        else {}
+                    ),
                     "flush_low": round(flush_low, 4),
                     "bars_since_flush": bars_since_flush,
                 },
@@ -249,7 +291,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                     "flush_low": round(flush_low, 4),
                     "flush_high": round(flush_high, 4),
                     "bars_since_flush": bars_since_flush,
-                    "stretch_atr": round(stretch_atr, 4),
+                    **stretch_meta,
                     "higher_low": higher_low,
                     "reclaimed": reclaimed,
                     "no_new_low": no_new_low,
@@ -292,6 +334,27 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             ),
         )
 
+        # A close a hair over the flush bar's high reads as a reversal at half
+        # loudness (0.5 + 0.5 x quality), and the reason is what the strategy
+        # agent reads. min_reclaim_quality keeps a token reclaim from saying
+        # confirmed_reversal.
+        if reclaim_quality < self._min_reclaim_quality:
+            return AlgoSignal(
+                name=self.name,
+                value=0.0,
+                weight=1.0,
+                metadata={
+                    "applicable": True,
+                    "reason": "reclaim_too_shallow",
+                    "reclaim_quality": round(reclaim_quality, 4),
+                    "min_reclaim_quality": self._min_reclaim_quality,
+                    "flush_low": round(flush_low, 4),
+                    "flush_high": round(flush_high, 4),
+                    "bars_since_flush": bars_since_flush,
+                    **stretch_meta,
+                },
+            )
+
         # Final value: long-only (clamped to [0, 1])
         value = max(
             0.0,
@@ -313,7 +376,7 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 "bars_since_flush": bars_since_flush,
                 "bars_since_reclaim": bars_since_flush - reclaim_offset,
                 "bars_since_confirmed": max(0, bars_since_confirmed),
-                "stretch_atr": round(stretch_atr, 4),
+                **stretch_meta,
                 "higher_low": higher_low,
                 "reclaimed": reclaimed,
                 "reclaim_quality": round(reclaim_quality, 4),
@@ -336,6 +399,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             "base_strength": self._base_strength,
             "require_current_session_anchor": self._require_current_session_anchor,
             "stretch_anchor_atr": self._stretch_anchor_atr,
+            "min_stretch_ema9_atr": self._min_stretch_ema9_atr,
+            "min_window_bars": self._min_window_bars,
+            "min_reclaim_quality": self._min_reclaim_quality,
         }
 
     def set_parameters(self, params: dict[str, Any]) -> None:
@@ -350,6 +416,9 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
             "base_strength",
             "require_current_session_anchor",
             "stretch_anchor_atr",
+            "min_stretch_ema9_atr",
+            "min_window_bars",
+            "min_reclaim_quality",
         ):
             if key in params:
                 setattr(self, f"_{key}", params[key])
@@ -400,4 +469,17 @@ class SwingFailureReversalStrategy(TradingAlgorithm):
                 errors.append(
                     f"stretch_anchor_atr must be in [0, min_stretch_atr ({gate})], got {anchor}"
                 )
+        if params.get("min_stretch_ema9_atr") is not None:
+            e9 = float(params["min_stretch_ema9_atr"])
+            if e9 <= 0:
+                errors.append(f"min_stretch_ema9_atr must be positive, got {e9}")
+        if params.get("min_window_bars") is not None:
+            mw = int(params["min_window_bars"])
+            lb = int(params.get("lookback_bars", self._lookback_bars))
+            if not (3 <= mw <= lb):
+                errors.append(f"min_window_bars must be in [3, lookback_bars ({lb})], got {mw}")
+        if "min_reclaim_quality" in params:
+            mq = float(params["min_reclaim_quality"])
+            if not (0.0 <= mq <= 1.0):
+                errors.append(f"min_reclaim_quality must be in [0, 1], got {mq}")
         return errors
